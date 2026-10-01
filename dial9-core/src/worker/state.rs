@@ -150,7 +150,13 @@ mod tests {
             stage: Some("Hanging"),
         };
         assert_eq!(wait_for(&rec, want.clone()), want);
+        let handle = rec.handle().clone();
+        // The drain timeout drops the hung `initialize()`.
         rec.graceful_shutdown(Duration::from_millis(10));
+        assert_eq!(
+            handle.pipeline_status().unwrap().worker(),
+            WorkerState::Stopped
+        );
     }
 
     #[test]
