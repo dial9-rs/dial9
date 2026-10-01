@@ -308,7 +308,7 @@ impl From<std::io::Error> for ProcessErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PipelineStatus {
-    pub(crate) stages: Vec<&'static str>,
+    pub(crate) stages: std::sync::Arc<[&'static str]>,
     pub(crate) worker: WorkerState,
 }
 
@@ -319,8 +319,8 @@ impl PipelineStatus {
     }
 
     /// What the pipeline worker is doing.
-    pub fn worker(&self) -> WorkerState {
-        self.worker.clone()
+    pub fn worker(&self) -> &WorkerState {
+        &self.worker
     }
 }
 

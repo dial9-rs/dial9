@@ -375,7 +375,7 @@ crate::shuttle_test! {
              run_background_task_inner's top-level catch_unwind, not \
              propagate to its caller"
         );
-        assert_eq!(state.status().worker(), crate::pipeline::WorkerState::Stopped);
+        assert_eq!(state.status().worker(), &crate::pipeline::WorkerState::Stopped);
     }
 }
 
@@ -388,7 +388,7 @@ crate::shuttle_test! {
         use crate::pipeline::WorkerState;
         use state::PipelineState;
 
-        fn rank(state: WorkerState) -> u8 {
+        fn rank(state: &WorkerState) -> u8 {
             match state {
                 WorkerState::Initializing { .. } => 0,
                 WorkerState::Running => 1,
@@ -427,7 +427,7 @@ crate::shuttle_test! {
             .expect("worker holds the shutdown receiver until it exits");
         worker.join().unwrap();
         reader.join().unwrap();
-        assert_eq!(state.status().worker(), WorkerState::Stopped);
+        assert_eq!(state.status().worker(), &WorkerState::Stopped);
         assert_eq!(state.status().stages(), ["CountingProcessor"]);
     }
 }
