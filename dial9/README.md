@@ -233,7 +233,7 @@ Sampling::builder()
 
 See the [standalone guide](../dial9-sampling/README.md) and the [application entry-point example](examples/manual_sampling.rs).
 
-## Checking telemetry is live
+## Checking telemetry at startup
 
 `handle.smoke_tester()` builds a check you can run from a startup probe or a
 deploy gate. Build it once and keep it; the report says whether the handle
