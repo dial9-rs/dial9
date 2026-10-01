@@ -233,6 +233,26 @@ Sampling::builder()
 
 See the [standalone guide](../dial9-sampling/README.md) and the [application entry-point example](examples/manual_sampling.rs).
 
+## Checking telemetry is live
+
+`handle.smoke_tester()` builds a check you can run from a startup probe or a
+deploy gate. The report says whether the handle reaches a live recorder:
+
+```rust,no_run
+use dial9::Dial9HandleTokioExt;
+
+# async fn startup_probe() {
+let report = dial9::Dial9Handle::current().smoke_tester().build().run().await;
+if !report.is_healthy() {
+    eprintln!("dial9 smoke test failed:\n{report}");
+}
+# }
+```
+
+A handle with telemetry turned off (`recorder_disabled()`, or `DIAL9_ENABLED`
+off with `recorder_from_env`) reports `recording` as failed: skip the check when
+your app turns telemetry off on purpose.
+
 ## Why dial9?
 
 It can be hard to understand application performance and behavior in async code. dial9 tracks Tokio, operating system and application events to create a detailed, nanosecond-by-nanosecond trace of your application behavior that you can analyze. On Linux, you can capture CPU profiles and kernel scheduling events, so you can see not just _that_ a task was delayed but _what code_ was running on the worker instead.
