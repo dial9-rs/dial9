@@ -17,6 +17,7 @@ pub(super) trait SamplerBackend: Send {
     fn drain_samples(&mut self) -> Vec<Sample>;
     fn disable(&self);
     fn enable(&self);
+    #[cfg(feature = "cpu-profiling")]
     fn is_ctimer(&self) -> bool {
         false
     }
