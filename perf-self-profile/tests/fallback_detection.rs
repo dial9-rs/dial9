@@ -154,3 +154,38 @@ fn auto_backend_reports_ctimer_when_perf_event_open_blocked() {
     assert!(libc::WIFEXITED(status), "child did not exit normally");
     assert_eq!(libc::WEXITSTATUS(status), 0, "Auto did not report ctimer");
 }
+
+/// Run `child` in a forked process and assert it returned `true`.
+#[cfg(feature = "cpu-profiling")]
+fn in_fork(what: &str, child: impl FnOnce() -> bool) {
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork failed");
+    if pid == 0 {
+        let ok = child();
+        unsafe { libc::_exit(!ok as i32) };
+    }
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert!(libc::WIFEXITED(status), "child did not exit normally");
+    assert_eq!(libc::WEXITSTATUS(status), 0, "{what}");
+}
+
+/// Another profiler's ctimer doesn't make a perf profiler report ctimer.
+/// Forked: ctimer is process-wide.
+#[cfg(feature = "cpu-profiling")]
+#[test]
+fn auto_reports_perf_while_another_profiler_runs_ctimer() {
+    use dial9_perf_self_profile::{ActiveCpuBackend, CpuProfiler, CpuProfilingConfig};
+
+    if !perf_event_open_works() {
+        eprintln!("skipping: perf_event_open blocked in this env");
+        return;
+    }
+    in_fork("Auto on perf reported ctimer", || {
+        let Ok(_ctimer) = CpuProfiler::start(CpuProfilingConfig::with_ctimer_backend()) else {
+            return false;
+        };
+        CpuProfiler::start(CpuProfilingConfig::default())
+            .is_ok_and(|p| p.effective_backend() == ActiveCpuBackend::Perf)
+    });
+}
