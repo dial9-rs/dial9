@@ -14,6 +14,7 @@ pub(crate) use dial9_core::encoder;
 pub(crate) mod events;
 pub(crate) mod format;
 pub(crate) mod recorder;
+pub mod smoke_test;
 pub mod task_dump_config;
 pub(crate) mod task_metadata;
 pub(crate) use dial9_core::buffer;
