@@ -128,13 +128,16 @@ describe("buildApiUrl", () => {
     expect(q(buildApiUrl("refine", AGG_SCOPE, EMPTY_VIEW, ORIGIN)).has("max_files")).toBe(false);
   });
 
-  it("attribute filters are repeated key=value params", () => {
+  it("a comparison is folded-only, selected-type scoped, and carries its filters", () => {
     const p = q(
       buildApiUrl(
-        "replace",
+        "comparison",
         AGG_SCOPE,
         {
           ...EMPTY_VIEW,
+          selectedUid: "abc",
+          bandMinNs: 1_000,
+          bandMaxNs: 5_000,
           attrFilters: [
             { key: "status_code", value: "500" },
             { key: "route", value: "/a=b" },
@@ -143,8 +146,25 @@ describe("buildApiUrl", () => {
         ORIGIN,
       ),
     );
+    expect(p.get("folded_only")).toBe("true");
+    expect(p.get("span_type_uid")).toBe("abc");
+    expect(p.has("min_span_ns")).toBe(false);
+    expect(p.has("max_span_ns")).toBe(false);
     // The value may itself contain '='; only the FIRST one separates.
     expect(p.getAll("attr")).toEqual(["status_code=500", "route=/a=b"]);
+  });
+
+  it("catalog and exemplar streams stay unfiltered", () => {
+    const filtered = {
+      ...EMPTY_VIEW,
+      selectedUid: "abc",
+      attrFilters: [{ key: "status_code", value: "500" }],
+    };
+    for (const mode of ["replace", "refine", "exemplars"] as const) {
+      const p = q(buildApiUrl(mode, AGG_SCOPE, filtered, ORIGIN));
+      expect(p.has("attr"), mode).toBe(false);
+      expect(p.has("folded_only"), mode).toBe(false);
+    }
   });
 
   // The single-transport rule: the role is header-only (restored via

@@ -105,6 +105,11 @@ pub struct SpanStatsParams {
     /// The UI patches those fields into its existing full catalog snapshot.
     #[serde(default)]
     pub exemplars_only: bool,
+    /// Read only already-folded spans part-files without doing new fold work.
+    /// Unlike `exemplars_only`, this preserves full histograms and composition;
+    /// the Span Explorer uses it for a selected-type attribute comparison.
+    #[serde(default)]
+    pub folded_only: bool,
 }
 
 /// A parsed attribute equality filter: an instance matches when it has an
@@ -574,7 +579,7 @@ pub async fn get_span_stats(
             resolved,
             state.fold_limits.clone(),
             accum,
-            params.exemplars_only,
+            params.exemplars_only || params.folded_only,
             stream_metrics,
         ),
         ux.map(|Extension(ux)| ux),

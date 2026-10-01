@@ -109,16 +109,16 @@ function compositionCell(ex: Exemplar): TemplateResult {
   >`;
 }
 
-/** One attribute value: click to toggle a whole-view filter, plus a copy button. */
+/** One attribute value: click to toggle its histogram comparison, plus copy. */
 function attrCell(ex: Exemplar, key: string, ctx: ExemplarTableCtx): TemplateResult {
   const value = exemplarAttrValue(ex, key);
   if (value == null) return html`<td class="attr-cell"><span class="muted">—</span></td>`;
   const active = hasAttrFilter(ctx.attrFilters, key, value);
   const title = ctx.rawMode
-    ? "Attribute filtering requires the aggregation backend"
+    ? "Histogram comparison requires the aggregation backend"
     : active
-      ? "Remove this filter"
-      : `Filter to ${key}=${value}`;
+      ? "Remove this histogram comparison"
+      : `Compare histogram for ${key}=${value}`;
   const classes = `attr-val${active ? " active" : ""}${ctx.rawMode ? " inert" : ""}`;
   return html`<td class="attr-cell">
     <span
