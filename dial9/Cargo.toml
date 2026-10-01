@@ -204,6 +204,10 @@ name = "conditionally_enable"
 required-features = ["tokio"]
 
 [[example]]
+name = "smoke_test"
+required-features = ["tokio"]
+
+[[example]]
 name = "custom_pipeline"
 required-features = ["tokio"]
 
