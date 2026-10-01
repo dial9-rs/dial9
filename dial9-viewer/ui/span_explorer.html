@@ -83,25 +83,18 @@
      exemplar tables); the row itself is not clickable. */
   .exemplars { padding: 8px 0; font-size: 0.8em; color: #aaa; flex-shrink: 0; overflow-x: auto; }
   .exemplars .label { font-weight: 600; margin-bottom: 4px; }
-  /* Column show/hide menu. */
-  .exemplars .col-menu { position: relative; display: inline-block; margin-bottom: 6px; }
-  .exemplars .col-menu-btn { background: #21262d; color: #adbac7; border: 1px solid #30363d;
-    border-radius: 3px; padding: 2px 8px; font-size: 1em; cursor: pointer; }
-  .exemplars .col-menu-btn:hover { border-color: #388bfd; }
-  .exemplars .col-menu-list { position: absolute; z-index: 20; top: 100%; left: 0; margin-top: 2px;
-    background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 4px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.4); min-width: 160px; max-height: 260px; overflow-y: auto; }
-  .exemplars .col-menu-item { display: flex; align-items: center; gap: 6px; padding: 3px 6px;
-    color: #c9d1d9; cursor: pointer; border-radius: 3px; white-space: nowrap; }
-  .exemplars .col-menu-item:hover { background: #21262d; }
-  .exemplars .col-menu-item input { cursor: pointer; }
-  .exemplars .col-menu-auto { color: #6e7681; font-style: italic; }
-  .exemplars .col-menu-reset { display: block; width: 100%; margin-top: 4px; padding: 3px 6px;
-    background: transparent; border: none; border-top: 1px solid #21262d; color: #79c0ff;
-    cursor: pointer; text-align: left; font-size: 1em; }
-  .exemplars .col-menu-reset:hover { color: #adbac7; }
+  /* Column show/hide controls. */
+  .exemplars .more-columns { display: block; margin-bottom: 6px; color: #8b949e; }
+  .exemplars .more-column-link { appearance: none; background: transparent; border: none; padding: 0;
+    color: #79c0ff; cursor: pointer; font: inherit; text-decoration: underline;
+    text-underline-offset: 2px; }
+  .exemplars .more-column-link:hover { color: #adbac7; }
   .exemplars table.exemplar-table { width: auto; min-width: 320px; border-collapse: collapse; font-size: 0.95em; }
   .exemplars table.exemplar-table th { position: static; background: transparent; cursor: default; padding: 3px 12px 3px 0; color: #8b949e; font-weight: 600; text-align: left; }
+  .exemplars .column-heading { display: inline-flex; align-items: center; gap: 3px; }
+  .exemplars .column-hide { appearance: none; background: transparent; border: none; padding: 0;
+    color: #6e7681; cursor: pointer; font: inherit; font-size: 0.85em; line-height: 1; }
+  .exemplars .column-hide:hover, .exemplars .column-hide:focus-visible { color: #f85149; }
   .exemplars table.exemplar-table td { padding: 3px 12px 3px 0; border-bottom: 1px solid #21262d; white-space: nowrap; }
   .exemplars table.exemplar-table td.dur { color: #e6edf3; font-weight: 600; }
   .exemplars table.exemplar-table td.pctile { color: #8b949e; font-variant-numeric: tabular-nums; }
