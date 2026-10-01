@@ -224,6 +224,7 @@ pub(crate) struct ThreadLocalBuffer {
     /// Bounded by the number of `#[track_caller]` call sites in the program,
     /// which is fixed at compile time, so this does not grow unboundedly.
     location_cache: AHashMap<usize, CachedLocation>,
+    /// Advances on every encoder reset; `flush_epoch` tracks drain scheduling.
     batch_generation: u64,
     /// Last drain epoch at which this buffer was flushed. Shared with the
     /// flush thread via `TlBufferHandle` so it can skip busy workers.
@@ -292,6 +293,7 @@ impl ThreadLocalBuffer {
             .reset_to_infallible(Vec::with_capacity(self.batch_size));
         self.batch_generation = self.batch_generation.wrapping_add(1);
         if self.batch_generation == 0 {
+            // Old cached generations could match again after wraparound.
             self.location_cache.clear();
         }
         self.event_count = 0;
