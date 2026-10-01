@@ -9,9 +9,9 @@
 use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode, is_ctimer_active, sys};
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::source::{FlushContext, Source};
+use dial9_trace_format::encoder::FxHashMap;
 use dial9_trace_format::types::{EventEncoder, FieldType};
 use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
-use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::Arc;
 
@@ -281,10 +281,10 @@ pub struct CpuProfiler {
     pid: u32,
     /// OS tid → thread name, eagerly cached at drain time so short-lived
     /// threads are captured before they exit and their `comm` file disappears.
-    tid_to_name: HashMap<u32, ThreadName>,
-    /// Tracked threads that stopped. Their names leave `tid_to_name` after
-    /// the next drain: their last samples keep the name, and a thread that
-    /// later reuses the tid reads its own.
+    tid_to_name: FxHashMap<u32, ThreadName>,
+    /// Tracked threads that stopped. Their names leave `tid_to_name` at the
+    /// first drain after the thread has exited, so its last samples keep the
+    /// name and a thread that later reuses the tid reads its own.
     stopped_tids: Vec<u32>,
     /// Original config retained for segment metadata emission.
     config: CpuProfilingConfig,
@@ -344,7 +344,7 @@ impl CpuProfiler {
         Ok(Self {
             sampler,
             pid: std::process::id(),
-            tid_to_name: HashMap::new(),
+            tid_to_name: FxHashMap::default(),
             stopped_tids: Vec::new(),
             config,
             effective_backend,
