@@ -31,6 +31,7 @@ export function retainMatchedHistogramPair(
   if (
     !hasFilteredSnapshot ||
     baseline == null ||
+    baselineCoverage == null ||
     baselineSet == null ||
     filteredSet == null ||
     baselineSet !== filteredSet
