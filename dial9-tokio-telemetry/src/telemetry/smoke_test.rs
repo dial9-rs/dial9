@@ -1,6 +1,6 @@
 //! Pre-flight check that telemetry is live.
 //!
-//! Build a [`SmokeTester`] with `handle.smoke_tester()` and call
+//! Build a [`SmokeTester`] once with `handle.smoke_tester()` and call
 //! [`run`](SmokeTester::run) where the check belongs, such as a startup probe
 //! or a deploy gate.
 //!
@@ -18,6 +18,7 @@
 
 use dial9_core::handle::Dial9Handle;
 use std::fmt;
+use std::marker::PhantomData;
 
 /// Outcome of one check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,9 +127,13 @@ impl fmt::Display for SmokeTestReport {
     }
 }
 
-/// Runs the smoke test against the recorder behind a handle.
+/// Runs the smoke test against the recorder behind a handle. Build it once
+/// and keep it.
 pub struct SmokeTester {
     handle: Dial9Handle,
+    // Gives the type now the auto traits the result cache will give it, so
+    // adding the cache isn't a semver break.
+    _cache: PhantomData<tokio::sync::Mutex<()>>,
 }
 
 impl fmt::Debug for SmokeTester {
@@ -149,7 +154,10 @@ impl SmokeTester {
         builder_type(name = SmokeTesterBuilder, vis = "pub")
     )]
     fn new(#[builder(start_fn)] handle: Dial9Handle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            _cache: PhantomData,
+        }
     }
 }
 

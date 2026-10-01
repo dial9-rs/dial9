@@ -194,13 +194,16 @@ Missing variables use defaults. Blank, invalid, or non-Unicode values emit a war
 ## Checking telemetry is live
 
 `handle.smoke_tester()` builds a check you can run from a startup probe or a
-deploy gate. The report says whether the handle reaches a live recorder:
+deploy gate. Build it once and keep it; the report says whether the handle
+reaches a live recorder:
 
 ```rust,no_run
 use dial9::Dial9HandleTokioExt;
 
 # async fn startup_probe() {
-let report = dial9::Dial9Handle::current().smoke_tester().build().run().await;
+let tester = dial9::Dial9Handle::current().smoke_tester().build();
+// Where the check runs:
+let report = tester.run().await;
 if !report.is_healthy() {
     eprintln!("dial9 smoke test failed:\n{report}");
 }

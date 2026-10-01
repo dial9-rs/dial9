@@ -382,13 +382,15 @@ pub trait Dial9HandleTokioExt: dial9_handle_tokio_ext_sealed::Sealed {
     ) -> io::Result<tokio::runtime::LocalRuntime>;
 
     /// [`SmokeTester`](crate::telemetry::smoke_test::SmokeTester) for the
-    /// recorder behind this handle.
+    /// recorder behind this handle. Build it once and keep it.
     ///
     /// ```no_run
     /// # async fn f(handle: dial9_core::handle::Dial9Handle) {
     /// use dial9_tokio_telemetry::telemetry::Dial9HandleTokioExt;
     ///
-    /// let report = handle.smoke_tester().build().run().await;
+    /// let tester = handle.smoke_tester().build();
+    /// // Where the check runs:
+    /// let report = tester.run().await;
     /// if !report.is_healthy() {
     ///     tracing::error!("dial9 smoke test failed:\n{report}");
     /// }
