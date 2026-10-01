@@ -14,8 +14,9 @@ const STOPPED: usize = usize::MAX;
 /// Written by the worker, read by any handle.
 #[derive(Debug)]
 pub(crate) struct PipelineState {
-    /// Stage names in pipeline order, fixed at build.
-    stages: Vec<&'static str>,
+    /// Stage names in pipeline order, fixed at build. Shared with every
+    /// status, so reading one doesn't allocate.
+    stages: std::sync::Arc<[&'static str]>,
     /// Index into `stages` of the stage initializing, or one of the
     /// constants above.
     phase: AtomicUsize,
@@ -24,7 +25,7 @@ pub(crate) struct PipelineState {
 impl PipelineState {
     pub(crate) fn new(stages: Vec<&'static str>) -> Self {
         Self {
-            stages,
+            stages: stages.into(),
             phase: AtomicUsize::new(NOT_STARTED),
         }
     }
@@ -49,7 +50,7 @@ impl PipelineState {
             },
         };
         PipelineStatus {
-            stages: self.stages.clone(),
+            stages: std::sync::Arc::clone(&self.stages),
             worker,
         }
     }
@@ -122,7 +123,7 @@ mod tests {
     fn wait_for(rec: &Recorder, want: WorkerState) -> WorkerState {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let state = rec.handle().pipeline_status().unwrap().worker();
+            let state = rec.handle().pipeline_status().unwrap().worker().clone();
             if state == want || Instant::now() > deadline {
                 return state;
             }
@@ -142,7 +143,7 @@ mod tests {
         rec.graceful_shutdown(Duration::from_secs(5));
         assert_eq!(
             handle.pipeline_status().unwrap().worker(),
-            WorkerState::Stopped
+            &WorkerState::Stopped
         );
     }
 
@@ -158,7 +159,7 @@ mod tests {
         rec.graceful_shutdown(Duration::from_millis(10));
         assert_eq!(
             handle.pipeline_status().unwrap().worker(),
-            WorkerState::Stopped
+            &WorkerState::Stopped
         );
     }
 
