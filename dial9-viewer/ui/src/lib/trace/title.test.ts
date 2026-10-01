@@ -2,7 +2,37 @@
 // unknown-key handling.
 
 import { describe, expect, it } from "vitest";
-import { traceTitleParams } from "./title.js";
+import { diffServiceLabel, pageTitle, traceTitleParams } from "./title.js";
+
+describe("diffServiceLabel", () => {
+  it("collapses matching sides to one service", () => {
+    expect(diffServiceLabel("metrics", "metrics")).toBe("metrics");
+  });
+
+  it("joins differing sides, marking a missing side with ?", () => {
+    expect(diffServiceLabel("metrics", "billing")).toBe("metrics vs billing");
+    expect(diffServiceLabel("metrics", null)).toBe("metrics vs ?");
+    expect(diffServiceLabel("", "billing")).toBe("? vs billing");
+  });
+
+  it("returns null when neither side has a service", () => {
+    expect(diffServiceLabel(null, " ")).toBeNull();
+  });
+});
+
+describe("pageTitle", () => {
+  it("prefixes the service when known", () => {
+    expect(pageTitle("Span Explorer", "metrics-service")).toBe(
+      "metrics-service | Span Explorer",
+    );
+  });
+
+  it("falls back to the bare page name for a missing or blank service", () => {
+    expect(pageTitle("dial9 Trace Viewer")).toBe("dial9 Trace Viewer");
+    expect(pageTitle("dial9 Trace Viewer", null)).toBe("dial9 Trace Viewer");
+    expect(pageTitle("dial9 Trace Viewer", "  ")).toBe("dial9 Trace Viewer");
+  });
+});
 
 const KEY_A_HOST1 =
   "traces/2026-04-09/1900/checkout-api/host1/boot-a/1744224000-0.bin.gz";

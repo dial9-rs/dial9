@@ -43,3 +43,29 @@ export function traceTitleParams(
   params.set("segs", String(keys.length));
   return params;
 }
+
+/**
+ * Browser tab title for a page: `"<service> | <page>"` when the service is
+ * known, otherwise just `<page>`. Leading/trailing whitespace on the service
+ * is ignored, and a blank service counts as unknown.
+ */
+export function pageTitle(page: string, service?: string | null): string {
+  const svc = service?.trim();
+  return svc ? `${svc} | ${page}` : page;
+}
+
+/**
+ * Service label for a two-sided diff page: the shared service when both sides
+ * agree, `"a vs b"` when they differ (`?` stands in for a side with no
+ * service), and null when neither side has one.
+ */
+export function diffServiceLabel(
+  a?: string | null,
+  b?: string | null,
+): string | null {
+  const sa = a?.trim() ?? "";
+  const sb = b?.trim() ?? "";
+  if (!sa && !sb) return null;
+  if (sa === sb) return sa;
+  return `${sa || "?"} vs ${sb || "?"}`;
+}

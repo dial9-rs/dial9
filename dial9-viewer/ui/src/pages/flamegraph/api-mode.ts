@@ -18,6 +18,7 @@ import {
   nextMaxFiles,
   nsToPickerUtc,
   openSse,
+  pageTitle,
   pickerUtcToNs,
   readPlainSourceScope,
   refinementWorkDepth,
@@ -133,6 +134,9 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   // (the box's service; hosts live alongside facetState above).
   const dataDir = params.get("data_dir");
   const scopeService = params.get("service");
+  // Tab title from the URL scope until the backend's resolved service arrives
+  // (renderScopeHeader).
+  document.title = pageTitle("Flamegraph", scopeService);
   const scopeBucket = source.bucket || params.get("bucket");
   const scopePrefix = params.get("prefix");
 
@@ -285,7 +289,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       bits.push(utcRange(meta.min_timestamp_ns, meta.max_timestamp_ns));
     }
     const svc = meta.service || "aggregated";
-    document.title = `Flamegraph \u2014 ${svc}`;
+    document.title = pageTitle("Flamegraph", meta.service);
     titleEl.textContent = bits.length
       ? `Flamegraph \u2014 ${svc} \u00b7 ${bits.join(" \u00b7 ")}`
       : `Flamegraph \u2014 ${svc}`;

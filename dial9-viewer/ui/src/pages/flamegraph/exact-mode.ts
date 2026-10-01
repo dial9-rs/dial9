@@ -15,6 +15,7 @@ import {
   applyToCreds,
   isSourceShareable,
   loadTraceInWorker,
+  pageTitle,
   readNamespacedSourceScope,
   readPlainSourceScope,
   sourceScopeFromStored,
@@ -172,7 +173,8 @@ export async function runExactMode(
     startNs != null && endNs != null
       ? ((endNs - startNs) / 1e6).toFixed(2)
       : null;
-  document.title = `Flamegraph \u2014 ${label}` + (durMs ? ` (${durMs}ms)` : "");
+  document.title =
+    pageTitle("Flamegraph", label) + (durMs ? ` (${durMs}ms)` : "");
   els.titleEl.textContent = `Flamegraph \u2014 ${label}`;
   const titleBits = [`${allSamples.length} samples`];
   if (segs) titleBits.push(`${segs} segment${segs !== "1" ? "s" : ""}`);

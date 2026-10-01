@@ -16,7 +16,7 @@ export type {
 } from "./keys.js";
 
 // title.ts - shared viewer/flamegraph header metadata.
-export { traceTitleParams } from "./title.js";
+export { diffServiceLabel, pageTitle, traceTitleParams } from "./title.js";
 
 // segment-metadata.ts - trace-embedded service/host identity and its
 // reconciliation against the key-derived svc/host URL params.
