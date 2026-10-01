@@ -1,8 +1,8 @@
 //! `.with_*` sugar for plugging this crate's profiling `Source`s into a
 //! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. Each
-//! method is `.source(<Source>::new(cfg))` that warns and skips on a start
-//! failure or unsupported platform. Use `.source(CpuProfiler::start(cfg)?)` to
-//! propagate the failure instead.
+//! method is `.source(<Source>::new(cfg))` that, on a start failure or
+//! unsupported platform, warns and registers a [`StartFailed`] placeholder.
+//! Use `.source(CpuProfiler::start(cfg)?)` to propagate the failure instead.
 
 use dial9_core::buffer::BufferMode;
 use dial9_core::recorder::RecorderBuilder;
@@ -13,10 +13,11 @@ use dial9_core::rate_limited;
 /// Registered in place of a profiling source `T` that failed to start, so a
 /// later check can tell "configured but failed" apart from "not configured".
 ///
-/// Records nothing; it only reports `{name}.start_error` as segment metadata.
+/// Records nothing; it only reports `{prefix}.start_error` as segment metadata,
+/// under the source's own metadata prefix (`cpu.profile`, `sched.profile`).
 #[cfg(feature = "cpu-profiling")]
 pub struct StartFailed<T: 'static> {
-    source_name: &'static str,
+    metadata_prefix: &'static str,
     kind: std::io::ErrorKind,
     message: String,
     metadata_emitted: bool,
@@ -25,9 +26,9 @@ pub struct StartFailed<T: 'static> {
 
 #[cfg(feature = "cpu-profiling")]
 impl<T: 'static> StartFailed<T> {
-    fn new(source_name: &'static str, error: &std::io::Error) -> Self {
+    fn new(metadata_prefix: &'static str, error: &std::io::Error) -> Self {
         Self {
-            source_name,
+            metadata_prefix,
             kind: error.kind(),
             message: error.to_string(),
             metadata_emitted: false,
@@ -52,7 +53,7 @@ impl<T: 'static> StartFailed<T> {
 impl<T: 'static> std::fmt::Debug for StartFailed<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StartFailed")
-            .field("source", &self.source_name)
+            .field("metadata_prefix", &self.metadata_prefix)
             .field("kind", &self.kind)
             .field("message", &self.message)
             .finish()
@@ -73,7 +74,7 @@ impl<T: 'static> dial9_core::source::Source for StartFailed<T> {
         }
         self.metadata_emitted = true;
         out.push((
-            format!("{}.start_error", self.source_name),
+            format!("{}.start_error", self.metadata_prefix),
             self.message.clone(),
         ));
     }
@@ -93,11 +94,13 @@ pub trait RecorderPerfExt: recorder_perf_ext_sealed::Sealed + Sized {
         config: crate::cuda::CudaGpuConfig,
     ) -> Result<Self, crate::cuda::CudaGpuStartError>;
 
-    /// Register the process-wide CPU profiler. Warns and registers a [`StartFailed`] placeholder on start failure.
+    /// Register the process-wide CPU profiler. On a start failure, warns and
+    /// registers a [`StartFailed`] placeholder.
     #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self;
 
-    /// Register the per-thread scheduler-event profiler. Warns and registers a [`StartFailed`] placeholder on start failure.
+    /// Register the per-thread scheduler-event profiler. On a start failure,
+    /// warns and registers a [`StartFailed`] placeholder.
     #[cfg(feature = "cpu-profiling")]
     fn with_sched_events(self, config: crate::SchedEventConfig) -> Self;
 
@@ -156,10 +159,7 @@ impl<M: BufferMode> RecorderPerfExt for RecorderBuilder<M> {
                 rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::warn!("failed to start CPU profiler: {e}");
                 });
-                self.source(StartFailed::<crate::CpuProfiler>::new(
-                    crate::CpuProfiler::SOURCE_NAME,
-                    &e,
-                ))
+                self.source(StartFailed::<crate::CpuProfiler>::new("cpu.profile", &e))
             }
         }
     }
@@ -172,7 +172,10 @@ impl<M: BufferMode> RecorderPerfExt for RecorderBuilder<M> {
                 rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::warn!("failed to start scheduler event profiler: {e}");
                 });
-                self.source(StartFailed::<crate::SchedProfiler>::new("sched", &e))
+                self.source(StartFailed::<crate::SchedProfiler>::new(
+                    "sched.profile",
+                    &e,
+                ))
             }
         }
     }
@@ -259,14 +262,14 @@ mod start_failed_tests {
     #[test]
     fn writes_the_start_error_once() {
         let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        let mut failed = StartFailed::<CpuProfiler>::new(CpuProfiler::SOURCE_NAME, &error);
+        let mut failed = StartFailed::<CpuProfiler>::new("cpu.profile", &error);
         assert_eq!(failed.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(failed.message(), "denied");
         let mut first = Vec::new();
         failed.segment_metadata(&mut first);
         assert_eq!(
             first,
-            [("cpu_profile.start_error".to_string(), "denied".to_string())]
+            [("cpu.profile.start_error".to_string(), "denied".to_string())]
         );
         let mut second = Vec::new();
         failed.segment_metadata(&mut second);
