@@ -154,7 +154,8 @@ pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
 
 #[cfg(feature = "cpu-profiling")]
 pub use cpu_source::{
-    CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
+    ActiveCpuBackend, CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig,
+    SchedProfiler,
 };
 
 #[cfg(any(
