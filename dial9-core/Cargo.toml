@@ -60,7 +60,9 @@ tokio = { version = "1.52.0", features = [
 ] }
 
 [features]
-_shuttle = ["dep:shuttle", "dep:shuttle-tokio-impl-inner", "pipeline"]
+# `test-util` lifts the one-recorder-per-process guard: shuttle builds many
+# recorders in one process.
+_shuttle = ["dep:shuttle", "dep:shuttle-tokio-impl-inner", "pipeline", "test-util"]
 ## Exposes recording internals (`Batch`, `CentralCollector`, `encode_single`,
 ## `drain_to_collector`) as `pub` for sibling-crate tests.
 test-util = []

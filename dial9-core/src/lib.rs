@@ -76,6 +76,9 @@ test_util_pub! {
 }
 /// `Source` trait: pluggable flush-thread data sources.
 pub mod source;
+/// Shared helpers for this crate's own `#[cfg(test)]` unit tests.
+#[cfg(test)]
+pub(crate) mod test_support;
 /// Test-only record/drain/write helpers.
 #[cfg(feature = "test-util")]
 pub mod test_util;
