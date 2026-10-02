@@ -108,6 +108,33 @@ impl Dial9TokioHandle {
         }
     }
 
+    /// [`spawn`](Self::spawn) without the `Send` bounds.
+    ///
+    /// The task is spawned on the calling thread's
+    /// [`LocalSet`](tokio::task::LocalSet) or
+    /// [`LocalRuntime`](tokio::runtime::LocalRuntime), even if this handle was
+    /// built for a different runtime: a `tokio::runtime::Handle` cannot spawn
+    /// local tasks. To target a specific `LocalSet`, use [`spawn_local_in`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a `LocalSet` or `LocalRuntime` context (same
+    /// as [`tokio::task::spawn_local`]).
+    #[track_caller]
+    pub fn spawn_local<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + 'static,
+        F::Output: 'static,
+    {
+        match &self.traced {
+            Some(traced) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                tokio::task::spawn_local(TracedFuture::new(future, Some(traced.clone())))
+            }
+            None => tokio::task::spawn_local(future),
+        }
+    }
+
     /// Spawn an instrumented future through a user-supplied spawn function.
     ///
     /// `spawn_fn` must synchronously perform a real Tokio spawn (or an
@@ -245,6 +272,71 @@ where
             Ok(output) => output,
             Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
             Err(_) => unreachable!("task cannot be cancelled inside block_on"),
+        }
+    })
+}
+
+/// [`spawn`] without the `Send` bounds.
+///
+/// The task is spawned on the calling thread's
+/// [`LocalSet`](tokio::task::LocalSet) or
+/// [`LocalRuntime`](tokio::runtime::LocalRuntime). To target a specific
+/// `LocalSet`, use [`spawn_local_in`].
+///
+/// # Panics
+///
+/// Panics if called outside a `LocalSet` or `LocalRuntime` context (same as
+/// [`tokio::task::spawn_local`]).
+#[track_caller]
+pub fn spawn_local<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + 'static,
+    F::Output: 'static,
+{
+    Dial9TokioHandle::current().spawn_local(future)
+}
+
+/// [`spawn_in`] for a [`tokio::task::LocalSet`]: spawn a traced `!Send` task
+/// onto `set`, from inside or outside its context.
+///
+/// Like [`LocalSet::spawn_local`](tokio::task::LocalSet::spawn_local), but
+/// the task's polls are instrumented when the runtime driving `set` is
+/// dial9-traced. Instrumentation resolves at the task's first poll, so this
+/// never panics.
+#[track_caller]
+pub fn spawn_local_in<F>(
+    set: &tokio::task::LocalSet,
+    future: F,
+) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + 'static,
+    F::Output: 'static,
+{
+    let _guard = InstrumentedSpawnGuard::enter();
+    set.spawn_local(TracedFuture::new_lazy(future))
+}
+
+/// [`block_on`] for a [`tokio::runtime::LocalRuntime`]: runs `future` as a
+/// traced task so its polls are recorded.
+///
+/// # Panics
+///
+/// Resumes the future's panic on the calling thread.
+#[track_caller]
+pub fn block_on_local<F>(runtime: &tokio::runtime::LocalRuntime, future: F) -> F::Output
+where
+    F: std::future::Future + 'static,
+    F::Output: 'static,
+{
+    let join = {
+        let _guard = InstrumentedSpawnGuard::enter();
+        runtime.spawn_local(TracedFuture::new_lazy(future))
+    };
+    runtime.block_on(async move {
+        match join.await {
+            Ok(output) => output,
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(_) => unreachable!("task cannot be cancelled inside block_on_local"),
         }
     })
 }

@@ -50,3 +50,13 @@ A span whose duration exceeds 10x the P50 for its name. Flags individual slow op
 
 ### unmatched-spans
 Spans with enter but no exit. Small counts are normal at segment boundaries. Large counts may indicate task cancellation or a bug in span instrumentation.
+
+## Link each finding to its sample
+
+When you report these findings to a person, give each one a link that opens
+the viewer on the sample behind it: the long poll itself, the delayed poll, the
+slow span, the leaking task. "Linking analysis findings" in
+`references/viewer-urls.md` says which link fits each check above, and
+"Building a link" there how to serve the trace and build the URL. The times
+printed here are rounded, so take exact anchors (a poll's start, a span's id)
+from `analyzeTraces()`.

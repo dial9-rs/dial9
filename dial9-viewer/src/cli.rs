@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -243,6 +243,22 @@ enum AgentsAction {
     },
 }
 
+/// The name this binary was run as. The `dial9` and `dial9-viewer` binaries
+/// share this CLI, so commands printed for the reader must name the one they
+/// have, the way clap's usage line does.
+fn invoked_bin_name() -> String {
+    std::env::args_os()
+        .next()
+        .and_then(|arg0| {
+            std::path::Path::new(&arg0)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        // argv[0] is absent only for a process exec'd with an empty argv.
+        .unwrap_or_else(|| Cli::command().get_name().to_owned())
+}
+
 /// Build a Tokio runtime and run the CLI. For binaries that don't set up their
 /// own runtime (e.g. the `dial9` binary).
 pub fn run_blocking() -> anyhow::Result<()> {
@@ -258,7 +274,10 @@ pub async fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Agents { action } => match action {
-            None => print!("{}", skills::HEADER),
+            None => print!(
+                "{}",
+                skills::HEADER.replace(skills::HEADER_BIN_PLACEHOLDER, &invoked_bin_name())
+            ),
             Some(AgentsAction::Toolkit { path }) => {
                 std::fs::create_dir_all(&path)?;
                 for (name, content) in skills::TOOLKIT_FILES {

@@ -16,7 +16,7 @@ This skill guides you through analyzing dial9 trace data stored in S3. The workf
 
 - AWS CLI configured with read access to the target bucket
 - `dial9` CLI installed (`cargo install dial9 --features cli` or `cargo binstall dial9`)
-- Node.js 14+ for running the analysis toolkit
+- Node.js 16 or newer for running the analysis toolkit
 
 ## Phase 1: Discovery
 
@@ -131,6 +131,13 @@ The analyzer reports:
 | **CPU hotspots** | Where CPU time is actually spent (requires CPU profiling enabled) |
 | **Queue depth** | High global queue = workers can't keep up |
 | **Kernel scheduling** | High kernel wait = noisy neighbors or CPU contention |
+
+When you report findings, link each one to its sample in the viewer, as
+"Linking analysis findings" in `references/viewer-urls.md` describes.
+`dial9 serve --bucket BUCKET` serves the viewer together with the bucket's
+objects, so a link can load a trace straight from S3;
+`dial9 serve --local-dir /tmp/d9-traces` does the same for the files you
+downloaded.
 
 ### When to use other skills
 

@@ -231,11 +231,11 @@ async function main() {
     }
 
     // ── Viewer deep link for this window ──
-    // `start`/`end` are ABSOLUTE monotonic ns, per the URL contract
-    // (dial9-viewer/ui/README.md, "URL contract (stable deep-link API)").
+    // `start`/`end` are ABSOLUTE monotonic ns, per the viewer URL contract
+    // (references/viewer-urls.md in this skill).
     // The trace URL placeholder needs filling in because this script reads
     // local files; the viewer needs the trace served over HTTP.
-    console.log(`\nviewer deep link (replace <TRACE_URL> with the served trace URL):`);
+    console.log(`\nviewer deep link (replace <TRACE_URL> with the served trace URL, percent-encoded):`);
     console.log(`  viewer.html?trace=<TRACE_URL>&start=${Math.round(lo)}&end=${Math.round(hi)}`);
   }
 }

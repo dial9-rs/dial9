@@ -45,9 +45,18 @@ import type {
   StreamMode,
 } from "../../lib/trace/index.js";
 import { pageEls } from "./dom.js";
-import { renderCatalog, nextSort, type CatalogSort, type SortKey } from "./catalog.js";
+import {
+  renderCatalog,
+  nextSort,
+  type CatalogSort,
+  type SortKey,
+} from "./catalog.js";
 import { renderDetail } from "./detail.js";
 import { renderFilterBar } from "./filters.js";
+import {
+  retainMatchedHistogramPair,
+  type MatchedHistogramPair,
+} from "./comparison.js";
 import {
   buildApiUrl,
   buildBrowserQuery,
@@ -62,7 +71,11 @@ import {
   setOverride,
   type ColumnOverrides,
 } from "./columns.js";
-import { fetchRawTraceBytes, rawStatsSummary, requestRawSpanStats } from "./raw.js";
+import {
+  fetchRawTraceBytes,
+  rawStatsSummary,
+  requestRawSpanStats,
+} from "./raw.js";
 
 const els = pageEls();
 
@@ -82,15 +95,32 @@ els.btnCopyLink.style.display = isSourceShareable(scope.source) ? "" : "none";
 let spanTypes: SpanTypeStats[] = [];
 let selectedUid = params.get("span_type_uid");
 let band: DurationBand = {
-  min_ns: params.get("min_span_ns") != null ? Number(params.get("min_span_ns")) : null,
-  max_ns: params.get("max_span_ns") != null ? Number(params.get("max_span_ns")) : null,
+  min_ns:
+    params.get("min_span_ns") != null
+      ? Number(params.get("min_span_ns"))
+      : null,
+  max_ns:
+    params.get("max_span_ns") != null
+      ? Number(params.get("max_span_ns"))
+      : null,
 };
-let attrFilters: readonly AttrFilter[] = parseAttrFilterParams(params.getAll("attr"));
+let attrFilters: readonly AttrFilter[] = parseAttrFilterParams(
+  params.getAll("attr"),
+);
 let maxFiles: number | null =
   params.get("max_files") != null ? Number(params.get("max_files")) : null;
 let lastCoverage: Coverage | null = null;
 let sort: CatalogSort = { key: "count", ascending: false };
 let overrides: ColumnOverrides = loadOverrides();
+
+// Attribute constraints produce a second, selected-type-only histogram. This
+// state never replaces the unfiltered catalog or its selected baseline type.
+let comparisonSpanType: SpanTypeStats | null = null;
+let comparisonCoverage: Coverage | null = null;
+let comparisonPending = false;
+let comparisonHasSnapshot = false;
+let comparisonError: string | null = null;
+let matchedHistogramPair: MatchedHistogramPair | null = null;
 
 // Which duration scope each type's cached exemplars were produced under, so a
 // reselect can tell a stale set from a valid one.
@@ -103,7 +133,16 @@ let streamToken = 0;
 let abortCtl: AbortController | null = null;
 let activeStreamMode: StreamMode | null = null;
 
-if (params.get("start_ns")) els.fStart.value = nsToPickerUtc(params.get("start_ns"));
+// The comparison owns a separate stream so it cannot abort, hide, or otherwise
+// perturb the baseline catalog stream.
+let comparisonStreamToken = 0;
+let comparisonAbortCtl: AbortController | null = null;
+let comparisonStreaming = false;
+let activeComparisonKey: string | null = null;
+let comparisonRefreshAfterBaseline = false;
+
+if (params.get("start_ns"))
+  els.fStart.value = nsToPickerUtc(params.get("start_ns"));
 if (params.get("end_ns")) els.fEnd.value = nsToPickerUtc(params.get("end_ns"));
 
 function view(): ViewState {
@@ -167,6 +206,17 @@ function renderDetailNow(): void {
     band,
     coverage: lastCoverage,
     attrFilters,
+    comparison:
+      attrFilters.length > 0
+        ? {
+            spanType: comparisonSpanType,
+            coverage: comparisonCoverage,
+            pending: comparisonPending,
+            hasSnapshot: comparisonHasSnapshot,
+            error: comparisonError,
+            pair: matchedHistogramPair,
+          }
+        : null,
     overrides,
     rawMode,
     exemplarRefreshPending,
@@ -182,11 +232,6 @@ function renderDetailNow(): void {
       saveOverrides(overrides);
       renderDetailNow();
     },
-    onResetOverrides: () => {
-      overrides = {};
-      saveOverrides(overrides);
-      renderDetailNow();
-    },
   });
 }
 
@@ -195,10 +240,17 @@ function renderCatalogNow(): void {
 }
 
 function renderFilterBarNow(): void {
-  renderFilterBar(els.filterBar, attrFilters, toggleAttrFilter, () => {
-    attrFilters = [];
-    applyAttrFilters();
-  });
+  renderFilterBar(
+    els.filterBar,
+    attrFilters,
+    comparisonPending,
+    comparisonError,
+    toggleAttrFilter,
+    () => {
+      attrFilters = [];
+      applyAttrFilters();
+    },
+  );
 }
 
 function showError(message: string): void {
@@ -227,16 +279,20 @@ function invalidateSelectedExemplarData(): void {
 function selectSpanType(uid: string): void {
   // A pending preserve-mode response is scoped to the PRIOR type and bounds.
   // Cancel it even when the newly selected type already has valid cached rows.
-  if (activeStreamMode === "exemplars" || activeStreamMode === "refine") stopStreaming();
+  if (activeStreamMode === "exemplars" || activeStreamMode === "refine")
+    stopStreaming();
+  stopComparisonStreaming(true);
   selectedUid = uid;
   band = { min_ns: null, max_ns: null };
-  const needsRefresh = !rawMode && exemplarScopeByUid.get(uid) !== exemplarScopeKey(view());
+  const needsRefresh =
+    !rawMode && exemplarScopeByUid.get(uid) !== exemplarScopeKey(view());
   if (needsRefresh) invalidateSelectedExemplarData();
   exemplarRefreshPending = needsRefresh;
   syncUrl();
   renderCatalogNow();
   renderDetailNow();
   if (needsRefresh) startStreaming("exemplars");
+  if (attrFilters.length > 0) startComparisonStreaming();
 }
 
 /**
@@ -257,8 +313,8 @@ function applyBand(next: DurationBand): void {
 
 function applyAttrFilters(): void {
   syncUrl();
-  renderFilterBarNow();
-  if (!rawMode) startStreaming("replace");
+  comparisonRefreshAfterBaseline = false;
+  startComparisonStreaming();
 }
 
 function toggleAttrFilter(key: string, value: string): void {
@@ -271,11 +327,13 @@ function toggleAttrFilter(key: string, value: string): void {
 
 // ── Streaming ──
 
-function setStreamingUi(active: boolean): void {
-  els.btnStop.disabled = !active;
-  els.btnStop.style.opacity = active ? "1" : "0.4";
-  els.btnMore.disabled = active;
-  els.btnMore.style.opacity = active ? "0.4" : "1";
+function updateStreamingUi(): void {
+  const baselineActive = activeStreamMode != null;
+  const anyActive = baselineActive || comparisonStreaming;
+  els.btnStop.disabled = !anyActive;
+  els.btnStop.style.opacity = anyActive ? "1" : "0.4";
+  els.btnMore.disabled = baselineActive;
+  els.btnMore.style.opacity = baselineActive ? "0.4" : "1";
 }
 
 function stopStreaming(): void {
@@ -285,18 +343,27 @@ function stopStreaming(): void {
     abortCtl.abort();
     abortCtl = null;
   }
-  setStreamingUi(false);
+  updateStreamingUi();
 }
 
 function startStreaming(mode: StreamMode): void {
   const baselineFilesFolded =
-    (mode === "refine" || mode === "exemplars") && lastCoverage ? lastCoverage.files_folded : 0;
+    (mode === "refine" || mode === "exemplars") && lastCoverage
+      ? lastCoverage.files_folded
+      : 0;
   const baselineFoldedSetId =
-    mode === "exemplars" && lastCoverage ? (lastCoverage.folded_set_id ?? null) : null;
+    mode === "exemplars" && lastCoverage
+      ? (lastCoverage.folded_set_id ?? null)
+      : null;
 
   stopStreaming();
+  if (mode === "replace") {
+    stopComparisonStreaming(true);
+    comparisonRefreshAfterBaseline = false;
+    renderFilterBarNow();
+  }
   activeStreamMode = mode;
-  setStreamingUi(true);
+  updateStreamingUi();
   els.error.style.display = "none";
   if (mode === "replace") {
     els.loading.classList.remove("hidden");
@@ -315,7 +382,12 @@ function startStreaming(mode: StreamMode): void {
   /** Is this callback still for the selection that requested it? */
   const stillCurrent = (): boolean =>
     mode !== "exemplars" ||
-    exemplarRequestMatches(requestUid, requestScopeKey, selectedUid, exemplarScopeKey(view()));
+    exemplarRequestMatches(
+      requestUid,
+      requestScopeKey,
+      selectedUid,
+      exemplarScopeKey(view()),
+    );
 
   void openSse(buildApiUrl(mode, scope, view(), window.location.origin), {
     headers: Dial9Session.headers(Dial9Creds.headers()),
@@ -336,13 +408,23 @@ function startStreaming(mode: StreamMode): void {
           resp.coverage?.target_folded_set_id ?? null,
         );
         if (membership.preview) {
-          const merged = mergeSelectedExemplarSnapshot(spanTypes, incomingTypes, requestUid);
+          const merged = mergeSelectedExemplarSnapshot(
+            spanTypes,
+            incomingTypes,
+            requestUid,
+          );
           spanTypes = merged.spanTypes;
           exemplarPreviewAvailable = merged.matched;
           exemplarSnapshotAdopted = membership.complete && merged.matched;
           renderDetailNow();
         }
-      } else if (shouldAdoptCatalogSnapshot(mode, baselineFilesFolded, incomingFilesFolded)) {
+      } else if (
+        shouldAdoptCatalogSnapshot(
+          mode,
+          baselineFilesFolded,
+          incomingFilesFolded,
+        )
+      ) {
         spanTypes = incomingTypes;
         exemplarScopeByUid.clear();
         for (const st of incomingTypes) {
@@ -350,8 +432,20 @@ function startStreaming(mode: StreamMode): void {
         }
         lastCoverage = resp.coverage ?? null;
         exemplarRefreshPending = false;
+        captureMatchedHistogramPair();
         renderCatalogNow();
         renderDetailNow();
+        // A comparison restored from the URL can begin as soon as its baseline
+        // span type exists. Its separate request leaves this stream untouched.
+        if (
+          attrFilters.length > 0 &&
+          selectedUid != null &&
+          !comparisonStreaming &&
+          !comparisonHasSnapshot &&
+          comparisonError == null
+        ) {
+          startComparisonStreaming();
+        }
       }
       els.stats.innerHTML = "";
       els.stats.append(
@@ -365,11 +459,15 @@ function startStreaming(mode: StreamMode): void {
     },
     onClose: () => {
       if (token !== streamToken) return;
-      setStreamingUi(false);
       activeStreamMode = null;
+      updateStreamingUi();
       if (!stillCurrent()) return;
       if (mode === "exemplars") {
-        const completed = completeExemplarRefresh(spanTypes, lastCoverage, exemplarSnapshotAdopted);
+        const completed = completeExemplarRefresh(
+          spanTypes,
+          lastCoverage,
+          exemplarSnapshotAdopted,
+        );
         spanTypes = completed.spanTypes;
         lastCoverage = completed.coverage;
         exemplarRefreshPending = completed.pending;
@@ -387,11 +485,14 @@ function startStreaming(mode: StreamMode): void {
             ? " · exemplar refresh incomplete"
             : " · refined");
       }
+      if (mode === "replace" || mode === "refine") {
+        refreshComparisonAfterBaseline();
+      }
     },
     onError: (err) => {
       if (token !== streamToken) return;
-      setStreamingUi(false);
       activeStreamMode = null;
+      updateStreamingUi();
       if (!stillCurrent()) return;
       exemplarRefreshPending = mode === "exemplars";
       if (mode === "exemplars") {
@@ -404,8 +505,147 @@ function startStreaming(mode: StreamMode): void {
       } else {
         els.stats.textContent = `${statsBadge()} · interrupted`;
       }
+      if (mode === "replace" || mode === "refine") {
+        refreshComparisonAfterBaseline();
+      }
     },
   });
+}
+
+// ── Histogram comparison stream ──
+
+function comparisonRequestKey(): string | null {
+  if (rawMode || selectedUid == null || attrFilters.length === 0) return null;
+  return buildApiUrl("comparison", scope, view(), window.location.origin);
+}
+
+function stopComparisonStreaming(clearData: boolean): void {
+  comparisonStreamToken++;
+  comparisonStreaming = false;
+  activeComparisonKey = null;
+  comparisonPending = false;
+  if (comparisonAbortCtl) {
+    comparisonAbortCtl.abort();
+    comparisonAbortCtl = null;
+  }
+  if (clearData) {
+    comparisonSpanType = null;
+    comparisonCoverage = null;
+    comparisonHasSnapshot = false;
+    comparisonError = null;
+    matchedHistogramPair = null;
+  }
+  updateStreamingUi();
+}
+
+function captureMatchedHistogramPair(): void {
+  matchedHistogramPair = retainMatchedHistogramPair(
+    matchedHistogramPair,
+    spanTypes.find((spanType) => spanType.span_type_uid === selectedUid),
+    lastCoverage,
+    comparisonSpanType,
+    comparisonCoverage,
+    comparisonHasSnapshot,
+  );
+}
+
+function startComparisonStreaming(preserveData = false): void {
+  const requestKey = comparisonRequestKey();
+  if (requestKey == null) {
+    stopComparisonStreaming(true);
+    renderFilterBarNow();
+    renderDetailNow();
+    return;
+  }
+
+  stopComparisonStreaming(!preserveData);
+  comparisonPending = true;
+  comparisonError = null;
+  comparisonStreaming = true;
+  activeComparisonKey = requestKey;
+  updateStreamingUi();
+  renderFilterBarNow();
+  renderDetailNow();
+
+  const token = ++comparisonStreamToken;
+  const requestUid = selectedUid;
+  let gotEvent = false;
+  comparisonAbortCtl = new AbortController();
+
+  const stillCurrent = (): boolean =>
+    token === comparisonStreamToken &&
+    activeComparisonKey === requestKey &&
+    requestKey === comparisonRequestKey();
+
+  void openSse(requestKey, {
+    headers: Dial9Session.headers(Dial9Creds.headers()),
+    signal: comparisonAbortCtl.signal,
+    onEvent: (obj) => {
+      if (!stillCurrent()) return;
+      const resp = obj as SpanStatsResponse;
+      gotEvent = true;
+      comparisonSpanType =
+        resp.span_types?.find(
+          (spanType) => spanType.span_type_uid === requestUid,
+        ) ?? null;
+      comparisonCoverage = resp.coverage ?? null;
+      comparisonHasSnapshot = true;
+      captureMatchedHistogramPair();
+      renderFilterBarNow();
+      renderDetailNow();
+    },
+    onClose: () => {
+      if (!stillCurrent()) return;
+      comparisonStreaming = false;
+      activeComparisonKey = null;
+      comparisonPending = false;
+      comparisonAbortCtl = null;
+      if (!gotEvent) comparisonError = "No comparison data returned.";
+      updateStreamingUi();
+      renderFilterBarNow();
+      renderDetailNow();
+
+      if (comparisonRefreshAfterBaseline) {
+        comparisonRefreshAfterBaseline = false;
+        const baselineSet = lastCoverage?.folded_set_id ?? null;
+        const comparisonSet = comparisonCoverage?.folded_set_id ?? null;
+        if (baselineSet != null && baselineSet !== comparisonSet) {
+          startComparisonStreaming(true);
+        }
+      }
+    },
+    onError: (err) => {
+      if (!stillCurrent()) return;
+      comparisonStreaming = false;
+      activeComparisonKey = null;
+      comparisonPending = false;
+      comparisonAbortCtl = null;
+      comparisonError = `Comparison failed: ${err.message}`;
+      updateStreamingUi();
+      renderFilterBarNow();
+      renderDetailNow();
+    },
+  });
+}
+
+/**
+ * A baseline stream may add folded files while a comparison is reading the old
+ * set. Refresh once at baseline completion so both rows cover the same files.
+ */
+function refreshComparisonAfterBaseline(): void {
+  if (comparisonRequestKey() == null) return;
+  const baselineSet = lastCoverage?.folded_set_id ?? null;
+  const comparisonSet = comparisonCoverage?.folded_set_id ?? null;
+  if (
+    baselineSet == null ||
+    (comparisonHasSnapshot && baselineSet === comparisonSet)
+  )
+    return;
+  if (comparisonStreaming) {
+    comparisonRefreshAfterBaseline = true;
+  } else {
+    startComparisonStreaming(comparisonHasSnapshot);
+  }
 }
 
 // ── Event handlers ──
@@ -427,14 +667,19 @@ els.btnMore.addEventListener("click", () => {
 
 els.btnStop.addEventListener("click", () => {
   const stoppedMode = activeStreamMode;
+  const stoppedComparison = comparisonStreaming;
   stopStreaming();
+  stopComparisonStreaming(false);
+  if (stoppedComparison) comparisonError = "Comparison stopped.";
   if (stoppedMode !== "exemplars") exemplarRefreshPending = false;
+  renderFilterBarNow();
   renderDetailNow();
-  els.stats.textContent = `${statsBadge()} · stopped`;
+  if (stoppedMode != null) els.stats.textContent = `${statsBadge()} · stopped`;
 });
 
 els.btnCopyLink.addEventListener("click", async () => {
-  const url = window.location.origin + window.location.pathname + window.location.search;
+  const url =
+    window.location.origin + window.location.pathname + window.location.search;
   const orig = els.btnCopyLink.textContent;
   try {
     await navigator.clipboard.writeText(url);
@@ -470,14 +715,19 @@ if (rawMode && scope.trace != null) {
         window.location.origin,
         Dial9Session.headers(Dial9Creds.headers()),
       );
-      const response = await requestRawSpanStats(traceBytes, window.location.origin);
+      const response = await requestRawSpanStats(
+        traceBytes,
+        window.location.origin,
+      );
       spanTypes = response.span_types;
       els.loading.classList.add("hidden");
       els.stats.textContent = `📂 Server-decoded raw trace · ${rawStatsSummary(response)}`;
       renderCatalogNow();
       renderDetailNow();
     } catch (e) {
-      showError(`Failed to load raw trace: ${e instanceof Error ? e.message : String(e)}`);
+      showError(
+        `Failed to load raw trace: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   })();
 } else if (aggregate) {

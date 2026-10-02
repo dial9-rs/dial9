@@ -2138,6 +2138,7 @@ dependencies = [
  "dial9-core",
  "dial9-metrique",
  "dial9-trace-format",
+ "dial9-utils",
  "flate2",
  "form_urlencoded",
  "futures",

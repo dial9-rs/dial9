@@ -17,6 +17,9 @@ import {
 } from "../../lib/trace/index.js";
 import type { AttrFilter, SourceScope, StreamMode } from "../../lib/trace/index.js";
 
+/** Full-catalog streams plus the selected-type histogram comparison request. */
+export type SpanStatsRequestMode = StreamMode | "comparison";
+
 /** The load scope, fixed for the page's lifetime (read once at boot). */
 export interface PageScope {
   /** Raw-trace source URL; null in aggregate mode. */
@@ -80,14 +83,15 @@ function appendDataParams(p: URLSearchParams, scope: PageScope): void {
  * The /api/span-stats URL for one stream.
  *
  * The duration band scopes only the backend's bounded exemplar candidates;
- * catalog statistics are unaffected by it. Attribute filters, by contrast,
- * narrow the whole aggregate server-side (counts, histograms, composition).
+ * catalog statistics are unaffected by it. Attribute filters are sent only by
+ * the selected-type `comparison` stream, leaving the visible catalog and its
+ * baseline histogram untouched.
  *
  * An `exemplars` stream reads only already-folded spans parts and parses NO
  * additional raw files, so it is cheap and never drives the refine loop.
  */
 export function buildApiUrl(
-  mode: StreamMode,
+  mode: SpanStatsRequestMode,
   scope: PageScope,
   view: ViewState,
   origin: string,
@@ -100,13 +104,18 @@ export function buildApiUrl(
   appendDataParams(u.searchParams, scope);
   if (view.startNs) u.searchParams.set("start_ns", view.startNs);
   if (view.endNs) u.searchParams.set("end_ns", view.endNs);
-  if (view.bandMinNs != null) u.searchParams.set("min_span_ns", String(view.bandMinNs));
-  if (view.bandMaxNs != null) u.searchParams.set("max_span_ns", String(view.bandMaxNs));
-  for (const a of formatAttrFilterParams(view.attrFilters)) u.searchParams.append("attr", a);
+  if (mode !== "comparison") {
+    if (view.bandMinNs != null) u.searchParams.set("min_span_ns", String(view.bandMinNs));
+    if (view.bandMaxNs != null) u.searchParams.set("max_span_ns", String(view.bandMaxNs));
+  }
   setMaxFilesParam(u.searchParams, view.maxFiles);
   if (mode === "exemplars") {
     u.searchParams.set("exemplars_only", "true");
     if (view.selectedUid) u.searchParams.set("span_type_uid", view.selectedUid);
+  } else if (mode === "comparison") {
+    u.searchParams.set("folded_only", "true");
+    if (view.selectedUid) u.searchParams.set("span_type_uid", view.selectedUid);
+    for (const a of formatAttrFilterParams(view.attrFilters)) u.searchParams.append("attr", a);
   }
   return u.toString();
 }
