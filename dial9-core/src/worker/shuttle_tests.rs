@@ -289,7 +289,9 @@ crate::shuttle_test! {
     // shuttle's harness for `shuttle_select!`.
     fn shuttle_background_task_contains_init_panic() {
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
-        let state = crate::primitives::sync::Arc::new(state::PipelineState::new(vec!["PanickingInitializer"]));
+        let state = crate::primitives::sync::Arc::new(state::PipelineState::new(vec![
+            "PanickingInitializer",
+        ]));
         let mut config = BackgroundTaskConfig::builder()
             .processors(vec![Box::new(PanickingInitializer) as Box<dyn SegmentProcessor>])
             .build();
@@ -378,7 +380,8 @@ crate::shuttle_test! {
         }
 
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
-        let state = crate::primitives::sync::Arc::new(PipelineState::new(vec!["CountingProcessor"]));
+        let state =
+            crate::primitives::sync::Arc::new(PipelineState::new(vec!["CountingProcessor"]));
         let mut config = BackgroundTaskConfig::builder()
             .processors(vec![
                 Box::new(CountingProcessor(Arc::new(AtomicUsize::new(0))))

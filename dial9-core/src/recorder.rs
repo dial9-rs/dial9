@@ -211,8 +211,9 @@ impl<M: BufferMode> RecorderBuilder<M> {
     }
 
     /// Run `f` against the first registered [`Source`] of type `T`,
-    /// registering the one `make` builds if there is none yet. Lets several builder calls share
-    /// one source, where [`source`](Self::source) would add a second.
+    /// registering the one `make` builds if there is none yet. Lets several
+    /// builder calls share one source, where [`source`](Self::source) would
+    /// add a second.
     pub fn source_or_insert<T: Source>(
         mut self,
         make: impl FnOnce() -> T,
