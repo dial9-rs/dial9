@@ -337,8 +337,9 @@ pub enum WorkerState {
     },
     /// Every stage initialized; the worker loop is running.
     Running,
-    /// Exited by any path: normal exit, initialization error, panic, or
-    /// drain timeout.
+    /// Exited by any path: normal exit, initialization error, panic
+    /// (including in the thread-start hook or the runtime build), or drain
+    /// timeout.
     Stopped,
 }
 

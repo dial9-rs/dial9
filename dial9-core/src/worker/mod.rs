@@ -136,7 +136,8 @@ async fn run_background_task_inner(
     let metrics_sink = config.metrics_sink.clone();
     let trigger = config.trigger.take();
     let state = config.state.take();
-    // Declared before `run_fut`, so dropped after it on every exit path.
+    // Dropped after `run_fut`, so `Stopped` is published after the processors
+    // drop.
     let _stopped = state.clone().map(state::StoppedOnDrop);
 
     tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), triggered = trigger.is_some(), "worker started");

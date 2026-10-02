@@ -141,6 +141,18 @@ impl Dial9Handle {
     /// A `Recorder` dropped without `graceful_shutdown` doesn't wait for the
     /// worker, so the worker can still show as running briefly after
     /// [`is_stopped`](Self::is_stopped) returns `true`.
+    ///
+    /// ```no_run
+    /// # fn f(handle: dial9_core::handle::Dial9Handle) {
+    /// use dial9_core::pipeline::WorkerState;
+    ///
+    /// match handle.pipeline_status().map(|s| s.worker().clone()) {
+    ///     Some(WorkerState::Running) => {}
+    ///     Some(WorkerState::Initializing { stage, .. }) => eprintln!("waiting on {stage:?}"),
+    ///     other => eprintln!("pipeline not running: {other:?}"),
+    /// }
+    /// # }
+    /// ```
     #[cfg(feature = "pipeline")]
     pub fn pipeline_status(&self) -> Option<crate::pipeline::PipelineStatus> {
         Some(self.inner.as_ref()?.shared.pipeline_state()?.status())
