@@ -47,6 +47,9 @@ import {
   readPlainSourceScope,
   sourceScopeFromStored,
   readKeyDerivedIdentity,
+  readSegmentIdentity,
+  reconcileIdentity,
+  pageTitle,
 } from "../../lib/trace/index.js";
 import { bootScopeFromSearch } from "./scope-boot.js";
 import {
@@ -157,6 +160,20 @@ function boot(): void {
   }
 
   const source = traceSource(window.location.search);
+  const keyDerivedIdentity = readKeyDerivedIdentity(window.location.search);
+
+  // Tab title: "<service> | dial9 Trace Viewer". Same embedded-wins rule as
+  // the toolbar identity chip; the key-derived service shows until a trace
+  // with embedded metadata loads.
+  const updateTitle = (): void => {
+    const identity = reconcileIdentity(
+      readSegmentIdentity(store.getState().trace.trace),
+      keyDerivedIdentity,
+    );
+    document.title = pageTitle("dial9 Trace Viewer", identity.service?.value);
+  };
+  updateTitle();
+  store.subscribe(["trace"], updateTitle);
   // Forward references resolved after the shell mounts: the "New File" button
   // opens the load chrome (created below - it needs the shell's toast region
   // first), and the toolbar's analysis / range-reparse surfaces dispatch
@@ -175,7 +192,7 @@ function boot(): void {
     sourceLabel: () => loadChrome?.currentLabel() ?? source.label,
     // Key-derived svc/host from the browser handoff. A boot constant: the
     // toolbar reconciles it against the trace-embedded metadata.
-    keyDerivedIdentity: readKeyDerivedIdentity(window.location.search),
+    keyDerivedIdentity,
     onNewFile: () => loadChrome?.requestNewFile(),
     onOpenFieldCharts: () => fieldChartDialog.openCatalog(),
     onOpenAnalysis: (kind) => regionPanel?.openWholeTrace(kind),

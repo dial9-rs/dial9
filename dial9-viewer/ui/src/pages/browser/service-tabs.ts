@@ -2,6 +2,7 @@
 // tab is activated, except for the sole-service auto-focus path.
 
 import { assertInScheduledRender } from "../../store/store.js";
+import { pageTitle } from "../../lib/trace/index.js";
 import type { PageCtx } from "./ctx.js";
 import type { ServiceMetadata } from "./state.js";
 
@@ -14,6 +15,7 @@ export function mountServiceTabs({ store, els, actions }: PageCtx): void {
     const { services, serviceMetadata, activeService } = state.browse;
     const visible = state.ui.tab === "browse" && services.length > 0;
     els.serviceTabs.style.display = visible ? "" : "none";
+    document.title = pageTitle("dial9 Trace Browser", visible ? activeService : null);
 
     if (services !== lastServices || serviceMetadata !== lastMetadata) {
       lastServices = services;

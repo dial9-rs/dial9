@@ -7,8 +7,10 @@ import {
   Dial9Creds,
   Dial9Session,
   applyToCreds,
+  diffServiceLabel,
   nextMaxFiles,
   openSse,
+  pageTitle,
   sourceScopeFromStored,
   tokioStatsUrl,
 } from "../../lib/trace/index.js";
@@ -56,6 +58,13 @@ const diffParsed = parseDiff(originalParams);
 const fallbackSource = sourceScopeFromStored("", Dial9Creds.get());
 const scope = readScope(diffParsed?.a ?? originalParams, fallbackSource);
 const diffMode = diffParsed !== null;
+
+document.title = pageTitle(
+  "Tokio Stats",
+  diffParsed
+    ? diffServiceLabel(diffParsed.a.get("service"), diffParsed.b.get("service"))
+    : scope.service,
+);
 
 // Restore the link's reader-role (and region) into the creds store so this tab
 // has an identity to read the bucket with. The role then rides as a HEADER on

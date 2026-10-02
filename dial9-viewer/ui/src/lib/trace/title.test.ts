@@ -2,7 +2,43 @@
 // unknown-key handling.
 
 import { describe, expect, it } from "vitest";
-import { traceTitleParams } from "./title.js";
+import {
+  countTraceHosts,
+  diffServiceLabel,
+  hostCountSuffix,
+  pageTitle,
+  traceTitleParams,
+} from "./title.js";
+
+describe("diffServiceLabel", () => {
+  it("collapses matching sides to one service", () => {
+    expect(diffServiceLabel("metrics", "metrics")).toBe("metrics");
+  });
+
+  it("joins differing sides, marking a missing side with ?", () => {
+    expect(diffServiceLabel("metrics", "billing")).toBe("metrics vs billing");
+    expect(diffServiceLabel("metrics", null)).toBe("metrics vs ?");
+    expect(diffServiceLabel("", "billing")).toBe("? vs billing");
+  });
+
+  it("returns null when neither side has a service", () => {
+    expect(diffServiceLabel(null, " ")).toBeNull();
+  });
+});
+
+describe("pageTitle", () => {
+  it("prefixes the service when known", () => {
+    expect(pageTitle("Span Explorer", "metrics-service")).toBe(
+      "metrics-service | Span Explorer",
+    );
+  });
+
+  it("falls back to the bare page name for a missing or blank service", () => {
+    expect(pageTitle("dial9 Trace Viewer")).toBe("dial9 Trace Viewer");
+    expect(pageTitle("dial9 Trace Viewer", null)).toBe("dial9 Trace Viewer");
+    expect(pageTitle("dial9 Trace Viewer", "  ")).toBe("dial9 Trace Viewer");
+  });
+});
 
 const KEY_A_HOST1 =
   "traces/2026-04-09/1900/checkout-api/host1/boot-a/1744224000-0.bin.gz";
@@ -65,5 +101,49 @@ describe("traceTitleParams", () => {
     const p = traceTitleParams([]);
     expect([...p.keys()]).toEqual(["segs"]);
     expect(p.get("segs")).toBe("0");
+  });
+});
+
+describe("hostCountSuffix", () => {
+  it("formats a singular or plural host count", () => {
+    expect(hostCountSuffix(1)).toBe(" @ (1 host)");
+    expect(hostCountSuffix(250)).toBe(" @ (250 hosts)");
+  });
+
+  it("is empty for an unknown or non-positive count", () => {
+    expect(hostCountSuffix(null)).toBe("");
+    expect(hostCountSuffix(undefined)).toBe("");
+    expect(hostCountSuffix(0)).toBe("");
+  });
+
+  it("composes with pageTitle", () => {
+    expect(pageTitle("Flamegraph" + hostCountSuffix(5), "metrics")).toBe(
+      "metrics | Flamegraph @ (5 hosts)",
+    );
+  });
+});
+
+describe("countTraceHosts", () => {
+  const objectUrl = (key: string) =>
+    "/api/object?bucket=b&key=" + encodeURIComponent(key);
+
+  it("counts distinct hosts from /api/object key params", () => {
+    expect(
+      countTraceHosts([
+        objectUrl(KEY_A_HOST1),
+        objectUrl(KEY_B_HOST1),
+        objectUrl(KEY_C_HOST2),
+      ]),
+    ).toBe(2);
+  });
+
+  it("reads the key from a plain path when there is no key param", () => {
+    expect(countTraceHosts(["/" + KEY_A_HOST1, KEY_C_HOST2])).toBe(2);
+  });
+
+  it("returns null when any key is unrecognized, or there are no URLs", () => {
+    expect(countTraceHosts(["/demo-trace.bin", objectUrl("x/y.bin")])).toBeNull();
+    expect(countTraceHosts([objectUrl(KEY_A_HOST1), "/demo-trace.bin"])).toBeNull();
+    expect(countTraceHosts([])).toBeNull();
   });
 });

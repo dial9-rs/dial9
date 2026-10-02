@@ -43,3 +43,63 @@ export function traceTitleParams(
   params.set("segs", String(keys.length));
   return params;
 }
+
+/**
+ * Browser tab title for a page: `"<service> | <page>"` when the service is
+ * known, otherwise just `<page>`. Leading/trailing whitespace on the service
+ * is ignored, and a blank service counts as unknown.
+ */
+export function pageTitle(page: string, service?: string | null): string {
+  const svc = service?.trim();
+  return svc ? `${svc} | ${page}` : page;
+}
+
+/**
+ * Service label for a two-sided diff page: the shared service when both sides
+ * agree, `"a vs b"` when they differ (`?` stands in for a side with no
+ * service), and null when neither side has one.
+ */
+export function diffServiceLabel(
+  a?: string | null,
+  b?: string | null,
+): string | null {
+  const sa = a?.trim() ?? "";
+  const sb = b?.trim() ?? "";
+  if (!sa && !sb) return null;
+  if (sa === sb) return sa;
+  return `${sa || "?"} vs ${sb || "?"}`;
+}
+
+/**
+ * Host-count suffix for a tab title's page name: `" @ (1 host)"`,
+ * `" @ (5 hosts)"`. Empty when the count is unknown (null) or not positive,
+ * so an uncertain count is never shown.
+ */
+export function hostCountSuffix(hosts: number | null | undefined): string {
+  if (hosts == null || !(hosts > 0)) return "";
+  return ` @ (${hosts} ${hosts === 1 ? "host" : "hosts"})`;
+}
+
+/**
+ * Count the distinct hosts behind a set of `trace=` URLs. Each URL's S3 key
+ * comes from its `key` query param (`/api/object?...&key=`) or, failing that,
+ * its path. Returns null when the list is empty or ANY URL lacks a key in a
+ * recognized layout (see keys.ts): a partial count would understate it.
+ */
+export function countTraceHosts(urls: readonly string[]): number | null {
+  if (urls.length === 0) return null;
+  const hosts = new Set<string>();
+  for (const url of urls) {
+    let key: string;
+    try {
+      const u = new URL(url, "http://localhost");
+      key = u.searchParams.get("key") ?? u.pathname.replace(/^\//, "");
+    } catch {
+      return null;
+    }
+    const parsed = parseKey(key);
+    if (parsed.layout !== "known" || !parsed.host) return null;
+    hosts.add(parsed.host);
+  }
+  return hosts.size;
+}
