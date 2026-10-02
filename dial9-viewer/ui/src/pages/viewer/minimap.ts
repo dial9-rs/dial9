@@ -31,12 +31,16 @@ import {
   type MinimapRange,
 } from "./minimap-model.js";
 import { deriveMinimapPois, type MinimapPoi } from "./minimap-poi.js";
+import {
+  TRACE_DENSITY_RESOLUTION,
+  traceDensityBins,
+} from "../../lib/trace/derived.js";
 
 const CANVAS_CLASS = "d9-minimap-canvas";
 const BADGE_CLASS = "d9-minimap-badge";
 
 /** Whole-trace histogram resolution (resampled to bin count at render). */
-const TRACE_DENSITY_RESOLUTION = 256;
+
 
 /** Colors, aligned with viewer.css's palette (kept literal for the 2D ctx). */
 const COLORS: Record<BinCoverage, string> = {
@@ -99,12 +103,9 @@ export function mountMinimap(
     if (t === null || t.minTs === null || t.maxTs === null || t.maxTs <= t.minTs) {
       return null;
     }
-    // Columnar path: bin straight off the ts column (bin-for-bin identical to the
-    // fat path below, but without the ~13.7M-number `.map(e => e.timestamp)`
-    // transient - the whole point of the columnar store).
-    if (t.events instanceof ColumnarEvents) {
-      return t.events.densityBins(t.minTs, t.maxTs, TRACE_DENSITY_RESOLUTION);
-    }
+    // Columnar path: binned during the shared reconstruction, because the event
+    // columns are released as soon as that finishes.
+    if (t.events instanceof ColumnarEvents) return traceDensityBins(t);
     const times = t.events.map((e) => e.timestamp);
     return binTimestamps(times, { startNs: t.minTs, endNs: t.maxTs }, TRACE_DENSITY_RESOLUTION);
   });

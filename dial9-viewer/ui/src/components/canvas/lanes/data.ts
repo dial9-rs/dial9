@@ -25,6 +25,8 @@ import {
 } from "../../../lib/trace/runtime-task-spawns.js";
 import { spansById as buildSpanByIdSingle } from "../../../lib/trace/index.js";
 import { LazySpansById, LazySpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
+import type { QueueSampleIndex } from "../../../lib/trace/queue-samples.js";
+import type { WakeIndex } from "../../../lib/trace/wake-index.js";
 import type { ColumnarSpans, SpanByIdMulti, SpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
 import type { LaneSpans } from "../../../lib/trace/columnar-worker-spans.js";
 import type {
@@ -60,9 +62,9 @@ export interface LaneData {
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
   workerSpans: Record<number, LaneSpans>;
   /** Per-worker local-queue samples, sorted by t. */
-  workerQueueSamples: Record<number, { t: number; local: number }[]>;
+  queueSampleIndex: QueueSampleIndex;
   /** Wake events indexed by target worker. */
-  wakesByWorker: Record<number, WorkerWake[]>;
+  wakeIndex: WakeIndex;
   /** span id -> every span instance sharing it (highlight lookup, no scan). A
    * real Map on the fat path; a lazy store-backed adapter on the columnar path. */
   spansById: SpanByIdMulti;
@@ -137,8 +139,8 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
     runtimeAccents: identities.byRuntime,
     workerRuntime: identities.workerRuntime,
     workerSpans,
-    workerQueueSamples: spanResult.workerQueueSamples,
-    wakesByWorker: spanResult.wakesByWorker,
+    queueSampleIndex: spanResult.queueSampleIndex,
+    wakeIndex: spanResult.wakeIndex,
     spansById,
     allSpans: spanData.allSpans,
     spanByIdSingle,

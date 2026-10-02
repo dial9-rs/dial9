@@ -4,6 +4,7 @@
 
 import type { CustomTraceEvent } from "../../lib/trace/index.js";
 import type { FieldChartKind } from "../../types/state.js";
+import type { CustomEventStore } from "../../trace_parser.js";
 import {
   fieldChartKindFromAnnotation,
   isChartableNumericValue,
@@ -47,7 +48,7 @@ function compareName(a: string, b: string): number {
  * group, while an empty conflicting source is omitted.
  */
 export function buildFieldChartCatalog(
-  events: readonly CustomTraceEvent[],
+  events: CustomEventStore,
 ): FieldChartCatalog {
   const byEvent = new Map<string, Map<string, Candidate>>();
 

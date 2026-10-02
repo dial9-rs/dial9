@@ -141,6 +141,30 @@ declare module "*/trace_parser.js" {
     singleEventSpan?: SingleEventSpan | null;
   }
 
+  /** The reads consumers make of `customEvents`; an array satisfies it. */
+  export interface CustomEventStore {
+    readonly length: number;
+    at(i: number): CustomTraceEvent | undefined;
+    [Symbol.iterator](): IterableIterator<CustomTraceEvent>;
+    filter(
+      pred: (e: CustomTraceEvent, i: number) => boolean,
+    ): CustomTraceEvent[];
+    find(
+      pred: (e: CustomTraceEvent, i: number) => boolean,
+    ): CustomTraceEvent | undefined;
+  }
+
+  /** A {@link CustomEventStore} the parser can also write into. */
+  export interface CustomEventSink extends CustomEventStore {
+    pushCustom(
+      name: string,
+      timestamp: number,
+      fields: Record<string, import("*/decode.js").DecodedFieldValue>,
+      schema: unknown,
+      singleEventSpan: SingleEventSpan | null,
+    ): void;
+  }
+
   export interface AllocEvent {
     timestamp: number;
     tid: number;
@@ -164,6 +188,24 @@ declare module "*/trace_parser.js" {
     timestamp: number;
     droppedAllocs: number;
     droppedFrees: number;
+  }
+
+  /** The reads consumers make of `taskDumps`; a Map satisfies it. */
+  export interface TaskDumpStore {
+    get(taskId: number): TaskDump[] | undefined;
+    has(taskId: number): boolean;
+    keys(): IterableIterator<number>;
+    entries(): IterableIterator<[number, TaskDump[]]>;
+    readonly size: number;
+  }
+
+  /** A {@link TaskDumpStore} the parser can also write into. */
+  export interface TaskDumpSink extends TaskDumpStore {
+    pushDump(
+      taskId: number,
+      timestamp: number,
+      callchain: readonly (string | number | bigint)[],
+    ): void;
   }
 
   export interface TaskDump {
@@ -282,7 +324,7 @@ declare module "*/trace_parser.js" {
      * carry per-runtime counts in `runtimeMetrics`.
      */
     legacyActiveTaskSamples: LegacyActiveTaskSample[];
-    customEvents: CustomTraceEvent[];
+    customEvents: CustomEventStore;
     /**
      * Columnar span-producing custom events (SpanEnter/Exit/Close and annotated
      * single-event spans), present only on the main-thread columnar load path
@@ -292,7 +334,7 @@ declare module "*/trace_parser.js" {
      */
     spanEvents?: import("../lib/trace/columnar-span-events.js").ColumnarSpanEvents;
     /** task id -> async stack captures, sorted by timestamp. */
-    taskDumps: Map<number, TaskDump[]>;
+    taskDumps: TaskDumpStore;
     clockSyncAnchors: ClockSyncAnchor[];
     /** Monotonic-to-wall-clock offset; null when no anchor exists. */
     clockOffsetNs: number | null;
@@ -391,6 +433,19 @@ declare module "*/trace_parser.js" {
      * buildSpanDataColumnar reads the columns.
      */
     spanEventSink?: SpanEventSink;
+    /**
+     * Columnar sink for NON-span custom events
+     * (src/lib/trace/columnar-custom-events.ts): `pushCustom` types each
+     * schema's fields into columns and keeps the schema, so units and
+     * fieldKinds resolve on read. Defaults to an array of fat events.
+     */
+    customEventSink?: CustomEventSink;
+    /**
+     * Columnar sink for task dumps (src/lib/trace/columnar-task-dumps.ts):
+     * `pushDump` stores each dump in flat columns instead of a record plus a
+     * frame array. Defaults to a Map of fat dumps.
+     */
+    taskDumpSink?: TaskDumpSink;
     /** Directory parsing only (Node). */
     cache?: boolean;
     parallel?: boolean;
@@ -436,6 +491,15 @@ declare module "*/trace_parser.js" {
      * headers); withheld from cross-origin URLs.
      */
     headers?: Record<string, string>;
+    /**
+     * Receives each chunk as it arrived, before any gunzip, with whether this
+     * component was gzipped (see stream.ts streamTrace).
+     */
+    onRawChunk?: (
+      chunk: Uint8Array,
+      isGzip: boolean,
+      component?: number,
+    ) => void;
   }
 
   /**

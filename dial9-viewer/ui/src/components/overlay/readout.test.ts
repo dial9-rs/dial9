@@ -1,6 +1,7 @@
 // At-cursor readout tests: the compute, the coverage-signal mapping, and the
 // transient-channel store contract during hover. Node-pure + a store instance.
 
+import { QueueSampleIndex } from "../../lib/trace/queue-samples.js";
 import { describe, it, expect } from "vitest";
 import { computeAtCursorReadout, coverageAt, type AtCursorInput } from "./readout.js";
 import { createViewerStore } from "../../pages/viewer/store.js";
@@ -16,7 +17,7 @@ describe("computeAtCursorReadout", () => {
       { t: 100, global: 5 },
       { t: 200, global: 3 },
     ],
-    workerQueueSamples: {
+    queueSampleIndex: QueueSampleIndex.fromRecordMap({
       0: [
         { t: 0, local: 1 },
         { t: 100, local: 4 },
@@ -25,7 +26,7 @@ describe("computeAtCursorReadout", () => {
         { t: 0, local: 2 },
         { t: 100, local: 9 },
       ],
-    },
+    }),
     activeTaskSamples: [
       { t: 0, count: 1 },
       { t: 50, count: 3 },
@@ -50,7 +51,7 @@ describe("computeAtCursorReadout", () => {
     const empty: AtCursorInput = {
       workerIds: [0],
       queueSamples: [],
-      workerQueueSamples: { 0: [] },
+      queueSampleIndex: QueueSampleIndex.fromRecordMap({ 0: [] }),
       activeTaskSamples: [],
       hasLocalQueueDepth: true,
     };
@@ -66,7 +67,10 @@ describe("computeAtCursorReadout", () => {
   it("reports unknown local max when the depth is a sentinel", () => {
     const sentinel: AtCursorInput = {
       ...input,
-      workerQueueSamples: { 0: [{ t: 0, local: 0 }], 1: [{ t: 0, local: 0 }] },
+      queueSampleIndex: QueueSampleIndex.fromRecordMap({
+        0: [{ t: 0, local: 0 }],
+        1: [{ t: 0, local: 0 }],
+      }),
       hasLocalQueueDepth: false,
     };
     const r = computeAtCursorReadout(sentinel, 90, 0, "complete");

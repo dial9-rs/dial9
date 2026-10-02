@@ -11,7 +11,6 @@
 // strings, nulls, Maps (which round-trip as Maps), and bigint custom-event
 // field values; no functions, getters, class instances, symbols, or
 // typed-array leaves - so it crosses as-is, no snapshot shape needed.
-// `buffer` is an ArrayBuffer and is TRANSFERRED (zero-copy), not cloned.
 
 import type { ParsedTrace } from "../../../../trace_parser.js";
 
@@ -92,11 +91,13 @@ export type TraceWorkerRequest =
  */
 export interface TraceWorkerProgress {
   /**
-   * "fetching" while the buffered-mode download runs; "parsing" once
-   * decoded bytes flow. Stream mode is always "parsing" - fetch and parse
-   * are fused.
+   * "fetching" while the buffered-mode download runs; "parsing" once decoded
+   * bytes flow (stream mode is always "parsing" - fetch and parse are fused);
+   * "analyzing" once the bytes are decoded and the first render over the new
+   * trace is about to run its derivation. Only the main-thread loader reaches
+   * "analyzing": the worker's job ends at the done message.
    */
-  phase: "fetching" | "parsing";
+  phase: "fetching" | "parsing" | "analyzing";
   mode: TraceWorkerLoadMode;
   /** Number of trace= components in this load. */
   urlCount: number;
@@ -133,7 +134,7 @@ export interface TraceWorkerTiming {
   mode: TraceWorkerLoadMode;
   /** Decoded event count. */
   events: number;
-  /** Decompressed buffer length. */
+  /** Decompressed byte count. */
   bytes: number;
 }
 
@@ -146,11 +147,6 @@ export interface TraceWorkerDoneMessage {
   kind: "done";
   /** Structured-cloned as-is (see the cloneability note above). */
   trace: ParsedTrace;
-  /**
-   * The raw (gunzipped, concatenated) trace bytes, TRANSFERRED zero-copy
-   * for Set/Clear-Range in-memory re-parse.
-   */
-  buffer: ArrayBuffer;
   mode: TraceWorkerLoadMode;
   timing: TraceWorkerTiming;
 }
@@ -172,9 +168,9 @@ export type TraceWorkerResponse =
   | TraceWorkerErrorMessage;
 
 /**
- * postMessage-shaped sink the body writes responses into. `transfer`
- * lists ArrayBuffers to move rather than clone (the done message's
- * buffer). Bindings map this onto their environment's postMessage.
+ * postMessage-shaped sink the body writes responses into. `transfer` lists
+ * ArrayBuffers to move rather than clone. Bindings map this onto their
+ * environment's postMessage.
  */
 export type TraceWorkerPost = (
   message: TraceWorkerResponse,

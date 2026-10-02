@@ -28,9 +28,10 @@ export function resolveTraceUrls(
  */
 export function loadingLabel(
   mode: "stream" | "buffered",
-  phase: "fetching" | "parsing",
+  phase: "fetching" | "parsing" | "analyzing",
   urlCount: number
 ): string {
+  if (phase === "analyzing") return "Analyzing trace\u2026";
   if (mode === "stream") {
     return urlCount > 1 ? `Loading ${urlCount} traces\u2026` : "Loading trace\u2026";
   }

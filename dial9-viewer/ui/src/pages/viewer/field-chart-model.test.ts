@@ -242,7 +242,7 @@ describe("field-chart lifecycle", () => {
     const cache = createFieldChartSeriesCache();
     const trace = {
       customEvents: [event("Metric", 1, 10)],
-    } as ParsedTrace;
+    } as unknown as ParsedTrace;
     cache.get(trace, spec());
     expect(cache.entryCount()).toBe(1);
 
@@ -254,10 +254,10 @@ describe("field-chart lifecycle", () => {
     const cache = createFieldChartSeriesCache();
     const firstTrace = {
       customEvents: [event("Metric", 1, 10)],
-    } as ParsedTrace;
+    } as unknown as ParsedTrace;
     const nextTrace = {
       customEvents: [event("Metric", 2, 20)],
-    } as ParsedTrace;
+    } as unknown as ParsedTrace;
     cache.get(firstTrace, spec());
 
     cache.reconcile(nextTrace, [spec()]);

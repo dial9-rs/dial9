@@ -132,6 +132,19 @@ describe("progressLabel (keep-exactly)", () => {
     ).toBe("Parsing: 50% - 12k events");
   });
 
+  it("analyzing shows a percentage and the event count", () => {
+    expect(
+      progressLabel(
+        progress({
+          phase: "analyzing",
+          bytesRead: 0.42,
+          totalBytes: 1,
+          eventCount: 30_067_128,
+        }),
+      ),
+    ).toBe("Analyzing: 42% - 30067k events");
+  });
+
   it("parsing while streaming (total unknown) shows MB decoded", () => {
     expect(
       progressLabel(
