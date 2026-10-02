@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createActions, ROW_H } from "./actions.js";
 import type { BrowserEls } from "./dom.js";
 import { createBrowserStore, type HeatmapSegment } from "./state.js";
@@ -346,6 +346,10 @@ describe("clearBrowseNoService", () => {
 });
 
 describe("single-host focus", () => {
+  beforeEach(() => {
+    stubUrlEnv();
+  });
+
   function setup() {
     const segments: HeatmapSegment[] = [
       ["api", "host-1"],
