@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createActions } from "./actions.js";
+import { createActions, ROW_H } from "./actions.js";
 import type { BrowserEls } from "./dom.js";
 import { createBrowserStore, type HeatmapSegment } from "./state.js";
 import { toRows } from "./segments.js";
@@ -324,6 +324,139 @@ describe("clearBrowseNoService", () => {
     expect(store.getState().browse.status.text).toBe(
       "Choose a service to browse its traces.",
     );
+  });
+});
+
+describe("single-host focus", () => {
+  function setup() {
+    const segments: HeatmapSegment[] = [
+      ["api", "host-1"],
+      ["api", "host-10"],
+      ["worker", "host-1"],
+    ].map(([service, host]) => ({
+      key: `traces/2026-04-09/1910/${service}/${host}/boot/1000-0.bin.gz`,
+      size: 10,
+      start: 100,
+      end: 200,
+      layout: "known",
+      service: service!,
+      host: host!,
+      bootId: "boot",
+    }));
+    const rows = toRows(segments);
+    const store = createBrowserStore();
+    store.update("browse", {
+      services: ["api", "worker"],
+      activeService: "api",
+      segments,
+      rows,
+      domain: { tMin: 110, tMax: 190 },
+      fullDomain: { tMin: 100, tMax: 200 },
+      heatmapVisible: true,
+    });
+    const els = browserEls("api");
+    Object.assign(els, { heatmapCanvas: { clientWidth: 100, style: {} } });
+    return { store, rows, els, actions: createActions(store, els) };
+  }
+
+  it("focuses the exact service/host, clears hidden selections, and selects only the visible row", () => {
+    const { store, rows, actions } = setup();
+    const target = rows.find((row) => row.service === "worker")!;
+    const { domain, fullDomain } = store.getState().browse;
+    actions.finalizeSelection(0, 100, 0, rows.length * ROW_H);
+    expect(actions.getSelectedKeys()).toHaveLength(3);
+
+    actions.focusHost(target);
+
+    expect(store.getState().browse.rows).toEqual([target]);
+    expect(store.getState().browse.unfocusedRows).toBe(rows);
+    expect(store.getState().browse.domain).toBe(domain);
+    expect(store.getState().browse.fullDomain).toBe(fullDomain);
+    expect(actions.getSelectedKeys()).toEqual([]);
+    actions.selectSegmentAt(50, ROW_H / 2);
+    expect(actions.getSelectedKeys()).toEqual(target.segments.map((segment) => segment.key));
+    expect(store.getState().browse.selection!.rows).toEqual([0, 0]);
+    actions.finalizeSelection(0, 100, 0, rows.length * ROW_H);
+    expect(actions.getSelectedKeys()).toEqual(target.segments.map((segment) => segment.key));
+  });
+
+  it("restores original row order and data without changing the time window or retaining stale selection", () => {
+    const { store, rows, actions } = setup();
+    const domain = store.getState().browse.domain;
+    actions.focusHost(rows[1]!);
+    actions.focusHost(rows[1]!);
+    actions.selectSegmentAt(50, 0);
+    actions.showAllHosts();
+
+    expect(store.getState().browse.rows).toBe(rows);
+    expect(store.getState().browse.domain).toBe(domain);
+    expect(store.getState().browse.unfocusedRows).toBeNull();
+    expect(actions.getSelectedKeys()).toEqual([]);
+    actions.showAllHosts();
+    expect(store.getState().browse.rows).toBe(rows);
+  });
+
+  it("keeps focus through zoom and reset, and retains the zoom when all hosts return", () => {
+    const { store, rows, actions } = setup();
+    actions.focusHost(rows[1]!);
+    actions.zoomToX(20, 80);
+    const zoomed = store.getState().browse.domain;
+    expect(zoomed).toEqual({ tMin: 126, tMax: 174 });
+    actions.showAllHosts();
+    expect(store.getState().browse.domain).toBe(zoomed);
+    actions.focusHost(rows[1]!);
+    actions.resetHeatmapZoom();
+    expect(store.getState().browse.rows).toEqual([rows[1]]);
+    expect(store.getState().browse.domain).toEqual({ tMin: 100, tMax: 200 });
+  });
+
+  it.each(["resetBrowsePane", "clearBrowseNoService"] as const)(
+    "%s discards focus so old hosts cannot be restored",
+    (reset) => {
+      vi.stubGlobal("history", { replaceState: vi.fn(), pushState: vi.fn() });
+      vi.stubGlobal("window", {
+        location: { pathname: "/browser.html" },
+        Dial9UrlState: { serialize: () => "" },
+      });
+      const { store, rows, actions } = setup();
+      actions.focusHost(rows[1]!);
+      actions[reset]();
+      actions.showAllHosts();
+      actions.focusHost(rows[1]!);
+      expect(store.getState().browse.rows).toEqual([]);
+      expect(store.getState().browse.unfocusedRows).toBeNull();
+    },
+  );
+
+  it("discards focus on new results and on service changes", async () => {
+    vi.stubGlobal("history", { replaceState: vi.fn(), pushState: vi.fn() });
+    vi.stubGlobal("window", {
+      location: { pathname: "/browser.html" },
+      Dial9Creds: undefined,
+      Dial9UrlState: { serialize: () => "" },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      objects: [{
+        key: "traces/2026-04-09/1910/api/new-host/boot/1775761800-0.bin.gz",
+        size: 10,
+      }],
+    }), { status: 200 })));
+    const { store, rows, actions } = setup();
+    actions.focusHost(rows[1]!);
+    await actions.doTimeRangeSearch();
+    const newRows = store.getState().browse.rows;
+    expect(newRows).toHaveLength(1);
+    expect(newRows[0]!.host).toBe("new-host");
+    expect(store.getState().browse.unfocusedRows).toBeNull();
+    actions.showAllHosts();
+    actions.focusHost(rows[1]!);
+    expect(store.getState().browse.rows).toBe(newRows);
+
+    actions.focusHost(newRows[0]!);
+    actions.selectService("worker");
+    await vi.waitFor(() => expect(store.getState().browse.unfocusedRows).toBeNull());
+    expect(store.getState().browse.rows).not.toBe(newRows);
+    expect(store.getState().browse.activeService).toBe("worker");
   });
 });
 

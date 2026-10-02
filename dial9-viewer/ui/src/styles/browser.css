@@ -148,7 +148,7 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
     border-bottom: 1px solid #222; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
 }
 #heatmap-hint .legend { display: inline-flex; align-items: center; gap: 6px; }
-#heatmap-reset-zoom { padding: 2px 10px; font-size: 0.95em; }
+#heatmap-reset-zoom, #heatmap-show-all-hosts { padding: 2px 10px; font-size: 0.95em; }
 #heatmap-hint .legend .bar {
     width: 90px; height: 10px; border-radius: 2px;
     background: linear-gradient(to right, #2a2a5a, #6c63ff, #ff6b6b, #ffd93d);
@@ -169,6 +169,7 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
 }
 #heatmap-label-resizer:hover { background: rgba(126, 200, 227, 0.2); }
 #heatmap-labels .row {
+    display: block; width: 100%; text-align: left; border: 0; border-radius: 0;
     height: 26px; line-height: 26px; padding: 0 8px;
     font-size: 0.78em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     border-bottom: 1px solid #2a2a4a; color: #cfcfe6;
@@ -176,6 +177,8 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
 #heatmap-labels .row:nth-child(odd) { background: #20203e; }
 #heatmap-labels .row:nth-child(even) { background: #191932; }
 #heatmap-labels .row.sel { background: #2f2f6a; }
+#heatmap-labels button.row:hover { background: #303054; }
+#heatmap-labels button.row:focus-visible { outline: 2px solid #7ec8e3; outline-offset: -2px; }
 #heatmap-labels .row .svc { color: #7ec8e3; }
 #heatmap-labels .row .boot { color: #00e5ff; font-size: 0.85em; }
 #heatmap-plot { flex: 1; position: relative; min-width: 0; }

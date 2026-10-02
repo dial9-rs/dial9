@@ -140,6 +140,8 @@ export interface BrowseSlice {
   warning: string | null;
   segments: readonly HeatmapSegment[];
   rows: readonly HeatmapRow[];
+  /** Preserve row identities so host focus can restore the original result. */
+  unfocusedRows: readonly HeatmapRow[] | null;
   /** Displayed time domain (may be zoomed); null before any results. */
   domain: TimeDomain | null;
   /** Full data extent; restored on zoom reset. */
@@ -250,6 +252,7 @@ export function initialBrowserState(): BrowserState {
       warning: null,
       segments: [],
       rows: [],
+      unfocusedRows: null,
       domain: null,
       fullDomain: null,
       heatmapVisible: false,

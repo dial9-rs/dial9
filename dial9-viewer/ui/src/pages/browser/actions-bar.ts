@@ -109,7 +109,9 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
         profileSel.t0 && profileSel.t1
           ? ` · ${fmtTick(profileSel.t0, tz)}–${fmtTick(profileSel.t1, tz)} ${tzName(tz)}`
           : "";
-      const scopeLabel = sel ? "" : "Current service · ";
+      const scopeLabel = sel ? "" : state.browse.unfocusedRows
+        ? "Focused host · "
+        : "Current service · ";
       els.selectionCount.textContent = `${scopeLabel}${profileSel.keys.length} segment${profileSel.keys.length !== 1 ? "s" : ""} · ${formatSize(profileSel.bytes)}${win}`;
       return;
     }

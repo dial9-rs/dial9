@@ -70,6 +70,7 @@ export interface BrowserEls {
   heatmapCursorLabel: HTMLDivElement;
   heatmapAxis: HTMLDivElement;
   heatmapResetZoom: HTMLButtonElement;
+  heatmapShowAllHosts: HTMLButtonElement;
   // Raw search
   rawSearchInput: HTMLInputElement;
   rawSearchBtn: HTMLButtonElement;
@@ -146,6 +147,7 @@ export function queryEls(): BrowserEls {
     heatmapCursorLabel: byId("heatmap-cursor-label"),
     heatmapAxis: byId("heatmap-axis"),
     heatmapResetZoom: byId("heatmap-reset-zoom"),
+    heatmapShowAllHosts: byId("heatmap-show-all-hosts"),
     rawSearchInput: byId("raw-search-input"),
     rawSearchBtn: bySelector('button[data-action="raw-search"]'),
     rawStatus: byId("raw-status"),
