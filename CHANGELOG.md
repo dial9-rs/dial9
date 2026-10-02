@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.2...dial9-v0.5.3) - 2026-10-02
+
+### Added
+
+- *(tokio)* attach LocalRuntime for !Send executors ([#989](https://github.com/dial9-rs/dial9/pull/989))
+- gate S3 segment processing on liveness ([#965](https://github.com/dial9-rs/dial9/pull/965))
+- *(viewer)* compare span filter with its complement ([#996](https://github.com/dial9-rs/dial9/pull/996))
+- *(viewer)* trace API and SSE UX phases ([#960](https://github.com/dial9-rs/dial9/pull/960))
+
+### Fixed
+
+- *(viewer)* repair broken commands and references in the skills ([#980](https://github.com/dial9-rs/dial9/pull/980))
+- *(dial9-core)* contain panicking Source implementations ([#897](https://github.com/dial9-rs/dial9/pull/897))
+- *(viewer)* bound span sample attribution to task polls ([#961](https://github.com/dial9-rs/dial9/pull/961))
+- *(viewer)* locate the toolkit by content, not by name ([#952](https://github.com/dial9-rs/dial9/pull/952))
+
+### Other
+
+- cache spawn location pool IDs and use AHash for hot maps ([#997](https://github.com/dial9-rs/dial9/pull/997))
+- *(ui)* Improve memory usage of big traces ([#947](https://github.com/dial9-rs/dial9/pull/947))
+- *(viewer)* remove the HTML report skill ([#979](https://github.com/dial9-rs/dial9/pull/979))
+
 ### Added
 
 - `Dial9HandleTokioExt::attach_tokio_local_runtime` attaches a
