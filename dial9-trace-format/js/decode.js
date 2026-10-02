@@ -16,7 +16,34 @@ const FieldType = {
   DynamicList: 14, DynamicMap: 15,
 };
 
+/** Bytes consumed by the most recent `decodeULEB128`; see `fieldBytes`. */
+let ulebBytes = 0;
+
+/**
+ * ULEB128 as a Number, or a BigInt when the value needs more than 53 bits.
+ * Callers stringify or coerce, so either works, the Number case avoids a BigInt
+ * per byte on the varints that make up the bulk of a trace.
+ */
 function decodeULEB128(view, offset) {
+  let result = 0;
+  let scale = 1;
+  let pos = offset;
+  while (true) {
+    const byte = view.getUint8(pos++);
+    result += (byte & 0x7f) * scale;
+    scale *= 128;
+    if ((byte & 0x80) === 0) {
+      ulebBytes = pos - offset;
+      // The Number accumulation has already lost precision by here, so redo
+      // the whole value exactly rather than patching it up.
+      return result > Number.MAX_SAFE_INTEGER
+        ? decodeULEB128Big(view, offset)
+        : result;
+    }
+  }
+}
+
+function decodeULEB128Big(view, offset) {
   let result = 0n;
   let shift = 0n;
   let pos = offset;
@@ -24,39 +51,56 @@ function decodeULEB128(view, offset) {
     const byte = view.getUint8(pos++);
     result |= BigInt(byte & 0x7f) << shift;
     shift += 7n;
-    if ((byte & 0x80) === 0) return [result, pos - offset];
+    if ((byte & 0x80) === 0) {
+      ulebBytes = pos - offset;
+      return result;
+    }
   }
 }
 
 const OPTIONAL_BIT = 0x80;
 
+const TEXT = new TextDecoder();
+
+/**
+ * Bytes consumed by the most recent `decodeFieldValue` call.
+ *
+ * Returning `[value, consumed]` would allocate an array per field, the largest
+ * source of garbage in a parse. Safe under the optional/list/map recursion:
+ * each inner call completes before its caller reads the slot.
+ */
+let fieldBytes = 0;
+
 function decodeFieldValue(view, offset, fieldType) {
   // Handle optional modifier: high bit set means 1-byte presence prefix.
   if (fieldType & OPTIONAL_BIT) {
     const prefix = view.getUint8(offset);
-    if (prefix === 0x00) return [null, 1];
-    const [val, size] = decodeFieldValue(view, offset + 1, fieldType & 0x7F);
-    return [val, 1 + size];
+    if (prefix === 0x00) { fieldBytes = 1; return null; }
+    const val = decodeFieldValue(view, offset + 1, fieldType & 0x7F);
+    fieldBytes += 1;
+    return val;
   }
   switch (fieldType) {
-    case FieldType.I64: return [view.getBigInt64(offset, true), 8];
-    case FieldType.F64: return [view.getFloat64(offset, true), 8];
-    case FieldType.Bool: return [view.getUint8(offset) !== 0, 1];
+    case FieldType.I64: { fieldBytes = 8; return view.getBigInt64(offset, true); }
+    case FieldType.F64: { fieldBytes = 8; return view.getFloat64(offset, true); }
+    case FieldType.Bool: { fieldBytes = 1; return view.getUint8(offset) !== 0; }
     case FieldType.String:
     case FieldType.Bytes: {
       const len = view.getUint32(offset, true);
       const bytes = new Uint8Array(view.buffer, view.byteOffset + offset + 4, len);
       const val = fieldType === FieldType.String
-        ? new TextDecoder().decode(bytes)
+        ? TEXT.decode(bytes)
         : Array.from(new Uint8Array(bytes));
-      return [val, 4 + len];
+      fieldBytes = 4 + len;
+      return val;
     }
     case FieldType.Varint: {
-      const [val, consumed] = decodeULEB128(view, offset);
-      return [val.toString(), consumed];
+      const val = decodeULEB128(view, offset);
+      fieldBytes = ulebBytes;
+      return val.toString();
     }
-    case FieldType.PooledString: return [view.getUint32(offset, true), 4];
-    case FieldType.PooledStackFrames: return [view.getUint32(offset, true), 4];
+    case FieldType.PooledString: { fieldBytes = 4; return view.getUint32(offset, true); }
+    case FieldType.PooledStackFrames: { fieldBytes = 4; return view.getUint32(offset, true); }
     case FieldType.StackFrames: {
       const count = view.getUint32(offset, true);
       let pos = 4;
@@ -67,13 +111,14 @@ function decodeFieldValue(view, offset, fieldType) {
         addrs.push((BigInt(hi) << 32n | BigInt(lo)).toString());
         pos += 8;
       }
-      return [addrs, pos];
+      fieldBytes = pos;
+      return addrs;
     }
     case FieldType.StringMap: {
       const count = view.getUint32(offset, true);
       let pos = 4;
       const pairs = {};
-      const td = new TextDecoder();
+      const td = TEXT;
       for (let i = 0; i < count; i++) {
         const kLen = view.getUint32(offset + pos, true); pos += 4;
         const key = td.decode(new Uint8Array(view.buffer, view.byteOffset + offset + pos, kLen)); pos += kLen;
@@ -82,22 +127,23 @@ function decodeFieldValue(view, offset, fieldType) {
         if (key in pairs) console.warn(`StringMap: duplicate key "${key}", overwriting previous value`);
         pairs[key] = val;
       }
-      return [pairs, pos];
+      fieldBytes = pos;
+      return pairs;
     }
-    case FieldType.U8: return [view.getUint8(offset), 1];
-    case FieldType.U16: return [view.getUint16(offset, true), 2];
-    case FieldType.U32: return [view.getUint32(offset, true), 4];
+    case FieldType.U8: { fieldBytes = 1; return view.getUint8(offset); }
+    case FieldType.U16: { fieldBytes = 2; return view.getUint16(offset, true); }
+    case FieldType.U32: { fieldBytes = 4; return view.getUint32(offset, true); }
     case FieldType.DynamicList: {
       const count = view.getUint32(offset, true);
       let pos = 4;
       const items = [];
       for (let i = 0; i < count; i++) {
         const tag = view.getUint8(offset + pos); pos += 1;
-        const [val, consumed] = decodeFieldValue(view, offset + pos, tag);
-        items.push(val);
-        pos += consumed;
+        items.push(decodeFieldValue(view, offset + pos, tag));
+        pos += fieldBytes;
       }
-      return [items, pos];
+      fieldBytes = pos;
+      return items;
     }
     case FieldType.DynamicMap: {
       const count = view.getUint32(offset, true);
@@ -105,14 +151,15 @@ function decodeFieldValue(view, offset, fieldType) {
       const entries = [];
       for (let i = 0; i < count; i++) {
         const keyTag = view.getUint8(offset + pos); pos += 1;
-        const [key, keySize] = decodeFieldValue(view, offset + pos, keyTag);
-        pos += keySize;
+        const key = decodeFieldValue(view, offset + pos, keyTag);
+        pos += fieldBytes;
         const valTag = view.getUint8(offset + pos); pos += 1;
-        const [val, valSize] = decodeFieldValue(view, offset + pos, valTag);
-        pos += valSize;
+        const val = decodeFieldValue(view, offset + pos, valTag);
+        pos += fieldBytes;
         entries.push([key, val]);
       }
-      return [entries, pos];
+      fieldBytes = pos;
+      return entries;
     }
     default: throw new Error(`Unknown field type: ${fieldType}`);
   }
@@ -275,7 +322,7 @@ class TraceDecoder {
   _decodeSchema() {
     const typeId = this._view.getUint16(this._pos, true); this._pos += 2;
     const nameLen = this._view.getUint16(this._pos, true); this._pos += 2;
-    const name = new TextDecoder().decode(
+    const name = TEXT.decode(
       new Uint8Array(this._view.buffer, this._view.byteOffset + this._pos, nameLen));
     this._pos += nameLen;
     const hasTimestamp = this._view.getUint8(this._pos) !== 0; this._pos += 1;
@@ -283,7 +330,7 @@ class TraceDecoder {
     const fields = [];
     for (let i = 0; i < fieldCount; i++) {
       const fnLen = this._view.getUint16(this._pos, true); this._pos += 2;
-      const fn_ = new TextDecoder().decode(
+      const fn_ = TEXT.decode(
         new Uint8Array(this._view.buffer, this._view.byteOffset + this._pos, fnLen));
       this._pos += fnLen;
       const ft = this._view.getUint8(this._pos); this._pos++;
@@ -312,7 +359,8 @@ class TraceDecoder {
 
     const values = {};
     for (const field of schema.fields) {
-      const [val, consumed] = decodeFieldValue(this._view, this._pos, field.fieldType);
+      const val = decodeFieldValue(this._view, this._pos, field.fieldType);
+      const consumed = fieldBytes;
       const innerType = field.fieldType & 0x7F;
       if (innerType === FieldType.PooledString && val !== null) {
         values[field.name] = this.stringPool.get(val) ?? `<unresolved pool#${val}>`;
@@ -330,11 +378,11 @@ class TraceDecoder {
 
   _decodeSchemaAnnotations() {
     // Unlike schema/event frames, type_id is LEB128 here.
-    const [typeIdBig, consumed] = decodeULEB128(this._view, this._pos);
-    this._pos += consumed;
+    const typeIdBig = decodeULEB128(this._view, this._pos);
+    this._pos += ulebBytes;
     const typeId = Number(typeIdBig);
     const count = this._view.getUint16(this._pos, true); this._pos += 2;
-    const td = new TextDecoder();
+    const td = TEXT;
     const annotations = [];
     for (let i = 0; i < count; i++) {
       const fieldIndex = this._view.getUint16(this._pos, true); this._pos += 2;
@@ -377,7 +425,7 @@ class TraceDecoder {
     for (let i = 0; i < count; i++) {
       const poolId = this._view.getUint32(this._pos, true); this._pos += 4;
       const len = this._view.getUint32(this._pos, true); this._pos += 4;
-      const data = new TextDecoder().decode(
+      const data = TEXT.decode(
         new Uint8Array(this._view.buffer, this._view.byteOffset + this._pos, len));
       this._pos += len;
       this.stringPool.set(poolId, data);

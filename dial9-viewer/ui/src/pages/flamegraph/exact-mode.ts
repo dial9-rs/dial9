@@ -15,6 +15,9 @@ import {
   applyToCreds,
   isSourceShareable,
   loadTraceInWorker,
+  countTraceHosts,
+  pageTitle,
+  hostCountSuffix,
   readNamespacedSourceScope,
   readPlainSourceScope,
   sourceScopeFromStored,
@@ -75,7 +78,10 @@ export async function runExactMode(
   // Loading label: the worker picks stream vs buffered itself with the same
   // canStreamDecode rule, so the main-thread answer sets the initial label;
   // progress messages keep it accurate afterwards.
-  const setLoadLabel = (mode: "stream" | "buffered", phase: "fetching" | "parsing"): void => {
+  const setLoadLabel = (
+    mode: "stream" | "buffered",
+    phase: "fetching" | "parsing" | "analyzing",
+  ): void => {
     els.loadingEl.textContent = loadingLabel(mode, phase, rawTraceUrls.length);
   };
   setLoadLabel(canStreamDecode() ? "stream" : "buffered", "fetching");
@@ -172,7 +178,14 @@ export async function runExactMode(
     startNs != null && endNs != null
       ? ((endNs - startNs) / 1e6).toFixed(2)
       : null;
-  document.title = `Flamegraph \u2014 ${label}` + (durMs ? ` (${durMs}ms)` : "");
+  // Tab: a host COUNT instead of a hostname, which is long and often truncated
+  // away. countTraceHosts is null (no count shown) when any trace URL's key
+  // can't be parsed, since the count would then be a guess.
+  document.title =
+    pageTitle(
+      "Flamegraph" + hostCountSuffix(countTraceHosts(rawTraceUrls)),
+      svc ?? label,
+    ) + (durMs ? ` (${durMs}ms)` : "");
   els.titleEl.textContent = `Flamegraph \u2014 ${label}`;
   const titleBits = [`${allSamples.length} samples`];
   if (segs) titleBits.push(`${segs} segment${segs !== "1" ? "s" : ""}`);

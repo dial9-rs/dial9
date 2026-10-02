@@ -77,6 +77,7 @@ import {
 } from "./task-flamegraph-model.js";
 import { meanLifetimeNs, spawnFamilyStats } from "./task-scope-model.js";
 import { pollFlamegraphCacheSignature } from "./analysis-cache-signature.js";
+import type { CustomEventStore } from "../../trace_parser.js";
 
 /** Clamp bounds for the resize drag ([200px, 92vw]). */
 const MIN_WIDTH = 200;
@@ -127,7 +128,7 @@ export interface MountedInspector {
 /** Trace-invariant lookups the inspector reads, cached over the trace slice. */
 interface InspectorData {
   laneData: LaneData | null;
-  customEvents: readonly CustomTraceEvent[];
+  customEvents: CustomEventStore;
   callframeSymbols: CallframeSymbols;
   queueData: QueueData;
   /** Enables the flamegraph's runtime filter dropdown; null before a trace. */

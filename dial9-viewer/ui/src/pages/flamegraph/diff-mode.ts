@@ -10,7 +10,9 @@ import {
   Dial9Creds,
   Dial9Session,
   applyToCreds,
+  diffServiceLabel,
   isSourceShareable,
+  pageTitle,
   readPlainSourceScope,
   sourceScopeFromStored,
 } from "../../lib/trace/index.js";
@@ -48,7 +50,10 @@ export function runDiffMode(params: URLSearchParams, els: PageEls): void {
     return;
   }
 
-  document.title = "Flamegraph diff";
+  document.title = pageTitle(
+    "Flamegraph diff",
+    diffServiceLabel(diffParsed.a.get("service"), diffParsed.b.get("service")),
+  );
   els.titleEl.textContent = "Flamegraph diff";
   els.loadingEl.classList.add("hidden");
   els.containerEl.style.display = "flex";

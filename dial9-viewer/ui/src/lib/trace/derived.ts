@@ -20,7 +20,12 @@ import {
 } from "./index.js";
 import type { SpanData } from "./index.js";
 import { ColumnarEvents } from "./columnar-events.js";
-import { buildWorkerSpansColumnarStore } from "./worker-spans-columnar.js";
+import { WakeIndex } from "./wake-index.js";
+import { QueueSampleIndex } from "./queue-samples.js";
+import {
+  buildWorkerSpansColumnarStore,
+  buildWorkerSpansColumnarStoreChunked,
+} from "./worker-spans-columnar.js";
 import { buildSpanDataColumnar } from "./span-data-columnar.js";
 import { measureSpan } from "./load-perf.js";
 import {
@@ -31,6 +36,7 @@ import {
   type LaneWorkerSpans,
 } from "./columnar-worker-spans.js";
 import type { ParsedTrace, RuntimeGroup, SchedDelay } from "../../types/trace.js";
+import type { SchedDelayList } from "./sched-delays.js";
 import {
   computeRuntimeMetrics,
   type RuntimeMetrics,
@@ -105,7 +111,7 @@ export interface DetectorInputs {
   workerIds: number[];
   /** Which representation the detectors scan (columnar columns or fat spans). */
   lanes: LaneSource;
-  schedDelays: SchedDelay[];
+  schedDelays: SchedDelayList | SchedDelay[];
   /**
    * Gates "off-cpu-active". `thread_cpu_time_nanos()` returns a hardcoded 0 off
    * Linux, so every active period on a workstation trace reports ratio 0 and an
@@ -148,8 +154,12 @@ export function sharedDetectorInputs(trace: ParsedTrace): DetectorInputs {
   const lanes = laneSource(columnarWorkerStoreFor(trace), spanResult.workerSpans);
   const schedDelays = measureSpan("schedDelays", () =>
     lanes.columnar
-      ? lanes.store.schedulingDelays(workerIds, spanResult.wakesByTask)
-      : computeSchedulingDelays(lanes.workerSpans, workerIds, spanResult.wakesByTask),
+      ? lanes.store.schedulingDelays(workerIds, spanResult.wakeIndex)
+      : computeSchedulingDelays(
+          lanes.workerSpans,
+          workerIds,
+          spanResult.wakesByTask ?? {},
+        ),
   );
 
   const inputs: DetectorInputs = {
@@ -160,6 +170,137 @@ export function sharedDetectorInputs(trace: ParsedTrace): DetectorInputs {
   };
   detectorInputsCache.set(trace, inputs);
   return inputs;
+}
+
+/** Work between yields: long enough to keep the pacing overhead small, short
+ *  enough to leave a frame budget room to paint. */
+const SLICE_BUDGET_MS = 12;
+
+/**
+ * Build the derivation up front, in slices, so it does not land whole inside
+ * the first render over a new trace. On a large trace that is seconds of
+ * blocked main thread, which cannot paint a label or tick a timer.
+ *
+ * Both halves are the same work the lazy path does, written into the same
+ * caches, so every consumer stays synchronous and finds the result already
+ * there.
+ *
+ * `onProgress` gets 0..1 across both halves, weighted by their measured share.
+ * Columnar traces only - the fat path is small by construction.
+ */
+export async function warmDerived(
+  trace: ParsedTrace,
+  onProgress: (fraction: number) => void,
+  yieldToEventLoop: () => Promise<void>,
+): Promise<void> {
+  const ev = trace.events;
+  if (!(ev instanceof ColumnarEvents)) return;
+  if (workerSpansCache.has(trace) && detectorInputsCache.has(trace)) return;
+
+  /** Reconstruct's measured share of the two halves; the rest is sched delays. */
+  const RECONSTRUCT_SHARE = 0.7;
+
+  // The generators yield far more often than the page needs to repaint, and
+  // charging a frame for each one costs more than the work it paces. Run slices
+  // back to back until the budget is spent, then give the frame away once.
+  let sliceStart = performance.now();
+  const breathe = async (): Promise<void> => {
+    if (performance.now() - sliceStart < SLICE_BUDGET_MS) return;
+    await yieldToEventLoop();
+    sliceStart = performance.now();
+  };
+
+  const build = buildWorkerSpansColumnarStoreChunked(
+    ev, deriveWorkerIds(trace), trace.maxTs ?? 0, trace.blockInPlaceGaps,
+  );
+  let step = build.next();
+  while (!step.done) {
+    onProgress(step.value * RECONSTRUCT_SHARE);
+    await breathe();
+    step = build.next();
+  }
+  const result = step.value;
+
+  if (trace.cpuSamples && trace.cpuSamples.length > 0) {
+    result.store.attachCpuSamples(trace.cpuSamples as never);
+    await yieldToEventLoop();
+    sliceStart = performance.now();
+  }
+  columnarStoreCache.set(trace, result.store);
+  finishEventColumns(trace, ev);
+  const spanResult: LaneWorkerSpans = {
+    workerSpans: result.store.workerLanes(),
+    perWorker: {},
+    queueSamples: result.queueSamples,
+    queueSampleIndex: result.queueSampleIndex,
+    maxLocalQueue: result.maxLocalQueue,
+    wakeIndex: result.wakeIndex,
+  };
+  workerSpansCache.set(trace, spanResult);
+
+  const workerIds = lifecycleWorkerIds(trace);
+  const delays = result.store.schedulingDelaysChunked(workerIds, result.wakeIndex);
+  let d = delays.next();
+  while (!d.done) {
+    onProgress(RECONSTRUCT_SHARE + d.value * (1 - RECONSTRUCT_SHARE));
+    await breathe();
+    d = delays.next();
+  }
+  const lanes = laneSource(result.store, spanResult.workerSpans);
+  detectorInputsCache.set(trace, {
+    workerIds,
+    lanes,
+    schedDelays: d.value,
+    hasWorkerCpuTime: anyWorkerCpuTime(lanes),
+  });
+  onProgress(1);
+}
+
+/**
+ * Bins in the minimap's whole-trace density strip. It lives here because the
+ * bins are computed and cached while the event columns are still alive, so no
+ * caller can ask for a different resolution afterwards.
+ */
+export const TRACE_DENSITY_RESOLUTION = 256;
+
+const densityCache = new WeakMap<ParsedTrace, number[] | null>();
+
+/**
+ * Whole-trace event density for the minimap strip, binned at
+ * {@link TRACE_DENSITY_RESOLUTION}. Columnar traces only; the fat path has no
+ * release to work around. Building the worker spans is what fills it.
+ */
+export function traceDensityBins(trace: ParsedTrace): number[] | null {
+  const cached = densityCache.get(trace);
+  if (cached !== undefined) return cached;
+  sharedWorkerSpans(trace);
+  return densityCache.get(trace) ?? null;
+}
+
+/**
+ * Run the last reads of the event columns, then drop them. Everything after
+ * this renders from the worker-span store, the wake index and the queue
+ * samples, which the reconstruction has already built.
+ *
+ * The minimap's density strip and the lifecycle worker-id scan also walk the
+ * columns, so both are memoized here before the drop. Both builders of the
+ * worker spans call this: sharedWorkerSpans, and warmDerived, which builds the
+ * store directly.
+ */
+function finishEventColumns(trace: ParsedTrace, ev: ColumnarEvents): void {
+  computeDensity(trace, ev);
+  lifecycleWorkerIds(trace);
+  ev.release();
+}
+
+function computeDensity(trace: ParsedTrace, ev: ColumnarEvents): void {
+  const { minTs, maxTs } = trace;
+  densityCache.set(
+    trace,
+    minTs == null || maxTs == null || maxTs <= minTs
+      ? null
+      : ev.densityBins(minTs, maxTs, TRACE_DENSITY_RESOLUTION),
+  );
 }
 
 /** Keyed on trace identity, so a reparse invalidates but a pan never does. */
@@ -205,14 +346,14 @@ export function sharedWorkerSpans(trace: ParsedTrace): LaneWorkerSpans {
         );
       }
       columnarStoreCache.set(trace, built.store);
+      finishEventColumns(trace, ev);
       r = {
         workerSpans: built.store.workerLanes(),
         perWorker: {},
         queueSamples: built.queueSamples,
-        workerQueueSamples: built.workerQueueSamples,
+        queueSampleIndex: built.queueSampleIndex,
         maxLocalQueue: built.maxLocalQueue,
-        wakesByTask: built.wakesByTask,
-        wakesByWorker: built.wakesByWorker,
+        wakeIndex: built.wakeIndex,
       };
     } else {
       const fat = buildWorkerSpans(
@@ -227,7 +368,12 @@ export function sharedWorkerSpans(trace: ParsedTrace): LaneWorkerSpans {
       if (trace.cpuSamples && trace.cpuSamples.length > 0) {
         attachCpuSamples(trace.cpuSamples, fat.workerSpans);
       }
-      r = fat;
+      // Wrap the frozen builder's maps so consumers see one interface.
+      r = {
+        ...fat,
+        wakeIndex: WakeIndex.fromRecords(fat.wakesByTask),
+        queueSampleIndex: QueueSampleIndex.fromRecordMap(fat.workerQueueSamples),
+      };
     }
     workerSpansCache.set(trace, r);
   }
@@ -266,11 +412,12 @@ export function sharedSpanData(trace: ParsedTrace): SpanData {
     const workerSpans = sharedWorkerSpans(trace).workerSpans;
     const store = columnarStoreCache.get(trace);
     const spanEvents = trace.spanEvents;
+    const columnar = store !== undefined && spanEvents !== undefined;
     r = measureSpan("spanData", () =>
-      store && spanEvents
+      columnar
         ? buildSpanDataColumnar(
-            spanEvents,
-            store,
+            spanEvents!,
+            store!,
             trace.tidBindings,
             trace.blockInPlaceGaps,
           )
@@ -282,6 +429,7 @@ export function sharedSpanData(trace: ParsedTrace): SpanData {
           ),
     );
     spanDataCache.set(trace, r);
+    if (columnar) spanEvents!.release();
   }
   return r;
 }

@@ -275,6 +275,8 @@ describe("event-data derived cache", () => {
     store.update("trace", { trace: fakeTrace([ev("real", 10)]) });
     const second = eventData();
     expect(computes).toBe(2);
-    expect(second.events.map((e) => e.name)).toEqual(["real"]);
+    expect([...second.order].map((row) => second.store.at(row)!.name)).toEqual([
+      "real",
+    ]);
   });
 });

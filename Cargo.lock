@@ -1917,6 +1917,7 @@ dependencies = [
 name = "dial9-core"
 version = "0.5.2"
 dependencies = [
+ "ahash",
  "arc-swap",
  "assert2",
  "bon",
@@ -2065,6 +2066,7 @@ dependencies = [
 name = "dial9-trace-format"
 version = "0.5.1"
 dependencies = [
+ "ahash",
  "dial9-trace-format",
  "dial9-trace-format-derive",
  "flate2",

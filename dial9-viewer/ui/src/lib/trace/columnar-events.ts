@@ -17,6 +17,8 @@
 // customEvents stay fat: they are used as WeakMap keys and spread via
 // Object.entries(fields), so they can't share this representation.
 
+import { allocColumn, resizeColumns } from "./resizable-column.js";
+
 /** Event-type discriminants, mirroring the frozen core's EVENT_TYPES. */
 export const EVT = {
   PollStart: 0,
@@ -58,6 +60,9 @@ const INITIAL_CAP = 1 << 16;
  */
 const BYTES_PER_EVENT_ESTIMATE = 32;
 
+/** Absent-tid sentinel. u32 max. */
+const NO_TID = 0xffffffff;
+
 /** Ceiling on the estimate, so a malformed or unusually large byte count cannot
  *  commit hundreds of MB of columns up front. Past this, doubling takes over. */
 const MAX_ESTIMATED_CAP = 1 << 25; // ~33.5M events
@@ -81,22 +86,27 @@ export class ColumnarEvents {
   eventType: Uint8Array;
   ts: Float64Array;
   workerId: Int32Array;
-  localQueue: Int32Array;
+  /** Wire type is u8 (telemetry/format.rs), so a byte holds it. */
+  localQueue: Uint8Array;
   globalQueue: Int32Array;
   cpuTime: Float64Array;
   /** NaN encodes null (unsampled sched_wait). */
   schedWaitRaw: Float64Array;
-  taskId: Float64Array;
+  /** Indices into `taskIdList`, -1 encodes absent. Interning keeps the column
+   *  4 bytes whatever magnitude tokio's u64 counter has reached. */
+  taskIdx: Int32Array;
   /** -1 encodes null; else an index into spawnList. */
   spawnLocIdx: Int32Array;
-  /** NaN encodes undefined (no tid). */
-  tidRaw: Float64Array;
-  /** NaN encodes "not a wake event". */
-  wakerTaskIdRaw: Float64Array;
-  wokenTaskIdRaw: Float64Array;
+  /** Wire type is u32; NO_TID encodes undefined (no tid). */
+  tidRaw: Uint32Array;
+  /** -1 encodes "not a wake event"; else an index into taskIdList. */
+  wakerTaskIdx: Int32Array;
+  wokenTaskIdx: Int32Array;
 
   spawnList: string[] = [];
   private spawnIntern = new Map<string, number>();
+  taskIdList: number[] = [];
+  private taskIdIntern = new Map<number, number>();
 
   private _len = 0;
   private _cap: number;
@@ -108,28 +118,68 @@ export class ColumnarEvents {
    * rare full-span outliers (segment-concat boundary), so a time window is NOT
    * a contiguous index range - it must be found through this sort index. */
   private _tsIndex: Int32Array | null = null;
+  private _released = false;
 
   private readonly view: ReusedEventCursor;
 
   constructor(cap = INITIAL_CAP) {
     this._cap = cap;
-    this.eventType = new Uint8Array(cap);
-    this.ts = new Float64Array(cap);
-    this.workerId = new Int32Array(cap);
-    this.localQueue = new Int32Array(cap);
-    this.globalQueue = new Int32Array(cap);
-    this.cpuTime = new Float64Array(cap);
-    this.schedWaitRaw = new Float64Array(cap);
-    this.taskId = new Float64Array(cap);
-    this.spawnLocIdx = new Int32Array(cap);
-    this.tidRaw = new Float64Array(cap);
-    this.wakerTaskIdRaw = new Float64Array(cap);
-    this.wokenTaskIdRaw = new Float64Array(cap);
+    this.eventType = allocColumn(Uint8Array, cap);
+    this.ts = allocColumn(Float64Array, cap);
+    this.workerId = allocColumn(Int32Array, cap);
+    this.localQueue = allocColumn(Uint8Array, cap);
+    this.globalQueue = allocColumn(Int32Array, cap);
+    this.cpuTime = allocColumn(Float64Array, cap);
+    this.schedWaitRaw = allocColumn(Float64Array, cap);
+    this.taskIdx = allocColumn(Int32Array, cap);
+    this.spawnLocIdx = allocColumn(Int32Array, cap);
+    this.tidRaw = allocColumn(Uint32Array, cap);
+    this.wakerTaskIdx = allocColumn(Int32Array, cap);
+    this.wokenTaskIdx = allocColumn(Int32Array, cap);
     this.view = new ReusedEventCursor(this);
   }
 
   get length(): number {
     return this._len;
+  }
+
+  /**
+   * Drop the columns. `length`, `minTs` and `maxTs` survive, which is what the
+   * toolbar and the axis read. Reads of anything else throw: empty columns
+   * would render an empty trace with no error.
+   *
+   * derived.ts owns when this is safe (finishEventColumns).
+   */
+  release(): void {
+    this._released = true;
+    const i32 = new Int32Array(0);
+    this.eventType = new Uint8Array(0);
+    this.ts = new Float64Array(0);
+    this.workerId = i32;
+    this.localQueue = new Uint8Array(0);
+    this.globalQueue = i32;
+    this.cpuTime = new Float64Array(0);
+    this.schedWaitRaw = new Float64Array(0);
+    this.taskIdx = i32;
+    this.spawnLocIdx = i32;
+    this.tidRaw = new Uint32Array(0);
+    this.wakerTaskIdx = i32;
+    this.wokenTaskIdx = i32;
+    this._tsIndex = null;
+  }
+
+  /** True once {@link release} has run. */
+  get released(): boolean {
+    return this._released;
+  }
+
+  private assertLive(): void {
+    if (this._released) {
+      throw new Error(
+        "ColumnarEvents was released after derivation; read the worker-span " +
+          "store, wake index or queue samples instead",
+      );
+    }
   }
 
   private intern(s: string | null | undefined): number {
@@ -143,8 +193,41 @@ export class ColumnarEvents {
     return i;
   }
 
+  private internTask(id: number | null | undefined): number {
+    if (id == null) return -1;
+    let i = this.taskIdIntern.get(id);
+    if (i === undefined) {
+      i = this.taskIdList.length;
+      this.taskIdList.push(id);
+      this.taskIdIntern.set(id, i);
+    }
+    return i;
+  }
+
   private grow(): void {
     const n = this._cap * 2;
+    if (
+      resizeColumns(
+        [
+          this.eventType,
+          this.ts,
+          this.workerId,
+          this.localQueue,
+          this.globalQueue,
+          this.cpuTime,
+          this.schedWaitRaw,
+          this.taskIdx,
+          this.spawnLocIdx,
+          this.tidRaw,
+          this.wakerTaskIdx,
+          this.wokenTaskIdx,
+        ],
+        n,
+      )
+    ) {
+      this._cap = n;
+      return;
+    }
     const g = <T extends { set(a: ArrayLike<number>): void }>(
       old: ArrayLike<number>,
       Ctor: new (len: number) => T
@@ -156,15 +239,15 @@ export class ColumnarEvents {
     this.eventType = g(this.eventType, Uint8Array);
     this.ts = g(this.ts, Float64Array);
     this.workerId = g(this.workerId, Int32Array);
-    this.localQueue = g(this.localQueue, Int32Array);
+    this.localQueue = g(this.localQueue, Uint8Array);
     this.globalQueue = g(this.globalQueue, Int32Array);
     this.cpuTime = g(this.cpuTime, Float64Array);
     this.schedWaitRaw = g(this.schedWaitRaw, Float64Array);
-    this.taskId = g(this.taskId, Float64Array);
+    this.taskIdx = g(this.taskIdx, Int32Array);
     this.spawnLocIdx = g(this.spawnLocIdx, Int32Array);
-    this.tidRaw = g(this.tidRaw, Float64Array);
-    this.wakerTaskIdRaw = g(this.wakerTaskIdRaw, Float64Array);
-    this.wokenTaskIdRaw = g(this.wokenTaskIdRaw, Float64Array);
+    this.tidRaw = g(this.tidRaw, Uint32Array);
+    this.wakerTaskIdx = g(this.wakerTaskIdx, Int32Array);
+    this.wokenTaskIdx = g(this.wokenTaskIdx, Int32Array);
     this._cap = n;
   }
 
@@ -187,11 +270,11 @@ export class ColumnarEvents {
     this.globalQueue[i] = e.globalQueue ?? 0;
     this.cpuTime[i] = e.cpuTime ?? 0;
     this.schedWaitRaw[i] = e.schedWait == null ? NaN : e.schedWait;
-    this.taskId[i] = e.taskId ?? 0;
+    this.taskIdx[i] = this.internTask(e.taskId);
     this.spawnLocIdx[i] = this.intern(e.spawnLoc ?? null);
-    this.tidRaw[i] = e.tid == null ? NaN : e.tid;
-    this.wakerTaskIdRaw[i] = e.wakerTaskId == null ? NaN : e.wakerTaskId;
-    this.wokenTaskIdRaw[i] = e.wokenTaskId == null ? NaN : e.wokenTaskId;
+    this.tidRaw[i] = e.tid == null ? NO_TID : e.tid;
+    this.wakerTaskIdx[i] = this.internTask(e.wakerTaskId);
+    this.wokenTaskIdx[i] = this.internTask(e.wokenTaskId);
   }
 
   /**
@@ -227,30 +310,51 @@ export class ColumnarEvents {
     this.globalQueue[i] = globalQueue;
     this.cpuTime[i] = cpuTime;
     this.schedWaitRaw[i] = schedWait == null ? NaN : schedWait;
-    this.taskId[i] = taskId;
+    this.taskIdx[i] = this.internTask(taskId);
     this.spawnLocIdx[i] = this.intern(spawnLoc);
-    this.tidRaw[i] = tid == null ? NaN : tid;
-    this.wakerTaskIdRaw[i] = wakerTaskId == null ? NaN : wakerTaskId;
-    this.wokenTaskIdRaw[i] = wokenTaskId == null ? NaN : wokenTaskId;
+    this.tidRaw[i] = tid == null ? NO_TID : tid;
+    this.wakerTaskIdx[i] = this.internTask(wakerTaskId);
+    this.wokenTaskIdx[i] = this.internTask(wokenTaskId);
   }
 
   // ── Column decoders (sentinel -> semantic value) for index-based consumers ──
   spawnLocAt(i: number): string | null {
+    this.assertLive();
     const idx = this.spawnLocIdx[i]!;
     return idx < 0 ? null : this.spawnList[idx]!;
   }
   schedWaitAt(i: number): number | null {
+    this.assertLive();
     const v = this.schedWaitRaw[i]!;
     return Number.isNaN(v) ? null : v;
   }
   tidAt(i: number): number | undefined {
-    const v = this.tidRaw[i];
-    return Number.isNaN(v) ? undefined : v;
+    this.assertLive();
+    const v = this.tidRaw[i]!;
+    return v === NO_TID ? undefined : v;
+  }
+  /** Absent reads as 0, matching the pre-interning `taskId ?? 0` column. */
+  taskIdAt(i: number): number {
+    this.assertLive();
+    const idx = this.taskIdx[i]!;
+    return idx < 0 ? 0 : this.taskIdList[idx]!;
+  }
+  /** Absent reads as NaN, the "not a wake event" sentinel consumers test for. */
+  wakerTaskIdAt(i: number): number {
+    this.assertLive();
+    const idx = this.wakerTaskIdx[i]!;
+    return idx < 0 ? NaN : this.taskIdList[idx]!;
+  }
+  wokenTaskIdAt(i: number): number {
+    this.assertLive();
+    const idx = this.wokenTaskIdx[i]!;
+    return idx < 0 ? NaN : this.taskIdList[idx]!;
   }
 
   /** Materialize a fresh, independent plain event at index `i` (safe to
    * retain). */
   at(i: number): EventLike | undefined {
+    this.assertLive();
     if (i < 0) i += this._len;
     if (i < 0 || i >= this._len) return undefined;
     return materialize(this, i);
@@ -260,6 +364,7 @@ export class ColumnarEvents {
    * live from columns). Safe ONLY for consumers that read fields within the
    * loop body and never retain the view. */
   [Symbol.iterator](): Iterator<EventLike> {
+    this.assertLive();
     const view = this.view;
     const n = this._len;
     let i = 0;
@@ -286,6 +391,7 @@ export class ColumnarEvents {
 
   /** Array-like `.filter`: returns MATERIALIZED (safe-to-retain) events. */
   filter(fn: (e: EventLike, i: number) => boolean): EventLike[] {
+    this.assertLive();
     const out: EventLike[] = [];
     const view = this.view;
     for (let i = 0; i < this._len; i++) {
@@ -296,6 +402,7 @@ export class ColumnarEvents {
   }
 
   some(fn: (e: EventLike, i: number) => boolean): boolean {
+    this.assertLive();
     const view = this.view;
     for (let i = 0; i < this._len; i++) {
       view._i = i;
@@ -311,6 +418,7 @@ export class ColumnarEvents {
    * binTimestamps(this.map(e => e.timestamp), {startNs,endNs}, resolution).
    */
   densityBins(startNs: number, endNs: number, resolution: number): number[] {
+    this.assertLive();
     const span = endNs - startNs;
     if (span <= 0 || resolution <= 0) return [];
     const bins = new Array<number>(resolution).fill(0);
@@ -333,6 +441,7 @@ export class ColumnarEvents {
    * cached. V8 TypedArray.sort is stable (ES2019+), so equal-ts events keep
    * their original (wire) order - matching the per-worker sorts downstream. */
   tsIndex(): Int32Array {
+    this.assertLive();
     if (this._tsIndex === null) {
       const n = this._len;
       const idx = new Int32Array(n);
@@ -375,12 +484,12 @@ function materialize(c: ColumnarEvents, i: number): EventLike {
     globalQueue: c.globalQueue[i]!,
     cpuTime: c.cpuTime[i]!,
     schedWait: c.schedWaitAt(i),
-    taskId: c.taskId[i]!,
+    taskId: c.taskIdAt(i),
     spawnLocId: c.spawnLocAt(i),
     spawnLoc: c.spawnLocAt(i),
     tid: c.tidAt(i),
-    wakerTaskId: c.wakerTaskIdRaw[i]!,
-    wokenTaskId: c.wokenTaskIdRaw[i]!,
+    wakerTaskId: c.wakerTaskIdAt(i),
+    wokenTaskId: c.wokenTaskIdAt(i),
     targetWorker: workerId,
   };
 }
@@ -402,11 +511,11 @@ class ReusedEventCursor implements EventLike {
   get globalQueue(): number { return this.c.globalQueue[this._i]!; }
   get cpuTime(): number { return this.c.cpuTime[this._i]!; }
   get schedWait(): number | null { return this.c.schedWaitAt(this._i); }
-  get taskId(): number { return this.c.taskId[this._i]!; }
+  get taskId(): number { return this.c.taskIdAt(this._i); }
   get spawnLocId(): string | null { return this.c.spawnLocAt(this._i); }
   get spawnLoc(): string | null { return this.c.spawnLocAt(this._i); }
   get tid(): number | undefined { return this.c.tidAt(this._i); }
-  get wakerTaskId(): number { return this.c.wakerTaskIdRaw[this._i]!; }
-  get wokenTaskId(): number { return this.c.wokenTaskIdRaw[this._i]!; }
+  get wakerTaskId(): number { return this.c.wakerTaskIdAt(this._i); }
+  get wokenTaskId(): number { return this.c.wokenTaskIdAt(this._i); }
   get targetWorker(): number { return this.c.workerId[this._i]!; }
 }

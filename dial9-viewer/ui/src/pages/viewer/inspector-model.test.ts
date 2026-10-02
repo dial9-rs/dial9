@@ -269,6 +269,16 @@ describe("buildRelated", () => {
     expect(selfRow?.target).toBeNull();
   });
 
+  it("finds the anchor when the store hands back a fresh copy of it", () => {
+    const ticks = Array.from({ length: 50 }, (_, i) => ev("Tick", i * 10));
+    const copy = { ...ticks[40]! };
+    const v = buildRelated(copy, { ...ctx, allEvents: ticks }, restingUi);
+    const st = v.sections.find((s) => s.title === "Same type")!;
+    const self = st.rows.filter((r) => r.self);
+    expect(self).toHaveLength(1);
+    expect(self[0]!.aside).toBe("+0");
+  });
+
   it("adds the field-correlation section only when the value links", () => {
     const withCorr: RelatedUiState = { ...restingUi, correlate: { key: "path", val: "/x" } };
     const v = buildRelated(anchor, ctx, withCorr);

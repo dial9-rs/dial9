@@ -52,48 +52,68 @@ function densityPaletteColor(norm: number): string {
   return densityPalette[idx]!;
 }
 
-export function mountBrowseView({ store, els }: PageCtx): void {
+export function mountBrowseView({ store, els, actions }: PageCtx): void {
   let lastRows: readonly HeatmapRow[] | null = null;
   let lastDomain: TimeDomain | null = null;
   let lastTz: boolean | null = null;
   let lastEpoch = -1;
 
+  els.heatmapShowAllHosts.addEventListener("click", () => actions.showAllHosts());
+
+  function hostButton(row: HeatmapRow): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-label", `Focus on ${row.label}`);
+    button.addEventListener("click", () => actions.focusHost(row));
+    return button;
+  }
+
   // Host labels (one row per service/host; boot count annotated).
   // Unknown-layout groups render their raw directory path instead of a
   // guessed "service / host" split.
   function rebuildLabels(rows: readonly HeatmapRow[]): void {
+    // A rebuild must not strand keyboard focus on a removed label or the
+    // disappearing Show all hosts button.
+    const activeIndex = Array.from(els.heatmapLabels.children).findIndex(
+      (label) => label === document.activeElement,
+    );
+    const focusRow = document.activeElement === els.heatmapShowAllHosts
+      ? lastRows?.[0]
+      : lastRows?.[activeIndex];
     els.heatmapLabels.textContent = "";
     const labels: string[] = [];
     for (const row of rows) {
       const boots = bootTransitions(row.segments);
-      const div = document.createElement("div");
-      div.className = "row";
-      if (row.segments[0]?.layout === "unknown") {
+      const unknown = row.segments[0]?.layout === "unknown";
+      const label = unknown ? document.createElement("div") : hostButton(row);
+      label.className = "row";
+      if (unknown) {
         // Raw display: `host` carries the group's raw directory path
         // (segments.ts unknownGroupPath); no service/host split exists.
-        div.append(document.createTextNode(row.host));
+        label.append(document.createTextNode(row.host));
         labels.push(row.host);
       } else {
         const svc = document.createElement("span");
         svc.className = "svc";
         svc.textContent = row.service;
-        div.append(svc, document.createTextNode(` / ${row.host}`));
+        label.append(svc, document.createTextNode(` / ${row.host}`));
         labels.push(row.label);
       }
       if (boots.length) {
-        div.append(document.createTextNode(" "));
+        label.append(document.createTextNode(" "));
         const boot = document.createElement("span");
         boot.className = "boot";
         boot.title = `boot id changes ${boots.length} time(s) in this window`;
         boot.textContent = `▏${boots.length + 1} boots`;
-        div.append(boot);
+        label.append(boot);
       }
       // Unknown-layout rows: the groupByHost label is " / <path>"; the raw
       // path alone is the honest tooltip.
-      div.title = row.segments[0]?.layout === "unknown" ? row.host : row.label;
-      els.heatmapLabels.appendChild(div);
+      label.title = unknown ? row.host : row.label;
+      els.heatmapLabels.appendChild(label);
+      if (row === focusRow) label.focus();
     }
-    const firstRow = els.heatmapLabels.querySelector<HTMLDivElement>(".row");
+    const firstRow = els.heatmapLabels.querySelector<HTMLElement>(".row");
     const context = document.createElement("canvas").getContext("2d");
     if (!firstRow || !context) return;
     context.font = getComputedStyle(firstRow).font;
@@ -271,9 +291,11 @@ export function mountBrowseView({ store, els }: PageCtx): void {
       (b.domain.tMin !== b.fullDomain.tMin || b.domain.tMax !== b.fullDomain.tMax);
     els.heatmapResetZoom.style.display = zoomed ? "" : "none";
 
+    if (b.heatmapVisible && b.rows !== lastRows) rebuildLabels(b.rows);
+    els.heatmapShowAllHosts.style.display = b.unfocusedRows ? "" : "none";
+
     if (!b.heatmapVisible || !b.rows.length || !b.domain) return;
 
-    if (b.rows !== lastRows) rebuildLabels(b.rows);
     if (
       b.rows !== lastRows ||
       b.domain !== lastDomain ||

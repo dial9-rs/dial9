@@ -28,6 +28,7 @@ import {
   nextMaxFiles,
   nsToPickerUtc,
   openSse,
+  pageTitle,
   parseAttrFilterParams,
   pickerUtcToNs,
   refinementWorkDepth,
@@ -84,6 +85,8 @@ const params = new URLSearchParams(window.location.search);
 const scope = readScope(params, sourceScopeFromStored("", Dial9Creds.get()));
 const aggregate = isAggregateMode(params, scope);
 const rawMode = scope.trace != null;
+
+document.title = pageTitle("Span Explorer", scope.service);
 
 applyToCreds(scope.source, Dial9Creds);
 // Keep the static node and ID for the private userscript's page marker, but hide

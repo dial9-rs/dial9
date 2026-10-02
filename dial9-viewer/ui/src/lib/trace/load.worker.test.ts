@@ -72,7 +72,6 @@ const timing: TraceWorkerTiming = {
 const doneMessage: TraceWorkerDoneMessage = {
   kind: "done",
   trace: fakeTrace,
-  buffer: new ArrayBuffer(8),
   mode: "stream",
   timing,
 };

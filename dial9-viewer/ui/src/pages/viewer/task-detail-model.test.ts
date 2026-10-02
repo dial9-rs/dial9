@@ -5,6 +5,7 @@
 // records are built synthetically; one case drives computePollWakes through
 // computeTaskDetailData.
 
+import { WakeIndex } from "../../lib/trace/wake-index.js";
 import { describe, it, expect } from "vitest";
 import { formatHumanDuration } from "../../lib/trace/index.js";
 import type {
@@ -59,7 +60,7 @@ function source(o: {
   return {
     workerIds: o.workerIds,
     workerSpans,
-    wakesByTask: o.wakesByTask ?? {},
+    wakeIndex: WakeIndex.fromRecords(o.wakesByTask ?? {}),
   };
 }
 

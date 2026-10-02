@@ -2,10 +2,11 @@
 // the round-time axis model (#631), not just that the model computes one.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ROW_H, type BrowserActions } from "./actions.js";
+import { createActions, ROW_H } from "./actions.js";
 import { mountBrowseView } from "./browse-view.js";
 import type { BrowserEls } from "./dom.js";
 import { axisTicks } from "./heatmap-axis.js";
+import { toRows, toSegments } from "./segments.js";
 import { createBrowserStore, type HeatmapRow, type TimeDomain } from "./state.js";
 
 /** A vertical line the painter stroked, as (x, y0)->(x, y1). */
@@ -74,7 +75,10 @@ class RecordingContext {
   }
 }
 
-class FakeElement {
+class FakeElement extends EventTarget {
+  tagName = "";
+  type = "";
+  readonly attributes = new Map<string, string>();
   className = "";
   style: Record<string, string> = {};
   children: FakeElement[] = [];
@@ -96,6 +100,15 @@ class FakeElement {
   appendChild(child: FakeElement): FakeElement {
     this.children.push(child);
     return child;
+  }
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
+  }
+  focus(): void {
+    Object.assign(document, { activeElement: this });
+  }
+  click(): void {
+    this.dispatchEvent(new Event("click"));
   }
   querySelector(selector: string): FakeElement | null {
     return this.children.find((child) => `.${child.className}` === selector) ?? null;
@@ -142,7 +155,7 @@ function setup() {
   const axis = new FakeElement();
 
   vi.stubGlobal("document", {
-    createElement: (tag: string) => tag === "canvas" ? canvas : new FakeElement(),
+    createElement: (tag: string) => tag === "canvas" ? canvas : Object.assign(new FakeElement(), { tagName: tag }),
     createTextNode: (text: string) => {
       const node = new FakeElement();
       node.textContent = text;
@@ -157,12 +170,15 @@ function setup() {
     getPropertyValue: () => "220px",
   }));
 
+  const labels = new FakeElement();
+  const showAllHosts = new FakeElement();
   const els = {
     browseWarning: new FakeElement(),
     browseStatus: new FakeElement(),
     heatmapView: new FakeElement(),
     heatmapResetZoom: new FakeElement(),
-    heatmapLabels: new FakeElement(),
+    heatmapShowAllHosts: showAllHosts,
+    heatmapLabels: labels,
     heatmapBody: { clientWidth: 1020 },
     heatmapPlot: plot,
     heatmapCanvas: canvas,
@@ -170,13 +186,94 @@ function setup() {
   } as unknown as BrowserEls;
 
   const store = createBrowserStore();
-  mountBrowseView({ store, els, actions: {} as unknown as BrowserActions });
-  return { store, ctx, axis, canvas, plot };
+  const actions = createActions(store, els);
+  mountBrowseView({ store, els, actions });
+  return { store, ctx, axis, canvas, plot, labels, showAllHosts };
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("host focus controls", () => {
+  it("uses named native buttons and retains keyboard focus through focus and restore", async () => {
+    const { store, labels, showAllHosts, canvas } = setup();
+    const rows = [row(), { ...row(), host: "h2", label: "api / h2" }];
+    store.update("browse", { rows, domain: DOMAIN, heatmapVisible: true });
+    await flushStore();
+    expect(showAllHosts.style["display"]).toBe("none");
+
+    const target = labels.children[1]!;
+    expect(target.tagName).toBe("button");
+    expect(target.type).toBe("button");
+    expect(target.attributes.get("aria-label")).toBe("Focus on api / h2");
+    expect(target.title).toBe("api / h2");
+    target.focus();
+    target.click();
+    await flushStore();
+
+    expect(store.getState().browse.rows).toEqual([rows[1]]);
+    expect(store.getState().browse.domain).toBe(DOMAIN);
+    expect(labels.children).toHaveLength(1);
+    expect(document.activeElement).toBe(labels.children[0]);
+    expect(canvas.height).toBe(ROW_H);
+    expect(showAllHosts.style["display"]).toBe("");
+
+    showAllHosts.focus();
+    showAllHosts.click();
+    await flushStore();
+
+    expect(store.getState().browse.rows).toBe(rows);
+    expect(labels.children).toHaveLength(2);
+    expect(document.activeElement).toBe(labels.children[1]);
+    expect(canvas.height).toBe(2 * ROW_H);
+    expect(showAllHosts.style["display"]).toBe("none");
+  });
+
+  it("keeps the focused row and aligned time axis when resized", async () => {
+    const { store, labels, canvas, plot, axis } = setup();
+    const rows = [row(), { ...row(), host: "h2", label: "api / h2" }];
+    store.update("browse", { rows, domain: DOMAIN, heatmapVisible: true });
+    await flushStore();
+    labels.children[1]!.click();
+    await flushStore();
+    const focusedLabel = labels.children[0];
+
+    plot.clientWidth = 500;
+    plot.offsetLeft = 300;
+    store.update("browse", { renderEpoch: 1 });
+    await flushStore();
+
+    expect(labels.children).toEqual([focusedLabel]);
+    expect(canvas.width).toBe(500);
+    expect(canvas.height).toBe(ROW_H);
+    expect(store.getState().browse.domain).toBe(DOMAIN);
+    expect(axis.children.map((tick) => tick.style["left"])).toEqual(
+      axisTicks(DOMAIN, 500, false).map((tick) => `${300 + tick.x}px`),
+    );
+  });
+
+  it("labels unknown layouts as raw paths, not invented service/host identities", async () => {
+    const { store, labels } = setup();
+    const segments = toSegments([
+      { key: "unrecognized/path/1768471200-0.bin.gz", size: 10 },
+      { key: "unrecognized/other/1768471200-0.bin.gz", size: 10 },
+    ]);
+    const rows = toRows(segments);
+    store.update("browse", { segments, rows, domain: DOMAIN, heatmapVisible: true });
+    await flushStore();
+    const label = labels.children.find((child) => child.title === "unrecognized/path")!;
+    expect(label.textContent).toBe("unrecognized/path");
+    expect(label.tagName).toBe("div");
+    expect(label.attributes.has("aria-label")).toBe(false);
+    label.click();
+    await flushStore();
+
+    expect(labels.children).toHaveLength(2);
+    expect(store.getState().browse.rows).toBe(rows);
+    expect(store.getState().browse.unfocusedRows).toBeNull();
+  });
 });
 
 describe("browse timeline painter", () => {

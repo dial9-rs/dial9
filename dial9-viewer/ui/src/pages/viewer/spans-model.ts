@@ -36,6 +36,7 @@ import type {
 } from "../../lib/trace/index.js";
 import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 import type { SelectionSlice } from "../../types/state.js";
+import type { CustomEventStore } from "../../trace_parser.js";
 
 // ── Trace-invariant span data ────────────────────────────────────────────
 
@@ -83,7 +84,7 @@ export const EMPTY_SPAN_TRACK_DATA: SpanTrackData = {
  * resting state without branching.
  */
 export function computeSpanTrackData(
-  customEvents: readonly CustomTraceEvent[] | null | undefined,
+  customEvents: CustomEventStore | null | undefined,
   workerSpans?: Record<number, LaneSpans>,
   precomputedSpanData?: SpanData,
 ): SpanTrackData {

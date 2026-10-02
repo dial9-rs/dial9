@@ -7,6 +7,7 @@
 // Leaf seam modules, NOT the lib barrels: the barrel indexes evaluate
 // modules that import trace_analysis.js / trace_parser.js at init (they
 // expect <script>-established globals), which this page must not load.
+import { segmentsOverlapping } from "../../lib/canvas/heatmap.js";
 import { traceTitleParams } from "../../lib/trace/title.js";
 import {
   encodeAggregationParams,
@@ -45,18 +46,25 @@ function warnHostsDropped(): void {
 
 /**
  * Scope used by profiling actions. An explicit heatmap box wins; otherwise
- * profile the full service currently loaded in the browse pane.
+ * profile the focused row's visible window, or the full loaded service.
  */
 export function effectiveProfileSelection(
   browse: Readonly<BrowseSlice>,
 ): HeatmapSelection | null {
   if (browse.selection?.keys.length) return browse.selection;
-  if (!browse.segments.length || !browse.fullDomain) return null;
+  const domain = browse.unfocusedRows ? browse.domain : browse.fullDomain;
+  if (!domain) return null;
+  const segments = browse.unfocusedRows
+    ? browse.rows.flatMap((row) =>
+        segmentsOverlapping(row.segments, domain.tMin, domain.tMax),
+      )
+    : browse.segments;
+  if (!segments.length) return null;
   return {
-    keys: browse.segments.map((segment) => segment.key),
-    bytes: browse.segments.reduce((sum, segment) => sum + segment.size, 0),
-    t0: browse.fullDomain.tMin,
-    t1: browse.fullDomain.tMax,
+    keys: segments.map((segment) => segment.key),
+    bytes: segments.reduce((sum, segment) => sum + segment.size, 0),
+    t0: domain.tMin,
+    t1: domain.tMax,
   };
 }
 

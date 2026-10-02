@@ -51,6 +51,7 @@ import { computeExtent, toRows, toSegments } from "./segments.js";
 import type {
   BrowseObject,
   BrowserStore,
+  HeatmapRow,
   HeatmapSegment,
   HeatmapSelection,
   StatusState,
@@ -79,6 +80,8 @@ export interface BrowserActions {
   canRerunCurrentSearch(): boolean;
   reRunCurrentSearch(): void;
   resetBrowsePane(): void;
+  focusHost(row: HeatmapRow): void;
+  showAllHosts(): void;
   zoomToX(x0: number, x1: number): void;
   resetHeatmapZoom(): void;
   selectSegmentAt(x: number, y: number): void;
@@ -393,6 +396,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         serviceMetadata,
         segments,
         rows: toRows(segments),
+        unfocusedRows: null,
       });
 
       if (allObjects.length === 0) {
@@ -644,6 +648,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         serviceDiscovery: "ready",
         segments: [],
         rows: [],
+        unfocusedRows: null,
         domain: null,
         fullDomain: null,
         selection: null,
@@ -668,6 +673,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       serviceDiscovery: "loading",
       segments: [],
       rows: [],
+      unfocusedRows: null,
       domain: null,
       fullDomain: null,
       selection: null,
@@ -814,6 +820,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("browse", {
       segments: [],
       rows: [],
+      unfocusedRows: null,
       services: [],
       serviceMetadata: [],
       activeService: null,
@@ -843,6 +850,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       activeService: null,
       segments: [],
       rows: [],
+      unfocusedRows: null,
       domain: null,
       fullDomain: null,
       selection: null,
@@ -854,6 +862,31 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         sampleKeys: null,
       },
     });
+  }
+
+  function focusHost(row: HeatmapRow): void {
+    const b = store.getState().browse;
+    if (b.unfocusedRows || !b.rows.includes(row)) return;
+    // Raw-path groups have no verified host identity for focused profile links.
+    if (row.segments[0]?.layout === "unknown") return;
+    // Retain the row itself because host strings need not be unique across services.
+    store.update("browse", {
+      unfocusedRows: b.rows,
+      rows: [row],
+      selection: null,
+    });
+    store.update("transient", { drag: null });
+  }
+
+  function showAllHosts(): void {
+    const b = store.getState().browse;
+    if (!b.unfocusedRows) return;
+    store.update("browse", {
+      rows: b.unfocusedRows,
+      unfocusedRows: null,
+      selection: null,
+    });
+    store.update("transient", { drag: null });
   }
 
   function canvasWidth(): number {
@@ -1093,6 +1126,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     reRunCurrentSearch,
     resetBrowsePane,
     clearBrowseNoService,
+    focusHost,
+    showAllHosts,
     zoomToX,
     resetHeatmapZoom,
     selectSegmentAt,
