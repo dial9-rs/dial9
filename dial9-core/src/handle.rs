@@ -8,7 +8,7 @@ use std::any::Any;
 use std::cell::RefCell;
 
 /// First registered source of type `T`, if any.
-fn find_source<T: Source>(sources: &mut [Box<dyn Source>]) -> Option<&mut T> {
+pub(crate) fn find_source<T: Source>(sources: &mut [Box<dyn Source>]) -> Option<&mut T> {
     sources
         .iter_mut()
         .find_map(|source| (&mut **source as &mut dyn Any).downcast_mut::<T>())
@@ -132,6 +132,30 @@ impl Dial9Handle {
         self.inner
             .as_ref()
             .and_then(|i| i.shared.dump_trigger().cloned())
+    }
+
+    /// The pipeline's stages and its worker's state. `None` on a disabled
+    /// handle or a recorder without a pipeline worker. Reads shared state;
+    /// the worker isn't involved.
+    ///
+    /// A `Recorder` dropped without `graceful_shutdown` doesn't wait for the
+    /// worker, so the worker can still show as running briefly after
+    /// [`is_stopped`](Self::is_stopped) returns `true`.
+    ///
+    /// ```no_run
+    /// # fn f(handle: dial9_core::handle::Dial9Handle) {
+    /// use dial9_core::pipeline::WorkerState;
+    ///
+    /// match handle.pipeline_status().map(|s| s.worker().clone()) {
+    ///     Some(WorkerState::Running) => {}
+    ///     Some(WorkerState::Initializing { stage, .. }) => eprintln!("waiting on {stage:?}"),
+    ///     other => eprintln!("pipeline not running: {other:?}"),
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "pipeline")]
+    pub fn pipeline_status(&self) -> Option<crate::pipeline::PipelineStatus> {
+        Some(self.inner.as_ref()?.shared.pipeline_state()?.status())
     }
 
     /// Return the [`Dial9Handle`] to record through, resolved in order:

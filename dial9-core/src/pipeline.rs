@@ -303,6 +303,46 @@ impl From<std::io::Error> for ProcessErrorKind {
     }
 }
 
+/// The pipeline's stages and its worker's state, from
+/// [`Dial9Handle::pipeline_status`](crate::handle::Dial9Handle::pipeline_status).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PipelineStatus {
+    pub(crate) stages: std::sync::Arc<[&'static str]>,
+    pub(crate) worker: WorkerState,
+}
+
+impl PipelineStatus {
+    /// [`SegmentProcessor::name`] of each stage, in pipeline order.
+    pub fn stages(&self) -> &[&'static str] {
+        &self.stages
+    }
+
+    /// What the pipeline worker is doing.
+    pub fn worker(&self) -> &WorkerState {
+        &self.worker
+    }
+}
+
+/// Lifecycle of the pipeline worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WorkerState {
+    /// Awaiting a stage's [`SegmentProcessor::initialize`], or not started
+    /// yet (`stage: None`).
+    #[non_exhaustive]
+    Initializing {
+        /// Name of the stage being initialized.
+        stage: Option<&'static str>,
+    },
+    /// Every stage initialized; the worker loop is running.
+    Running,
+    /// Exited by any path: normal exit, initialization error, panic
+    /// (including in the thread-start hook or the runtime build), or drain
+    /// timeout.
+    Stopped,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

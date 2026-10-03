@@ -23,6 +23,10 @@
 //! shuttle-safe too, so the whole function, including
 //! `run_background_task`'s real-runtime wrapper, is drivable under
 //! shuttle; see `shuttle_concurrent_attach` in `dial9-tokio-telemetry`.
+//!
+//! `shuttle_pipeline_state_races_shutdown` also drives
+//! `run_background_task_inner`, checking that the published worker state only
+//! moves forward and ends `Stopped`.
 
 use super::*;
 use crate::pipeline::ProcessError;
@@ -352,9 +356,13 @@ crate::shuttle_test! {
     // shuttle's harness for `shuttle_select!`.
     fn shuttle_background_task_contains_init_panic() {
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
-        let config = BackgroundTaskConfig::builder()
+        let state = crate::primitives::sync::Arc::new(state::PipelineState::new(vec![
+            "PanickingInitializer",
+        ]));
+        let mut config = BackgroundTaskConfig::builder()
             .processors(vec![Box::new(PanickingInitializer) as Box<dyn SegmentProcessor>])
             .build();
+        config.set_state(state.clone());
         let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         let worker = crate::primitives::thread::spawn(move || {
@@ -369,5 +377,60 @@ crate::shuttle_test! {
              run_background_task_inner's top-level catch_unwind, not \
              propagate to its caller"
         );
+        assert_eq!(state.status().worker(), &crate::pipeline::WorkerState::Stopped);
+    }
+}
+
+crate::shuttle_test! {
+    default;
+    // The worker's published state only moves forward (initializing, then
+    // running, then stopped), and shutdown always leaves it stopped, however
+    // the reads interleave with initialization and the exit guard.
+    fn shuttle_pipeline_state_races_shutdown() {
+        use crate::pipeline::WorkerState;
+        use state::PipelineState;
+
+        fn rank(state: &WorkerState) -> u8 {
+            match state {
+                WorkerState::Initializing { .. } => 0,
+                WorkerState::Running => 1,
+                WorkerState::Stopped => 2,
+            }
+        }
+
+        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+        let state =
+            crate::primitives::sync::Arc::new(PipelineState::new(vec!["CountingProcessor"]));
+        let mut config = BackgroundTaskConfig::builder()
+            .processors(vec![
+                Box::new(CountingProcessor(Arc::new(AtomicUsize::new(0))))
+                    as Box<dyn SegmentProcessor>,
+            ])
+            .build();
+        config.set_state(state.clone());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let worker = crate::primitives::thread::spawn(move || {
+            shuttle::future::block_on(run_background_task_inner(config, shutdown_rx, fs));
+        });
+        let reader = crate::primitives::thread::spawn({
+            let state = state.clone();
+            move || {
+                let mut last = 0;
+                for _ in 0..4 {
+                    let now = rank(state.status().worker());
+                    assert!(now >= last, "worker state moved backwards: {last} -> {now}");
+                    last = now;
+                }
+            }
+        });
+
+        shutdown_tx
+            .send(Duration::ZERO)
+            .expect("worker holds the shutdown receiver until it exits");
+        worker.join().unwrap();
+        reader.join().unwrap();
+        assert_eq!(state.status().worker(), &WorkerState::Stopped);
+        assert_eq!(state.status().stages(), ["CountingProcessor"]);
     }
 }

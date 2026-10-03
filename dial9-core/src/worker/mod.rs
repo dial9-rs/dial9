@@ -13,6 +13,7 @@ pub(crate) mod metrics;
 pub(crate) mod pipeline_metrics;
 /// Built-in segment processors (gzip, write-back).
 pub mod processors;
+pub(crate) mod state;
 
 use crate::dump::{DumpError, DumpReceipt, DumpRequest, Lookback};
 use crate::fs::{EpochWindow, Fs, RemoveReason, TakenFiles, TakenSegment};
@@ -58,6 +59,10 @@ pub struct BackgroundTaskConfig {
     /// and the pipeline only runs on an explicit dump request. Wired by the
     /// facade builder; absent for continuous processing.
     trigger: Option<crate::dump::DumpRx>,
+    /// Stage order and worker state for `Dial9Handle::pipeline_status`. Set by
+    /// the recorder builder.
+    #[builder(skip)]
+    state: Option<crate::primitives::sync::Arc<state::PipelineState>>,
 }
 
 impl std::fmt::Debug for BackgroundTaskConfig {
@@ -71,6 +76,10 @@ impl std::fmt::Debug for BackgroundTaskConfig {
 }
 
 impl BackgroundTaskConfig {
+    pub(crate) fn set_state(&mut self, state: crate::primitives::sync::Arc<state::PipelineState>) {
+        self.state = Some(state);
+    }
+
     /// How often the worker checks for sealed segments.
     pub fn poll_interval(&self) -> Duration {
         self.poll_interval
@@ -126,19 +135,24 @@ async fn run_background_task_inner(
     let processors = std::mem::take(&mut config.processors);
     let metrics_sink = config.metrics_sink.clone();
     let trigger = config.trigger.take();
+    let state = config.state.take();
+    // Dropped after `run_fut`, so `Stopped` is published after the processors
+    // drop.
+    let _stopped = state.clone().map(state::StoppedOnDrop);
 
     tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), triggered = trigger.is_some(), "worker started");
 
     let stop = tokio_util::sync::CancellationToken::new();
     let worker_stop = stop.clone();
     let worker = async move {
-        let mut worker = WorkerLoop::new(
+        let mut worker = WorkerLoop::new_reporting(
             fs,
             config.poll_interval(),
             processors,
             worker_stop,
             metrics_sink,
             trigger,
+            state.as_deref(),
         )
         .await?;
         worker.run().await;
@@ -196,9 +210,13 @@ where
     Teardown: FnOnce(),
 {
     let fs = writer.fs_handle()?;
+    // Covers a panic in `thread_init` or the runtime build, before
+    // `run_background_task_inner` sets its own guard.
+    let stopped = config.state.clone().map(state::StoppedOnDrop);
     Some(crate::primitives::thread::spawn_named(
         "dial9-worker",
         move || {
+            let _stopped = stopped;
             let teardown = thread_init();
             run_background_task(config, shutdown, fs);
             teardown();
@@ -407,15 +425,41 @@ fn record_dump_error(dumps: &mut [ActiveDump], matched: &[usize], kind: ProcessE
 }
 
 impl WorkerLoop {
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) async fn new(
+        fs: Arc<Fs>,
+        poll_interval: Duration,
+        processors: Vec<Box<dyn SegmentProcessor>>,
+        stop: tokio_util::sync::CancellationToken,
+        metrics_sink: BoxEntrySink,
+        trigger: Option<crate::dump::DumpRx>,
+    ) -> io::Result<Self> {
+        Self::new_reporting(
+            fs,
+            poll_interval,
+            processors,
+            stop,
+            metrics_sink,
+            trigger,
+            None,
+        )
+        .await
+    }
+
+    /// Initialize every processor, publishing progress to `state`.
+    pub(crate) async fn new_reporting(
         fs: Arc<Fs>,
         poll_interval: Duration,
         mut processors: Vec<Box<dyn SegmentProcessor>>,
         stop: tokio_util::sync::CancellationToken,
         metrics_sink: BoxEntrySink,
         trigger: Option<crate::dump::DumpRx>,
+        state: Option<&state::PipelineState>,
     ) -> io::Result<Self> {
-        for processor in &mut processors {
+        for (i, processor) in processors.iter_mut().enumerate() {
+            if let Some(state) = state {
+                state.set_initializing(i);
+            }
             let processor_name = processor.name();
             tracing::debug!(
                 target: "dial9_worker",
@@ -428,6 +472,9 @@ impl WorkerLoop {
                     format!("processor {processor_name} initialization failed: {error}"),
                 )
             })?;
+        }
+        if let Some(state) = state {
+            state.set_running();
         }
 
         Ok(Self {
