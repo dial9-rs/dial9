@@ -465,7 +465,7 @@ mod tests {
 
     #[cfg(shuttle)]
     #[test]
-    fn get_schemas_is_keyed_per_callsite() {
+    fn shuttle_get_schemas_is_keyed_per_callsite() {
         // No interleaving to explore; check_random(1) just gives the
         // shuttle-mocked Mutex an ExecutionState to lock into.
         shuttle::check_random(get_schemas_is_keyed_per_callsite_body, 1);
