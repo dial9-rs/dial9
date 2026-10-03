@@ -9,9 +9,9 @@
 use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode, is_ctimer_active, sys};
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::source::{FlushContext, Source};
+use dial9_trace_format::encoder::FxHashMap;
 use dial9_trace_format::types::{EventEncoder, FieldType};
 use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
-use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::Arc;
 
@@ -281,7 +281,11 @@ pub struct CpuProfiler {
     pid: u32,
     /// OS tid → thread name, eagerly cached at drain time so short-lived
     /// threads are captured before they exit and their `comm` file disappears.
-    tid_to_name: HashMap<u32, ThreadName>,
+    tid_to_name: FxHashMap<u32, ThreadName>,
+    /// Named tracked threads that stopped. Their names leave `tid_to_name`
+    /// after the next drain: their last samples keep the name, and a thread
+    /// that reuses the tid after that drain reads its own.
+    stopped_tids: Vec<u32>,
     /// Original config retained for segment metadata emission.
     config: CpuProfilingConfig,
     /// The effective backend that was selected after Auto resolution.
@@ -340,7 +344,8 @@ impl CpuProfiler {
         Ok(Self {
             sampler,
             pid: std::process::id(),
-            tid_to_name: HashMap::new(),
+            tid_to_name: FxHashMap::default(),
+            stopped_tids: Vec::new(),
             config,
             effective_backend,
             metadata_emitted: false,
@@ -374,6 +379,18 @@ impl CpuProfiler {
                 thread_name,
             );
         });
+        self.evict_stopped_names();
+    }
+
+    /// Forget the names of threads that stopped before this drain; their last
+    /// samples were just named. A thread still alive after its stop can end up
+    /// with a name that is never evicted: one first named after its stop, or
+    /// one named again after this eviction. A perf sample taken during the
+    /// thread's exit that misses this drain has no name.
+    fn evict_stopped_names(&mut self) {
+        for tid in self.stopped_tids.drain(..) {
+            self.tid_to_name.remove(&tid);
+        }
     }
 }
 
@@ -400,6 +417,13 @@ impl Source for CpuProfiler {
 
     fn on_thread_stop(&mut self) {
         crate::unregister_current_thread();
+        let tid = dial9_core::thread::current_tid();
+        // Only a named thread has anything to evict, and once is enough: the
+        // list never outgrows `tid_to_name`, even while recording is paused
+        // and nothing drains.
+        if self.tid_to_name.contains_key(&tid) && !self.stopped_tids.contains(&tid) {
+            self.stopped_tids.push(tid);
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -614,6 +638,59 @@ mod cpu_sample_round_trip_tests {
         let (_timestamp_ns, values) = round_trip(None);
         // An absent `cpu` decodes as `FieldValue::None`.
         assert_eq!(*values.last().unwrap(), FieldValue::None);
+    }
+}
+
+#[cfg(test)]
+mod thread_name_tests {
+    use super::*;
+    use dial9_core::source::Source;
+
+    /// Run `on_thread_stop` twice on a new thread, optionally naming it
+    /// first. Returns its tid.
+    fn stop_thread(profiler: &mut CpuProfiler, named: bool) -> u32 {
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let tid = dial9_core::thread::current_tid();
+                if named {
+                    profiler
+                        .tid_to_name
+                        .insert(tid, ThreadName::new("stopped-thread".into()));
+                }
+                profiler.on_thread_stop();
+                // A thread can be tracked and stopped again.
+                profiler.on_thread_stop();
+                tid
+            })
+            .join()
+            .unwrap()
+        })
+    }
+
+    /// A named thread that stops twice is pending once, so the list never
+    /// outgrows `tid_to_name`. Eviction itself is covered through the public
+    /// API in `tests/thread_name_eviction.rs`.
+    #[test]
+    fn named_thread_stopping_twice_is_pending_once() {
+        let Ok(mut profiler) = CpuProfiler::start(CpuProfilingConfig::default()) else {
+            eprintln!("skipping: CpuProfiler::start failed (likely no perf access)");
+            return;
+        };
+        let tid = stop_thread(&mut profiler, true);
+        assert_eq!(profiler.stopped_tids, [tid]);
+    }
+
+    /// A thread with no cached name has nothing to evict, so its stop isn't
+    /// recorded: the list stays bounded by `tid_to_name` while recording is
+    /// paused.
+    #[test]
+    fn unnamed_thread_stop_records_nothing() {
+        let Ok(mut profiler) = CpuProfiler::start(CpuProfilingConfig::default()) else {
+            eprintln!("skipping: CpuProfiler::start failed (likely no perf access)");
+            return;
+        };
+        stop_thread(&mut profiler, false);
+        assert!(profiler.stopped_tids.is_empty());
     }
 }
 
