@@ -135,6 +135,7 @@ const BUILTIN_SCHEMAS: &[&str] = &[
     "WakeEventEvent",
     "CpuSampleEvent",
     "TaskDumpEvent",
+    "TaskSampleEvent",
     "AllocEvent",
     "FreeEvent",
     "MemoryProfileOverflowEvent",
@@ -347,6 +348,11 @@ fn builtin_signatures(schema_name: &str) -> Option<&'static [BuiltinFieldSignatu
             ],
         ]),
         "TaskDumpEvent" => Some(&[&[("task_id", V), ("callchain", PStack)]]),
+        "TaskSampleEvent" => Some(&[&[
+            ("task_id", V),
+            ("callchain", PStack),
+            ("inclusion_probability", FieldType::F64),
+        ]]),
         "AllocEvent" => Some(&[
             &[
                 ("tid", U32),

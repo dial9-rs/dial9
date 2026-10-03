@@ -249,8 +249,8 @@ jobs:
         run: |
           sudo sysctl kernel.perf_event_paranoid=1
           sudo sysctl kernel.kptr_restrict=0
-      # `__nonlinux_all_features` is every feature except `taskdump`, which
-      # forwards to tokio/taskdump and is a hard compile error without the cfg.
+      # `__nonlinux_all_features` excludes `taskdump` and `unstable-task-sampling`;
+      # both require tokio/taskdump, which cannot compile without the cfg.
       - name: Test dial9-tokio-telemetry
         run: |
           # Raise locked-memory limit for large perf ring buffers, as the
