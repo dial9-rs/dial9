@@ -380,6 +380,23 @@ pub trait Dial9HandleTokioExt: dial9_handle_tokio_ext_sealed::Sealed {
         builder: tokio::runtime::Builder,
         options: TokioAttachOptions,
     ) -> io::Result<tokio::runtime::LocalRuntime>;
+
+    /// [`SmokeTester`](crate::telemetry::smoke_test::SmokeTester) for the
+    /// recorder behind this handle. Build it once and keep it.
+    ///
+    /// ```no_run
+    /// # async fn f(handle: dial9_core::handle::Dial9Handle) {
+    /// use dial9_tokio_telemetry::telemetry::Dial9HandleTokioExt;
+    ///
+    /// let tester = handle.smoke_tester().build();
+    /// // Where the check runs:
+    /// let report = tester.run().await;
+    /// if !report.is_healthy() {
+    ///     tracing::error!("dial9 smoke test failed:\n{report}");
+    /// }
+    /// # }
+    /// ```
+    fn smoke_tester(&self) -> crate::telemetry::smoke_test::SmokeTesterBuilder;
 }
 
 mod dial9_handle_tokio_ext_sealed {
@@ -390,6 +407,10 @@ mod dial9_handle_tokio_ext_sealed {
 }
 
 impl Dial9HandleTokioExt for Dial9Handle {
+    fn smoke_tester(&self) -> crate::telemetry::smoke_test::SmokeTesterBuilder {
+        crate::telemetry::smoke_test::SmokeTester::builder(self.clone())
+    }
+
     fn attach_tokio_runtime(
         &self,
         builder: tokio::runtime::Builder,
