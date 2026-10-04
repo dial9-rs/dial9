@@ -27,6 +27,8 @@ import {
 } from "../../lib/trace/index.js";
 import { poiSourceFor, redFlagLabel, redFlagSummary } from "./poi.js";
 import { traceDisplayBounds } from "./trace-bounds.js";
+import { createInfoMenu } from "./info-menu.js";
+import { copyValue } from "../../components/copy-value.js";
 
 /** Which whole-trace analysis an analysis button opens. */
 export type AnalysisKind = "cpu" | "blocking" | "heap";
@@ -117,6 +119,7 @@ export function createToolbar(
   store: ViewerStore,
   deps: ToolbarDeps,
 ): ToolbarController {
+  const menu = createInfoMenu();
   /** Apply the goto input's value: parse -> move viewport, or ignore junk. */
   function applyGoto(raw: string): void {
     const goto = parseGotoTime(raw);
@@ -167,12 +170,12 @@ export function createToolbar(
     fileInfoTemplate: (state, sourceLabel) =>
       fileInfoTemplate(state, sourceLabel, keyDerivedIdentity),
     analysisTemplate: (state, sourceLabel) =>
-      analysisTemplate(state, sourceLabel, deps),
+      analysisTemplate(state, sourceLabel, deps, menu.onToggle),
     timeTemplate: (state) =>
       timeTemplate(state, { toggleTimeMode, toggleTz, onGotoKey, setRange, onClearRange: deps.onClearRange }),
     keyBindings,
     dispose(): void {
-      /* no live listeners: templates own their handlers */
+      menu.dispose();
     },
   };
 }
@@ -241,6 +244,7 @@ function analysisTemplate(
   state: StoreState,
   sourceLabel: string,
   deps: ToolbarDeps,
+  onInfoToggle: (event: Event) => void,
 ): TemplateResult {
   const trace = state.trace.trace;
   if (trace === null) {
@@ -279,7 +283,7 @@ function analysisTemplate(
           () => deps.onOpenAnalysis("heap"),
         )
       : ""}
-    ${infoMenu(trace, sourceLabel, uninstrumented)}
+    ${infoMenu(trace, sourceLabel, uninstrumented, onInfoToggle)}
   `;
 }
 
@@ -364,6 +368,7 @@ function infoMenu(
   trace: ParsedTrace,
   sourceLabel: string,
   uninstrumented: number,
+  onToggle: (event: Event) => void,
 ): TemplateResult {
   const metadata = readSegmentMetadataEntries(trace);
   const infoTitle =
@@ -375,7 +380,7 @@ function infoMenu(
   const duration =
     bounds !== null ? formatHumanDuration(bounds.maxTs - bounds.minTs) : "-";
   return html`
-    <details class="d9-info-menu" data-info-menu>
+    <details class="d9-info-menu" data-info-menu @toggle=${onToggle}>
       <summary
         class="d9-toolbar-btn d9-info-summary"
         title=${infoTitle}
@@ -439,7 +444,16 @@ function infoMenu(
                     ([key, value]) => html`
                       <tr>
                         <td><code title=${key}>${key}</code></td>
-                        <td><code title=${value}>${value}</code></td>
+                        <td><div class="d9-info-metadata-value">
+                          <code title=${value}>${value}</code>
+                          <button
+                            type="button"
+                            class="d9-kv-copy"
+                            title="Copy value"
+                            aria-label="Copy ${key}"
+                            @click=${(event: MouseEvent) => void copyValue(event, value)}
+                          >⎘</button>
+                        </div></td>
                       </tr>
                     `,
                   )}
