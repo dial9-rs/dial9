@@ -244,6 +244,8 @@ async fn dial9_fixture_wait_outer_weight_1() {
 
 #[inline(never)]
 async fn dial9_fixture_wait_inner_weight_2() {
-    tokio::time::sleep(WAIT_QUANTUM * 2).await;
+    // Capture skips one pending poll; two sleeps keep the inner wait observable.
+    tokio::time::sleep(WAIT_QUANTUM).await;
+    tokio::time::sleep(WAIT_QUANTUM).await;
     black_box(2_u64);
 }
