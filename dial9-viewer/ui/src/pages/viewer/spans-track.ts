@@ -14,6 +14,7 @@
 // Incomplete spans are surfaced, never dropped - the "N unmatched" warning
 // renders whenever buildSpanData reports spans with an enter but no exit.
 
+import { copyValue } from "../../components/copy-value.js";
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { repeat } from "lit-html/directives/repeat.js";
 import { classMap } from "lit-html/directives/class-map.js";
@@ -580,16 +581,6 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
         ${formatHumanDuration(maxDur)}
       </div>
     `;
-  }
-
-  function copyValue(ev: MouseEvent, value: string): void {
-    const btn = ev.currentTarget as HTMLButtonElement;
-    void navigator.clipboard?.writeText(value);
-    const prev = btn.textContent;
-    btn.textContent = "✓";
-    window.setTimeout(() => {
-      btn.textContent = prev;
-    }, 800);
   }
 
   function dispose(): void {
