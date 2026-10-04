@@ -2,6 +2,32 @@ import { describe, expect, it } from "vitest";
 import { traceDisplayBounds } from "./trace-bounds.js";
 
 describe("trace display bounds", () => {
+  it("uses display bounds instead of outlying task-dump records", () => {
+    expect(
+      traceDisplayBounds({
+        minTs: 100,
+        maxTs: 200,
+        recordMinTs: 50,
+        recordMaxTs: 300,
+        displayMinTs: 100,
+        displayMaxTs: 200,
+      }),
+    ).toEqual({ minTs: 100, maxTs: 200 });
+  });
+
+  it("does not fall back to task dumps when there are no displayable records", () => {
+    expect(
+      traceDisplayBounds({
+        minTs: null,
+        maxTs: null,
+        recordMinTs: 50,
+        recordMaxTs: 300,
+        displayMinTs: null,
+        displayMaxTs: null,
+      }),
+    ).toBeNull();
+  });
+
   it("uses all-record bounds when they extend beyond runtime events", () => {
     expect(
       traceDisplayBounds({

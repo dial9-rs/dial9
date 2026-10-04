@@ -71,13 +71,15 @@ describe("file-info stats line", () => {
     expect(text.split(" · ").length).toBeGreaterThanOrEqual(3);
   });
 
-  it("shows the duration across all timestamped records", () => {
+  it("shows the display duration without outlying task dumps", () => {
     const text = fileMetaText({
       ...trace,
       minTs: 1e9,
       maxTs: 2e9,
       recordMinTs: 0,
-      recordMaxTs: 3e9,
+      recordMaxTs: 18.7e9,
+      displayMinTs: 0,
+      displayMaxTs: 3e9,
     });
     expect(text).toContain("3s");
   });
