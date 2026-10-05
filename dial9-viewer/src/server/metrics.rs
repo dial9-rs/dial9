@@ -868,28 +868,30 @@ impl FoldFileMetricsBuilder {
     /// Append the assembled entry to the global metrics sink. A no-op sink is
     /// used when none is attached (tests), matching the rest of this module.
     pub fn emit(self) {
-        FoldFileMetrics {
-            dial9: self.dial9,
-            timestamp: SystemTime::now(),
-            count: 1,
-            failed: self.failed as u32,
-            source_bytes: self.source_bytes,
-            decompressed_bytes: self.decompressed_bytes,
-            events_decoded: self.events_decoded,
-            span_events_decoded: self.span_events_decoded,
-            fetch: self.fetch,
-            gunzip: self.gunzip,
-            wire_decode: self.wire_decode,
-            sort_events: self.sort_events,
-            poll_reconstruct: self.poll_reconstruct,
-            sample_resolve: self.sample_resolve,
-            span_resolve: self.span_resolve,
-            sample_attribution: self.sample_attribution,
-            parquet_encode: self.parquet_encode,
-            write_parts: self.write_parts,
-            total: self.total,
-        }
-        .append_on_drop(ServiceMetrics::sink_or_discard());
+        drop(
+            FoldFileMetrics {
+                dial9: self.dial9,
+                timestamp: SystemTime::now(),
+                count: 1,
+                failed: self.failed as u32,
+                source_bytes: self.source_bytes,
+                decompressed_bytes: self.decompressed_bytes,
+                events_decoded: self.events_decoded,
+                span_events_decoded: self.span_events_decoded,
+                fetch: self.fetch,
+                gunzip: self.gunzip,
+                wire_decode: self.wire_decode,
+                sort_events: self.sort_events,
+                poll_reconstruct: self.poll_reconstruct,
+                sample_resolve: self.sample_resolve,
+                span_resolve: self.span_resolve,
+                sample_attribution: self.sample_attribution,
+                parquet_encode: self.parquet_encode,
+                write_parts: self.write_parts,
+                total: self.total,
+            }
+            .append_on_drop(ServiceMetrics::sink_or_discard()),
+        );
     }
 }
 
