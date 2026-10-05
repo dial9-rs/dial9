@@ -156,7 +156,7 @@ fn auto_backend_reports_ctimer_when_perf_event_open_blocked() {
     in_fork("Auto did not report ctimer", || {
         install_seccomp_blocking_perf_event_open();
         CpuProfiler::start(CpuProfilingConfig::default())
-            .is_ok_and(|p| p.effective_backend() == ActiveCpuBackend::Ctimer)
+            .is_ok_and(|p| matches!(p.effective_backend(), ActiveCpuBackend::Ctimer { .. }))
     });
 }
 
@@ -176,7 +176,7 @@ fn auto_reports_perf_while_another_profiler_runs_ctimer() {
             return false;
         };
         CpuProfiler::start(CpuProfilingConfig::default())
-            .is_ok_and(|p| p.effective_backend() == ActiveCpuBackend::Perf)
+            .is_ok_and(|p| matches!(p.effective_backend(), ActiveCpuBackend::Perf { .. }))
     });
 }
 

@@ -277,8 +277,10 @@ impl SchedEventConfig {
 pub enum ActiveCpuBackend {
     /// `perf_event_open`: samples every thread descended from the one that
     /// started the profiler.
+    #[non_exhaustive]
     Perf,
     /// Per-thread CPU timers: samples only threads dial9 tracks.
+    #[non_exhaustive]
     Ctimer,
 }
 

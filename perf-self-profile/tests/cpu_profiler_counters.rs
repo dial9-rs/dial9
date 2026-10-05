@@ -59,7 +59,12 @@ fn ctimer_reports_its_backend_and_counts_drained_samples() {
             .with_source(|p: &mut CpuProfiler| (p.effective_backend(), p.samples_seen()))
             .expect("ctimer needs no perf access, so the profiler starts")
     };
-    assert_eq!(read(), (ActiveCpuBackend::Ctimer, 0));
+    let (backend, samples) = read();
+    assert!(
+        matches!(backend, ActiveCpuBackend::Ctimer { .. }),
+        "{backend:?}"
+    );
+    assert_eq!(samples, 0);
 
     // ctimer samples only tracked threads. Burn and drain in rounds: a thread
     // starved of CPU on a busy host may need more than one.
