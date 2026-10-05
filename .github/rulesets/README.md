@@ -36,6 +36,19 @@ that is *not* stored in the workflow YAML: branch-protection rulesets and the
 - **Release publishing is double-gated:** the `release` environment requires
   `dial9-maintainers` approval on every deploy, enforced by GitHub regardless
   of workflow-file contents (a tampered `release.yml` can't bypass it).
+- **A merged release freezes further PR merges until publication.** The
+  `Release publication gate` job is part of the already-required `CI Pass`.
+  On PRs and merge groups, it checks the latest `chore: release` commit on the
+  current target branch and requires every publishable crate version from that
+  snapshot to exist on crates.io. The release PR itself can pass because the
+  guard checks the target branch, not its proposed version bumps. Merge groups
+  containing a release PR followed by another PR fail too; queue the release
+  PR without subsequent PRs, publish it, then requeue them.
+  Run **Publish release** from `main`, set `release_branch` to the target
+  branch, and approve the `release` environment. After all crates publish,
+  rerun failed CI jobs on waiting PRs. Registry errors and partially published
+  releases keep the gate closed. Keep release-plz PR titles beginning with
+  `chore: release`, which is how the guard identifies release commits.
 
 ## Re-applying after an accidental change
 
