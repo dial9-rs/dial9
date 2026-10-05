@@ -31,11 +31,11 @@ jobs:
           # stale. Merge-group checks also cover PRs whose earlier CI passed.
           git fetch --no-tags origin "$BASE_REF"
           base_sha=$(git rev-parse FETCH_HEAD)
-          args=(--base-ref "$base_sha")
+          args=("$base_sha")
           if [[ -n "$CANDIDATE_SHA" ]]; then
-            args+=(--candidate-ref "$CANDIDATE_SHA")
+            args+=("$CANDIDATE_SHA")
           fi
-          python3 scripts/check_release_published.py "${args[@]}"
+          bash scripts/check_release_published.sh "${args[@]}"
 
   fmt:
     name: Cargo fmt
