@@ -18,6 +18,7 @@
 // selection.spawnedTasksRange + computeSpawnedTasks. Trace-invariant lookups
 // are cached in a store.derived over the trace slice.
 
+import { copyValue } from "../../components/copy-value.js";
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
 import { deriveLaneData } from "../../components/canvas/lanes/index.js";
@@ -1369,16 +1370,6 @@ export function mountInspector(
       relatedCorrelate: { key, val },
       inspectorTab: "related",
     });
-  }
-
-  function copyValue(e: MouseEvent, value: string): void {
-    const btn = e.currentTarget as HTMLButtonElement;
-    void navigator.clipboard?.writeText(value);
-    // Flash a check, reverting after 800ms - imperative, no store.
-    btn.textContent = "✓";
-    window.setTimeout(() => {
-      btn.textContent = "⎘";
-    }, 800);
   }
 
   // ── Store-dispatch seams (navigation + task links) ───────────────────────

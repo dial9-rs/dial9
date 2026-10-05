@@ -168,15 +168,13 @@ body {
 }
 .d9-info-summary::-webkit-details-marker { display: none; }
 .d9-info-menu-body {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
+    position: fixed;
     z-index: 200;
-    width: 260px;
-    max-height: 60vh;
+    width: min(260px, calc(100vw - 24px));
+    max-height: min(60vh, calc(100vh - 24px));
     overflow-y: auto;
     padding: 8px 10px;
-    background: rgba(13, 13, 26, 0.98);
+    background: #0d0d1a;
     border: 1px solid #444;
     border-radius: 6px;
     font-size: 0.78em;
@@ -184,7 +182,7 @@ body {
 .d9-info-menu-body-wide {
     box-sizing: border-box;
     width: min(600px, calc(100vw - 24px));
-    max-height: min(60vh, 420px);
+    max-height: min(60vh, 420px, calc(100vh - 24px));
     overflow: auto;
 }
 .d9-info-heading {
@@ -201,6 +199,7 @@ body {
     color: var(--d9-fg);
 }
 .d9-info-row span:first-child { color: var(--d9-fg-muted); }
+.d9-info-row > span { min-width: 0; overflow-wrap: anywhere; }
 .d9-info-menu-body-wide .d9-info-grid {
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr);
@@ -219,6 +218,7 @@ body {
 }
 .d9-info-metadata-table {
     width: 100%;
+    table-layout: fixed;
     border-collapse: collapse;
     color: var(--d9-fg);
 }
@@ -227,29 +227,28 @@ body {
     color: var(--d9-fg-muted);
     text-align: left;
 }
-.d9-info-metadata-table th:first-child { width: 1%; }
+.d9-info-metadata-table th:first-child { width: 40%; }
 .d9-info-metadata-table td {
     padding: 4px 6px;
     border-top: 1px solid var(--d9-border);
 }
 .d9-info-metadata-table code {
     display: block;
-    max-width: min(320px, 45vw);
+    min-width: 0;
     overflow: hidden;
     color: var(--d9-fg);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.d9-info-metadata-table td:first-child code { max-width: min(280px, 40vw); }
-@media (max-width: 700px) {
-    .d9-info-menu-body-wide {
-        position: fixed;
-        inset: 50% 12px auto;
-        width: auto;
-        max-height: 70vh;
-        transform: translateY(-50%);
-    }
+.d9-info-metadata-value { display: flex; align-items: center; gap: 6px; }
+.d9-info-metadata-value code { flex: 1; }
+.d9-info-metadata-value .d9-kv-copy { opacity: 0; }
+.d9-info-metadata-table tr:hover .d9-kv-copy,
+.d9-info-metadata-value:focus-within .d9-kv-copy { opacity: 1; }
+.d9-kv-copy:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+@media (hover: none) {
+    .d9-info-metadata-value .d9-kv-copy { opacity: 1; }
 }
 
 /* ── Issues rail (concept-2, replaces the "0/74" stepper) ────────────── */
