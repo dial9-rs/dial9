@@ -21,9 +21,15 @@
 import { copyValue } from "../../components/copy-value.js";
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
+import { repeat } from "lit-html/directives/repeat.js";
+import { keyed } from "lit-html/directives/keyed.js";
 import { deriveLaneData } from "../../components/canvas/lanes/index.js";
 import type { LaneData } from "../../components/canvas/lanes/index.js";
-import { resolveTaskForEvent } from "./events-model.js";
+import {
+  eventClusterPage,
+  resolveTaskForEvent,
+  selectClusterMember,
+} from "./events-model.js";
 import { computeQueueData, computeSpawnedTasks } from "./queue-model.js";
 import type { QueueData } from "./queue-model.js";
 import { createTaskDetailDerivation } from "./task-detail-track.js";
@@ -53,9 +59,9 @@ import {
   buildRelated,
   buildSpanDetail,
   buildSpawnedTasksView,
-  detailEventKey,
   hasNoSelection,
   pollKey,
+  pinnedDetailKey,
   preferredTab,
   resolveTaskDumpCaptures,
   selectionParts,
@@ -265,7 +271,7 @@ export function mountInspector(
       lastPollKey = nextPollKey;
     }
     const detailEvent = sel.pinnedEvent?.detailEvent ?? null;
-    const nextDetailEventKey = detailEventKey(detailEvent);
+    const nextDetailEventKey = pinnedDetailKey(sel.pinnedEvent);
     if (nextDetailEventKey !== lastDetailEventKey) {
       if (preserveInitialRelatedView && lastDetailEventKey === null && detailEvent !== null) {
         preserveInitialRelatedView = false;
@@ -1102,10 +1108,69 @@ export function mountInspector(
     const eventName = pinned.detailEvent?.name ?? pinned.name;
     return html`
       <div class="d9-event-detail">
+        ${pinned.events.length > 1 ? keyed(pinned.events, clusterTemplate(pinned, fmtTs)) : nothing}
         <div class="d9-event-title">${view.title}</div>
         ${view.rows.map((row) => eventRow(row, eventName))}
       </div>
     `;
+  }
+
+  function clusterTemplate(
+    pinned: NonNullable<SelectionSlice["pinnedEvent"]>,
+    fmtTs: (ns: number) => string,
+  ): TemplateResult {
+    const page = eventClusterPage(pinned);
+    return html`
+      <section class="d9-event-cluster" aria-label="Cluster events">
+        <div class="d9-event-cluster-heading">
+          <strong>${pinned.events.length} events</strong>
+          <span>${page.start + 1}–${page.start + page.events.length}</span>
+        </div>
+        <div class="d9-event-cluster-list" tabindex="0" aria-label="Events in this cluster">
+          ${repeat(page.events, (_, index) => page.start + index, (event, index) => html`
+            <button
+              type="button"
+              class="d9-event-cluster-member"
+              aria-pressed=${pinned.detailEvent === event ? "true" : "false"}
+              @click=${() => selectMember(page.start + index)}
+            >
+              <span>${event.name}</span><time>${fmtTs(event.timestamp)}</time>
+            </button>
+          `)}
+        </div>
+        ${page.pages > 1 ? html`
+          <nav class="d9-event-cluster-pages" aria-label="Cluster event pages">
+            <button type="button" class="d9-event-btn" ?disabled=${page.page === 0}
+              @click=${() => changeClusterPage(page.page - 1)}>Previous</button>
+            <span>Page ${page.page + 1} of ${page.pages}</span>
+            <button type="button" class="d9-event-btn" ?disabled=${page.page === page.pages - 1}
+              @click=${() => changeClusterPage(page.page + 1)}>Next</button>
+          </nav>
+        ` : nothing}
+      </section>
+    `;
+  }
+
+  function selectMember(index: number): void {
+    const pinned = state().selection.pinnedEvent;
+    if (pinned === null) return;
+    const lanes = data().laneData;
+    store.update("selection", {
+      pinnedEvent: selectClusterMember(pinned, index, lanes?.workerSpans ?? {}, lanes?.workerIds ?? []),
+      selectedTaskId: null,
+      pollDetail: null,
+      spanFocus: null,
+      focusedSpanId: null,
+      taskDump: null,
+    });
+  }
+
+  function changeClusterPage(page: number): void {
+    const pinned = state().selection.pinnedEvent;
+    if (pinned === null) return;
+    store.update("selection", { pinnedEvent: { ...pinned, clusterPage: page } });
+    const list = host.querySelector(".d9-event-cluster-list");
+    if (list !== null) list.scrollTop = 0;
   }
 
   function eventRow(

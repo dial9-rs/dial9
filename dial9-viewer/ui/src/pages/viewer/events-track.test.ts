@@ -16,6 +16,7 @@ import { describe, it, expect } from "vitest";
 import { createViewerStore } from "./store.js";
 import {
   computeEventTrackData,
+  selectClusterMember,
   type EventDrawBucket,
 } from "./events-model.js";
 import {
@@ -48,6 +49,20 @@ function ev(name: string, timestamp: number): CustomTraceEvent {
 function testStore(): ReturnType<typeof createViewerStore> {
   return createViewerStore({ scheduler: () => {} });
 }
+
+it("a new cluster clears member/page state, and clicking a browsed cluster again unpins it", () => {
+  const store = testStore();
+  const first = bucket([ev("A", 100), ev("B", 110)], null);
+  dispatchEventPin(store, first, {}, []);
+  const pin = selectClusterMember(store.getState().selection.pinnedEvent!, 1, {}, []);
+  store.update("selection", { pinnedEvent: { ...pin, clusterPage: 1 } });
+  dispatchEventPin(store, first, {}, []);
+  expect(store.getState().selection.pinnedEvent).toBeNull();
+  store.update("selection", { pinnedEvent: { ...pin, clusterPage: 1 } });
+  dispatchEventPin(store, bucket([ev("C", 200), ev("D", 210)], null), {}, []);
+  expect(store.getState().selection.pinnedEvent?.detailEvent).toBeNull();
+  expect(store.getState().selection.pinnedEvent?.clusterPage).toBeUndefined();
+});
 
 function bucket(
   events: CustomTraceEvent[],

@@ -214,6 +214,36 @@ describe("buildEventDetail", () => {
     expect(v.rows.every((r) => r.corrVal === null)).toBe(true);
   });
 
+  it("shows a selected cluster member's fields and actions instead of the summary", () => {
+    const a = ev("A", 100, { value: 1 });
+    const b = ev("B", 100, { value: 2, request: "shared" });
+    const other = ev("B", 200, { request: "shared" });
+    const pinned = { ...pinnedSingle(b, 42), events: [a, b] };
+    const view = buildEventDetail(pinned, [a, b, other], fmtTs);
+    expect(view.title).toBe("B");
+    expect(view.rows.find((r) => r.key === "value")).toMatchObject({ value: "2", chart: true });
+    expect(view.rows.find((r) => r.key === "request")).toMatchObject({ corrVal: "shared", chart: false });
+    expect(view.rows.find((r) => r.key === "Task")?.value).toBe("0x2a (selected)");
+    expect(tabAvailability(sel({ pinnedEvent: pinned })).related).toBe(true);
+  });
+
+  it("distinguishes cluster members with identical names and timestamps", () => {
+    const a = ev("Same", 100, { value: 1 });
+    const b = ev("Same", 100, { value: 2 });
+    const first = sel({ pinnedEvent: { ...pinnedSingle(a, null), events: [a, b] } });
+    const second = sel({ pinnedEvent: { ...pinnedSingle(b, null), events: [a, b] } });
+    expect(selectionParts(first)).not.toEqual(selectionParts(second));
+    expect(autoActivateTab(selectionParts(first), selectionParts(second), "related", second)).toBe("event");
+  });
+
+  it("can inspect a cluster member with no fields", () => {
+    const a = ev("A", 100, { value: 1 });
+    const b = ev("Empty", 200);
+    const view = buildEventDetail({ ...pinnedSingle(b, null), events: [a, b] }, [a, b], fmtTs);
+    expect(view.title).toBe("Empty");
+    expect(view.rows.map((r) => [r.key, r.value])).toEqual([["@", "t200"]]);
+  });
+
   it("does not offer charts for comma-delimited event or field names", () => {
     const commaEvent = ev("Req,Finished", 100, { value: 42 });
     const commaField = ev("Req", 200, { "value,total": 42 });

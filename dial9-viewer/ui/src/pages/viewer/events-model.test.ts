@@ -13,6 +13,8 @@
 import { describe, it, expect } from "vitest";
 import {
   buildEventRenderModel,
+  selectClusterMember,
+  eventClusterPage,
   computeEventTrackData,
   eventHighlightTask,
   eventMatchesFilter,
@@ -335,5 +337,58 @@ describe("eventHighlightTask", () => {
       }),
     ).toBe(9);
     expect(eventHighlightTask({ selectedTaskId: null, pinnedEvent: null })).toBeNull();
+  });
+});
+
+
+describe("cluster browsing", () => {
+  const cluster = () => {
+    const events = [ev("Same", 100, { task_id: 7 }), ev("Same", 100, { task_id: 9 }), ev("Other", 110)];
+    return { events, timestamp: 100, taskId: null, name: "3 events", poll: null, detailEvent: null };
+  };
+
+  it("selects by index, retains the cluster and page, and resolves the member task", () => {
+    const pinned = { ...cluster(), clusterPage: 0 };
+    const selected = selectClusterMember(pinned, 1, {}, []);
+    expect(selected.events).toBe(pinned.events);
+    expect(selected.detailEvent).toBe(pinned.events[1]);
+    expect(selected).toMatchObject({ timestamp: 100, taskId: 9, name: "Same", poll: null, clusterPage: 0 });
+    expect(pinned.detailEvent).toBeNull();
+    const unknown = selectClusterMember(selected, 2, {}, []);
+    expect(unknown).toMatchObject({ timestamp: 110, taskId: null, poll: null });
+  });
+
+  it("ignores stale or invalid member indexes", () => {
+    const pinned = cluster();
+    for (const index of [-1, 3, 0.5, NaN]) {
+      expect(selectClusterMember(pinned, index, {}, [])).toBe(pinned);
+    }
+  });
+
+  it("updates the highlighted poll when a member belongs to a different worker", () => {
+    const first = ev("A", 50, { worker_id: 0 });
+    const second = ev("B", 50, { worker_id: 1 });
+    const a = poll(0, 100, 42);
+    const b = poll(0, 100, 99);
+    const lanes = { 0: lane([a]), 1: lane([b]) };
+    const pinned = { ...cluster(), events: [first, second] };
+    const selected = selectClusterMember(pinned, 1, lanes, [0, 1]);
+    expect(selected.taskId).toBe(99);
+    expect(selected.poll).toBe(b);
+  });
+
+  it("pages large clusters without dropping equal-timestamp events", () => {
+    const events = Array.from({ length: 205 }, (_, i) => ev("Same", 100, { value: i }));
+    const pinned = { ...cluster(), events };
+    const first = eventClusterPage(pinned);
+    const second = eventClusterPage({ ...pinned, clusterPage: 1 });
+    const last = eventClusterPage({ ...pinned, clusterPage: 2 });
+    expect(first.events).toHaveLength(100);
+    expect(second.events).toHaveLength(100);
+    expect(last.events).toHaveLength(5);
+    expect([...first.events, ...second.events, ...last.events]).toEqual(events);
+    expect(second.start).toBe(100);
+    expect(last).toMatchObject({ start: 200, page: 2, pages: 3 });
+    expect(eventClusterPage({ ...pinned, clusterPage: 99 }).page).toBe(2);
   });
 });

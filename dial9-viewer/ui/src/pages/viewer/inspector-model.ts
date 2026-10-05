@@ -215,7 +215,7 @@ export interface EventDetailView {
   title: string;
   rows: KvRow[];
   taskId: number | null;
-  /** True for a single-event pin: enables the Related tab. */
+  /** True when showing one event, including a selected cluster member. */
   isSingle: boolean;
 }
 
@@ -249,9 +249,9 @@ export function topEventNames(
 /**
  * Build the Event tab view for a pinned custom event: a single event lists its
  * unit-formatted fields (correlation offered only when another event shares
- * the value) plus its timestamp; a cluster lists count / top types / the
- * timestamp range. The resolved task appends a `Task` row. `allEvents` is the
- * full custom-event stream for the correlation-availability check.
+ * the value) plus its timestamp. A cluster without a selected member lists
+ * count / top types / the timestamp range. The resolved task appends a `Task`
+ * row. `allEvents` is the full stream for the correlation-availability check.
  */
 export function buildEventDetail(
   pinned: PinnedCustomEvent,
@@ -260,11 +260,12 @@ export function buildEventDetail(
 ): EventDetailView {
   const events = pinned.events;
   const rows: KvRow[] = [];
-  const isSingle = events.length === 1;
+  const detail = pinned.detailEvent ?? (events.length === 1 ? events[0]! : null);
+  const isSingle = detail !== null;
   let title: string;
 
   if (isSingle) {
-    const ev = events[0]!;
+    const ev = detail!;
     title = ev.name;
     for (const [k, v] of Object.entries(ev.fields ?? {})) {
       const corrVal = String(v);
@@ -772,6 +773,12 @@ export function detailEventKey(event: CustomTraceEvent | null): string | null {
   return event === null ? null : `${event.timestamp}:${event.name}`;
 }
 
+/** Cluster members can share both name and timestamp. */
+export const pinnedDetailKey = (pinned: PinnedCustomEvent | null): string | null => {
+  const event = pinned?.detailEvent;
+  return event == null ? null : `${detailEventKey(event)}:${pinned!.events.indexOf(event)}`;
+};
+
 /**
  * One scalar per selection surface, for change detection. autoActivateTab
  * compares consecutive results to see which surface an action just changed.
@@ -786,7 +793,7 @@ export function selectionParts(sel: SelectionSlice): string[] {
     sel.pinnedEvent
       ? `${sel.pinnedEvent.timestamp}:${sel.pinnedEvent.events.length}`
       : "-",
-    detailEventKey(sel.pinnedEvent?.detailEvent ?? null) ?? "-",
+    pinnedDetailKey(sel.pinnedEvent) ?? "-",
     sel.spawnedTasksRange
       ? `${sel.spawnedTasksRange.startNs}-${sel.spawnedTasksRange.endNs}`
       : "-",

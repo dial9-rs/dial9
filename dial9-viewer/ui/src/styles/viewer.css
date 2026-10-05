@@ -1406,6 +1406,45 @@ body {
 
 /* Event tab. */
 .d9-event-title { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; word-break: break-all; }
+.d9-event-cluster { margin-bottom: 16px; }
+.d9-event-cluster-heading,
+.d9-event-cluster-pages {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 0;
+}
+.d9-event-cluster-list {
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    overscroll-behavior: contain;
+}
+.d9-event-cluster-member {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 6px 8px;
+    border: 0;
+    border-bottom: 1px solid var(--d9-border);
+    background: transparent;
+    color: var(--d9-fg);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.d9-event-cluster-member span { min-width: 0; overflow-wrap: anywhere; }
+.d9-event-cluster-member time { flex-shrink: 0; color: var(--d9-fg-muted); }
+.d9-event-cluster-member:hover,
+.d9-event-cluster-member[aria-pressed="true"] { background: var(--d9-bg-track); }
+.d9-event-cluster-member[aria-pressed="true"] { box-shadow: inset 3px 0 var(--d9-accent); }
+.d9-event-cluster-member:focus-visible,
+.d9-event-cluster-list:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+.d9-event-cluster-pages button:disabled { opacity: 0.4; cursor: default; }
 .d9-event-row {
     display: grid;
     grid-template-columns: minmax(72px, 3fr) minmax(0, 2fr) repeat(3, 24px);

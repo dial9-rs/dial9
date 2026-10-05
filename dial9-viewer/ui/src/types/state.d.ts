@@ -99,9 +99,11 @@ export interface PinnedCustomEvent {
   poll: PollSpan | null;
   /**
    * Detail pin for the Related tab: the single event whose detail is
-   * shown. Explicitly null for cluster pins (Related is single-event only).
+   * shown, including a selected cluster member. Null for a cluster summary.
    */
   detailEvent: CustomTraceEvent | null;
+  /** Zero-based cluster list page; absent means the first page. */
+  clusterPage?: number;
 }
 
 /**

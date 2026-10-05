@@ -449,6 +449,36 @@ export function buildEventRenderModel(opts: EventRenderModelOpts): EventRenderMo
 
 // ── Click-to-pin: the PinnedCustomEvent contract ──────────────────────────
 
+const CLUSTER_PAGE_SIZE = 100;
+
+/** Keep the inspector DOM bounded even when many events share one pixel. */
+export const eventClusterPage = (pinned: PinnedCustomEvent) => {
+  const pages = Math.max(1, Math.ceil(pinned.events.length / CLUSTER_PAGE_SIZE));
+  const page = Math.max(0, Math.min(pinned.clusterPage ?? 0, pages - 1));
+  const start = page * CLUSTER_PAGE_SIZE;
+  return { page, pages, start, events: pinned.events.slice(start, start + CLUSTER_PAGE_SIZE) };
+};
+
+/** Select a member without replacing the cluster or its browsing position. */
+export const selectClusterMember = (
+  pinned: PinnedCustomEvent,
+  index: number,
+  workerSpans: Record<number, LaneSpans>,
+  workerIds: readonly number[],
+): PinnedCustomEvent => {
+  const event = pinned.events[index];
+  if (event === undefined || !Number.isInteger(index)) return pinned;
+  const taskId = resolveTaskForEvent(event, workerSpans, workerIds);
+  return {
+    ...pinned,
+    detailEvent: event,
+    timestamp: event.timestamp,
+    name: event.name,
+    taskId,
+    poll: resolvePollForEvent(event, workerSpans, workerIds, taskId),
+  };
+};
+
 /**
  * True when `bucket` is the cluster currently pinned (a repeat click toggles
  * the pin off). The representative's timestamp and name identify the cluster, since
