@@ -25,6 +25,8 @@ decompress or parse a trace.
   maxTs: number|null,            // latest event timestamp (ns), null if no events
   recordMinTs: number|null,      // earliest sliceable timestamped record (ns), null if none
   recordMaxTs: number|null,      // latest sliceable timestamped record (ns), null if none
+  displayMinTs: number|null,     // earliest record excluding task dumps (ns), null if none
+  displayMaxTs: number|null,     // latest record excluding task dumps (ns), null if none
   cpuSamples: CpuSample[],      // Periodic stack traces from perf/eBPF
   customEvents: CustomEvent[],   // Custom events; also spans when no spanEventSink is configured
   spawnLocations: Map<string, string>,    // spawn location ID → source location

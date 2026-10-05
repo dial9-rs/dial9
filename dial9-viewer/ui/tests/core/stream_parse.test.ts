@@ -102,6 +102,8 @@ function canonical(trace: ParsedTraceLoose): unknown {
         maxTs: trace["maxTs"],
         recordMinTs: trace.recordMinTs,
         recordMaxTs: trace.recordMaxTs,
+        displayMinTs: trace["displayMinTs"],
+        displayMaxTs: trace["displayMaxTs"],
         truncated: trace["truncated"],
         timeFiltered: trace["timeFiltered"],
         filterStartTime: trace["filterStartTime"],

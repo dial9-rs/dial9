@@ -438,6 +438,8 @@
      *   maxTs: number|null,
      *   recordMinTs: number|null,
      *   recordMaxTs: number|null,
+     *   displayMinTs: number|null,
+     *   displayMaxTs: number|null,
      *   truncated: boolean,
      *   hasCpuTime: boolean,
      *   hasSchedWait: boolean,
@@ -806,6 +808,8 @@
             minMonoTs: null,
             recordMinTs: Infinity,
             recordMaxTs: -Infinity,
+            displayMinTs: Infinity,
+            displayMaxTs: -Infinity,
             singleEventMinTs: Infinity,
             singleEventMaxTs: -Infinity,
             singleEventDecodeErrors: 0,
@@ -1231,6 +1235,16 @@
             }
             if (boundEnd != null && boundEnd > state.recordMaxTs) {
                 state.recordMaxTs = boundEnd;
+            }
+            // Task dumps describe suspended tasks and can be carried into a
+            // later segment. Retain them without extending the timeline.
+            if (frame.name !== "TaskDumpEvent" || isSingleEventSchema) {
+                if (boundStart != null && boundStart < state.displayMinTs) {
+                    state.displayMinTs = boundStart;
+                }
+                if (boundEnd != null && boundEnd > state.displayMaxTs) {
+                    state.displayMaxTs = boundEnd;
+                }
             }
             if (spanInTimeRange) {
                 if (boundStart < state.singleEventMinTs) {
@@ -1829,6 +1843,10 @@
                 state.recordMinTs < Infinity ? state.recordMinTs : null,
             recordMaxTs:
                 state.recordMaxTs > -Infinity ? state.recordMaxTs : null,
+            displayMinTs:
+                state.displayMinTs < Infinity ? state.displayMinTs : null,
+            displayMaxTs:
+                state.displayMaxTs > -Infinity ? state.displayMaxTs : null,
             truncated: events.length >= maxEvents,
             timeFiltered: hasTimeFilter,
             filterStartTime: hasTimeFilter ? startTime : null,

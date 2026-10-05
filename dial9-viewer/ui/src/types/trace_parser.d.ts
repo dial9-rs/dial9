@@ -269,6 +269,9 @@ declare module "*/trace_parser.js" {
     /** Bounds over ALL sliceable timestamped records; null if none. */
     recordMinTs: number | null;
     recordMaxTs: number | null;
+    /** Record bounds excluding task dumps; absent in older parsed caches. */
+    displayMinTs?: number | null;
+    displayMaxTs?: number | null;
     truncated: boolean;
     timeFiltered: boolean;
     /** Time-range filter bounds (ns); null when unfiltered. */

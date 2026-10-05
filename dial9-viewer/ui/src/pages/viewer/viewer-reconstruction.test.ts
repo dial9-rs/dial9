@@ -118,6 +118,8 @@ describe("viewer deep-link reconstruction", () => {
         maxTs: null,
         recordMinTs,
         recordMaxTs,
+        displayMinTs: recordMinTs,
+        displayMaxTs: recordMaxTs,
       };
       const store = createViewerStore({ scheduler: () => {} });
       const reconstruction = createViewerReconstruction(store, {
@@ -136,13 +138,15 @@ describe("viewer deep-link reconstruction", () => {
     },
   );
 
-  it("fits and restores the viewport against all-record bounds", () => {
+  it("fits and restores the viewport against display bounds", () => {
     const trace: ParsedTrace = {
       ...settledTrace,
       minTs: 100,
       maxTs: 200,
       recordMinTs: 50,
-      recordMaxTs: 300,
+      recordMaxTs: 400,
+      displayMinTs: 50,
+      displayMaxTs: 300,
     };
     const store = createViewerStore({ scheduler: () => {} });
     const reconstruction = createViewerReconstruction(store, {
@@ -157,6 +161,14 @@ describe("viewer deep-link reconstruction", () => {
       maxTs: 300,
       viewStart: 60,
       viewEnd: 290,
+    });
+
+    reconstruction.applyLoadedTrace(trace, "reparse");
+    expect(store.getState().viewport).toMatchObject({
+      minTs: 50,
+      maxTs: 300,
+      viewStart: 50,
+      viewEnd: 300,
     });
   });
 
