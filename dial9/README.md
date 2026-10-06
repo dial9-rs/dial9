@@ -198,7 +198,7 @@ deploy gate. Build it once and keep it; the report says whether the handle
 reaches a recorder that hasn't shut down. A paused recorder reports `disabled`:
 
 ```rust,no_run
-use dial9::Dial9HandleTokioExt;
+use dial9::smoke_test::SmokeTesterExt;
 
 # async fn startup_probe() {
 let tester = dial9::Dial9Handle::current().smoke_tester().build();

@@ -4,7 +4,8 @@
 //! cargo run --example smoke_test
 //! ```
 
-use dial9::{Dial9HandleTokioExt, MemoryBuffer};
+use dial9::MemoryBuffer;
+use dial9::smoke_test::SmokeTesterExt;
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
