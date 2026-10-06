@@ -74,6 +74,8 @@ test_util_pub! {
     /// Runtime-agnostic recording state shared across threads.
     mod shared_state;
 }
+/// Smoke test statuses and the checks `dial9-core` answers.
+pub mod smoke_test;
 /// `Source` trait: pluggable flush-thread data sources.
 pub mod source;
 /// Shared helpers for this crate's own `#[cfg(test)]` unit tests.
