@@ -32,7 +32,7 @@ pub struct SmokeTestReport {
 impl SmokeTestReport {
     /// Whether the handle is connected to a recorder that hasn't shut down
     /// and isn't paused. Doesn't check that the recorder's threads are alive.
-    pub fn recording(&self) -> &CheckStatus {
+    pub fn recording_status(&self) -> &CheckStatus {
         &self.recording
     }
 
