@@ -146,7 +146,6 @@ pub mod time {
     use std::cell::Cell;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
     pub use tokio::time::Instant;
@@ -190,10 +189,13 @@ pub mod time {
         yielded: bool,
     }
 
-    // Shuttle resets its own state every execution, but this must accumulate
-    // across a whole `check_pct` batch to answer "did any schedule in this batch
-    // actually suspend here."
-    static YIELD_PENDING_POLLS: AtomicUsize = AtomicUsize::new(0);
+    // Accumulates across a whole `check_pct`/determinism batch (shuttle
+    // resets its own state every iteration). Thread-local so a
+    // concurrently-running `#[test]`, on its own OS thread, can't inflate
+    // this one's count.
+    std::thread_local! {
+        static YIELD_PENDING_POLLS: Cell<usize> = const { Cell::new(0) };
+    }
 
     /// Count of `Yield::poll` calls that returned `Pending` since the last call.
     /// Lets a scenario built around `sleep`/`sleep_until`
@@ -202,7 +204,7 @@ pub mod time {
     /// Test-integrity check: a failure here means the scenario stopped exercising
     /// the code path it exists to cover.
     pub fn take_yield_pending_polls() -> usize {
-        YIELD_PENDING_POLLS.swap(0, Ordering::Relaxed)
+        YIELD_PENDING_POLLS.with(|c| c.replace(0))
     }
 
     impl Future for Yield {
@@ -212,7 +214,7 @@ pub mod time {
                 Poll::Ready(())
             } else {
                 self.yielded = true;
-                YIELD_PENDING_POLLS.fetch_add(1, Ordering::Relaxed);
+                YIELD_PENDING_POLLS.with(|c| c.set(c.get() + 1));
                 LOGICAL_CLOCK
                     .with(|(_, nanos)| nanos.set(nanos.get() + LOGICAL_TICK.as_nanos() as u64));
                 cx.waker().wake_by_ref();
@@ -225,8 +227,14 @@ pub mod time {
     /// poll of `future` has a small chance of simulating the deadline
     /// instead of waiting, so short futures rarely get cut off while
     /// long ones accumulate rising odds across a `pct`/`determinism` batch.
+    /// Verified to fire at least once per batch by
+    /// `worker::shuttle_tests::shuttle_background_task_drain_timeout_fires`,
+    /// via `take_elapsed_fired`.
     pub fn timeout<F: Future + Unpin>(_duration: std::time::Duration, future: F) -> Timeout<F> {
-        Timeout { future }
+        Timeout {
+            future,
+            pending_polls: 0,
+        }
     }
 
     #[derive(Debug)]
@@ -234,11 +242,42 @@ pub mod time {
 
     pub struct Timeout<F> {
         future: F,
+        pending_polls: u32,
     }
 
-    // Per-pending-poll odds of simulating the deadline. Low enough that a
-    // handful of polls (a typical drain) is very unlikely to get cut off.
+    // Per-pending-poll odds of simulating the deadline: mean 1/p = 50 pending
+    // polls before firing. Placeholder value: picked so a short drain (a
+    // handful of polls) is unlikely to trip it, never measured against
+    // real polling counts. No scenario checks that property; only the
+    // opposite one (eventual firing on a permanently-pending future) is
+    // tested, and that guarantee comes from
+    // `MAX_PENDING_POLLS_BEFORE_FORCED_ELAPSED` below, not from this value.
     const FIRE_PROBABILITY_PER_PENDING_POLL: f64 = 0.02;
+
+    // Forces `Elapsed` after this many pending polls even without the dice
+    // landing, so unbounded bad luck can't exceed shuttle's own
+    // (process-wide, uncontrollable) step budget. ~8x the mean above, so it
+    // almost never triggers in practice.
+    const MAX_PENDING_POLLS_BEFORE_FORCED_ELAPSED: u32 = 400;
+
+    // Accumulates across a whole `check_pct`/determinism batch (shuttle
+    // resets its own state every iteration). Thread-local so a
+    // concurrently-running `#[test]`, on its own OS thread, can't inflate
+    // this one's count.
+    std::thread_local! {
+        static ELAPSED_FIRED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Count of `Timeout::poll` calls that resolved `Err(Elapsed)` since the
+    /// last call. Lets a scenario built around `primitives::time::timeout`
+    /// assert the deadline branch actually fired at least once across a
+    /// batch.
+    ///
+    /// Test-integrity check: a failure here means the scenario stopped
+    /// exercising the code path it exists to cover.
+    pub fn take_elapsed_fired() -> usize {
+        ELAPSED_FIRED.with(|c| c.replace(0))
+    }
 
     impl<F: Future + Unpin> Future for Timeout<F> {
         type Output = Result<F::Output, Elapsed>;
@@ -247,9 +286,18 @@ pub mod time {
             match Pin::new(&mut self.future).poll(cx) {
                 Poll::Ready(v) => Poll::Ready(Ok(v)),
                 Poll::Pending => {
-                    if shuttle::rand::thread_rng().gen_bool(FIRE_PROBABILITY_PER_PENDING_POLL) {
+                    self.pending_polls += 1;
+                    if self.pending_polls >= MAX_PENDING_POLLS_BEFORE_FORCED_ELAPSED
+                        || shuttle::rand::thread_rng().gen_bool(FIRE_PROBABILITY_PER_PENDING_POLL)
+                    {
+                        ELAPSED_FIRED.with(|c| c.set(c.get() + 1));
                         Poll::Ready(Err(Elapsed(())))
                     } else {
+                        // Must self-wake: `future` may never wake anything
+                        // on its own (e.g. `std::future::pending()`), and
+                        // without this the dice above would only ever be
+                        // rolled once.
+                        cx.waker().wake_by_ref();
                         Poll::Pending
                     }
                 }
@@ -302,6 +350,33 @@ pub mod runtime {
 #[cfg(shuttle)]
 pub const SHUTTLE_TOKIO_STACK_SIZE: usize = 0x000F_0000;
 
+/// Shared by `shuttle_test!`'s `stack_size` arms so a custom `Config` doesn't
+/// need `shuttle::check_pct`'s scheduler-construction internals reimplemented
+/// at each arm.
+#[cfg(shuttle)]
+pub fn run_stack_bumped_pct<F: Fn() + Send + Sync + 'static>(
+    f: F,
+    depth: usize,
+    num_iters: usize,
+    config: shuttle::Config,
+) {
+    use shuttle::scheduler::PctScheduler;
+    let scheduler = PctScheduler::new(depth, num_iters);
+    shuttle::Runner::new(scheduler, config).run(f);
+}
+
+/// Same as [`run_stack_bumped_pct`], for `shuttle::check_uncontrolled_nondeterminism`.
+#[cfg(shuttle)]
+pub fn run_stack_bumped_determinism<F: Fn() + Send + Sync + 'static>(
+    f: F,
+    num_iters: usize,
+    config: shuttle::Config,
+) {
+    use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
+    let scheduler = UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new(num_iters));
+    shuttle::Runner::new(scheduler, config).run(f);
+}
+
 /// Pairs a shuttle scenario with `check_pct` and `check_uncontrolled_nondeterminism`
 /// Nests the scenario in its own module so `pct`/`determinism` can be fixed leaf names.
 ///
@@ -326,9 +401,16 @@ pub const SHUTTLE_TOKIO_STACK_SIZE: usize = 0x000F_0000;
 /// - `verify_faults_triggered` -- also asserts
 ///   `primitives::fs::take_faults_triggered() > 0`, so fault injection can't
 ///   silently stop exercising its error path.
+/// - `verify_elapsed_triggered`: also asserts
+///   `primitives::time::take_elapsed_fired() > 0`, so `primitives::time::timeout`'s
+///   `Elapsed` branch can't silently stop firing across a batch.
 /// - `stack_size = $bytes`: build `shuttle::Runner` directly with a
 ///   bumped coroutine stack, for a scenario whose call depth SIGBUSes on
 ///   the hardcoded 60KB default. Pass [`SHUTTLE_TOKIO_STACK_SIZE`].
+/// - `verify_yield_triggered` (added after `stack_size = $bytes`): also
+///   asserts `primitives::time::take_yield_pending_polls() > 0`, so a
+///   `sleep`/`sleep_until` await can't silently stop suspending across a
+///   batch.
 ///
 /// Use `num_iters = $num_iters, determinism_only;` instead of `num_iters =
 /// .., depth = ..` for a scenario with no real concurrency to explore
@@ -527,6 +609,43 @@ macro_rules! shuttle_test {
             }
         }
     };
+    // Same as the plain form, but also asserts
+    // `primitives::time::take_elapsed_fired() > 0` across the whole batch, so
+    // `primitives::time::timeout`'s `Elapsed` branch can't silently stop
+    // firing without failing loudly. Checked inside the same
+    // `pct`/`determinism` runs, not separate tests, to avoid exploring twice.
+    (num_iters = $num_iters:expr, depth = $depth:expr, verify_elapsed_triggered; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+        mod $name {
+            use super::*;
+
+            $(#[$attr])*
+            fn $name() $body
+
+            fn assert_elapsed_was_triggered() {
+                assert!(
+                    $crate::primitives::time::take_elapsed_fired() > 0,
+                    "no run across {} iterations took primitives::time::timeout's Elapsed \
+                     branch; this scenario is not exercising the drain-timeout race it exists \
+                     to cover.",
+                    $num_iters,
+                );
+            }
+
+            #[test]
+            fn pct() {
+                $crate::primitives::time::take_elapsed_fired(); // drain any count left over from an earlier test
+                shuttle::check_pct($name, $num_iters, $depth);
+                assert_elapsed_was_triggered();
+            }
+
+            #[test]
+            fn determinism() {
+                $crate::primitives::time::take_elapsed_fired(); // drain any count left over from an earlier test
+                shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
+                assert_elapsed_was_triggered();
+            }
+        }
+    };
     // Same as the plain form, but builds `shuttle::Runner` directly with a
     // bumped `stack_size`, for a scenario whose call depth SIGBUSes on
     // the hardcoded 60KB default.
@@ -545,17 +664,54 @@ macro_rules! shuttle_test {
 
             #[test]
             fn pct() {
-                use shuttle::scheduler::PctScheduler;
-                let scheduler = PctScheduler::new($depth, $num_iters);
-                shuttle::Runner::new(scheduler, config()).run($name);
+                $crate::primitives::run_stack_bumped_pct($name, $depth, $num_iters, config());
             }
 
             #[test]
             fn determinism() {
-                use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
-                let scheduler =
-                    UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new($num_iters));
-                shuttle::Runner::new(scheduler, config()).run($name);
+                $crate::primitives::run_stack_bumped_determinism($name, $num_iters, config());
+            }
+        }
+    };
+    // Same as the `stack_size` form, but also asserts
+    // `primitives::time::take_yield_pending_polls() > 0` across the whole
+    // batch, for a scenario whose `sleep`/`sleep_until` await only suspends
+    // on some schedules.
+    (num_iters = $num_iters:expr, depth = $depth:expr, stack_size = $stack_size:expr, verify_yield_triggered; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+        mod $name {
+            use super::*;
+
+            $(#[$attr])*
+            fn $name() $body
+
+            fn config() -> shuttle::Config {
+                let mut config = shuttle::Config::new();
+                config.stack_size = $stack_size;
+                config
+            }
+
+            fn assert_yield_was_triggered() {
+                assert!(
+                    $crate::primitives::time::take_yield_pending_polls() > 0,
+                    "no run across {} iterations suspended on sleep/sleep_until; \
+                     this scenario is not exercising the deadline path it exists \
+                     to cover.",
+                    $num_iters,
+                );
+            }
+
+            #[test]
+            fn pct() {
+                $crate::primitives::time::take_yield_pending_polls(); // drain any count left over from an earlier test
+                $crate::primitives::run_stack_bumped_pct($name, $depth, $num_iters, config());
+                assert_yield_was_triggered();
+            }
+
+            #[test]
+            fn determinism() {
+                $crate::primitives::time::take_yield_pending_polls(); // drain any count left over from an earlier test
+                $crate::primitives::run_stack_bumped_determinism($name, $num_iters, config());
+                assert_yield_was_triggered();
             }
         }
     };
@@ -656,6 +812,24 @@ pub mod fs {
         }
     }
 
+    // Accumulates across a whole `check_pct`/determinism batch (shuttle
+    // resets its own state every iteration). Thread-local so a
+    // concurrently-running `#[test]`, on its own OS thread, can't inflate
+    // this one's count.
+    std::thread_local! {
+        static FAULTS_TRIGGERED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Count of `check()` calls that returned an error since the last call.
+    /// Lets a scenario built around `set_fault` assert a fault actually
+    /// fired at least once across a batch.
+    ///
+    /// Test-integrity check: a failure here means the scenario stopped
+    /// exercising the code path it exists to cover.
+    pub fn take_faults_triggered() -> usize {
+        FAULTS_TRIGGERED.with(|c| c.replace(0))
+    }
+
     fn check() -> io::Result<()> {
         let fail = match FAULT.with(|f| f.get()) {
             FaultPolicy::None => false,
@@ -663,6 +837,7 @@ pub mod fs {
             FaultPolicy::FailProb(p) => shuttle::rand::thread_rng().gen_bool(p),
         };
         if fail {
+            FAULTS_TRIGGERED.with(|c| c.set(c.get() + 1));
             Err(io::Error::from(ErrorKind::PermissionDenied))
         } else {
             Ok(())

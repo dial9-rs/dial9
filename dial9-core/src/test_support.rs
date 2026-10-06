@@ -40,7 +40,7 @@ mod pipeline_helpers {
     }
 
     /// Call `f` with each sealed segment's raw bytes, draining `fs` until empty.
-    pub(crate) fn for_each_sealed_segment(fs: &Arc<Fs>, mut f: impl FnMut(Vec<u8>)) {
+    pub(crate) fn for_each_sealed_segment(fs: &Fs, mut f: impl FnMut(Vec<u8>)) {
         loop {
             let taken = fs.take_files();
             if taken.segments.is_empty() {
@@ -52,6 +52,17 @@ mod pipeline_helpers {
             }
         }
     }
+}
+
+/// Pins the ambient clock to a fixed instant for the guard's lifetime, so a
+/// scenario's rotation/seal-time checks read reproducible time instead of
+/// real elapsed time, which can differ between a shuttle replay's record
+/// and re-run passes.
+#[cfg(all(test, shuttle))]
+pub(crate) fn pin_fixed_clock() -> metrique_timesource::ThreadLocalTimeSourceGuard {
+    metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+        metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+    ))
 }
 
 /// The one sealed (non-`.active`) `.bin` segment in `dir`.
