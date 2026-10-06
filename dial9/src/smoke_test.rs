@@ -20,7 +20,7 @@ use dial9_core::handle::Dial9Handle;
 use std::fmt;
 use std::marker::PhantomData;
 
-pub use dial9_core::smoke_test::{Check, CheckStatus, DisabledReason};
+pub use dial9_core::smoke_test::{Check, CheckStatus, DisabledReason, FailedReason};
 
 /// Result of [`SmokeTester::run`].
 #[derive(Debug, Clone)]
