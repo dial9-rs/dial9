@@ -193,16 +193,13 @@ Missing variables use defaults. Blank, invalid, or non-Unicode values emit a war
 
 ## Checking telemetry at startup
 
-`handle.smoke_tester()` builds a check you can run from a startup probe or a
-deploy gate. Build it once and keep it; the report says whether the handle
-reaches a recorder that hasn't shut down. A paused recorder reports `disabled`:
+To confirm dial9 is recording, for example from a startup probe or a deploy gate, build a smoke tester from the handle and run it. The report has one line per check, and `is_healthy()` is `false` if any check failed. A paused recorder shows up as `disabled`.
 
 ```rust,no_run
 use dial9::smoke_test::SmokeTesterExt;
 
 # async fn startup_probe() {
 let tester = dial9::Dial9Handle::current().smoke_tester().build();
-// Where the check runs:
 let report = tester.run().await;
 if !report.is_healthy() {
     eprintln!("dial9 smoke test failed:\n{report}");
@@ -210,9 +207,7 @@ if !report.is_healthy() {
 # }
 ```
 
-A handle with telemetry turned off (`recorder_disabled()`, or `DIAL9_ENABLED`
-off with `recorder_from_env`) reports `recording` as failed: skip the check when
-your app turns telemetry off on purpose.
+If your app turns telemetry off on purpose (`recorder_disabled()`, or `DIAL9_ENABLED` off with `recorder_from_env`), the handle isn't connected to a recorder and `recording` fails, so skip the check in that case.
 
 ## Why dial9?
 
