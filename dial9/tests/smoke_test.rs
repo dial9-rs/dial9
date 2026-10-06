@@ -1,11 +1,11 @@
 //! Integration tests for `SmokeTester`'s recording check.
 
-use dial9::smoke_test::{Check, CheckStatus, DisabledReason, SmokeTesterExt};
+use dial9::smoke_test::{Check, CheckStatus, DisabledReason, FailedReason, SmokeTesterExt};
 use dial9::{Dial9Handle, MemoryBuffer, recorder};
 use std::time::Duration;
 
-fn failed_with(status: &CheckStatus, text: &str) -> bool {
-    matches!(status, CheckStatus::Failed { detail, .. } if detail.contains(text))
+fn failed_with(status: &CheckStatus, expected: FailedReason) -> bool {
+    matches!(status, CheckStatus::Failed { reason, .. } if *reason == expected)
 }
 
 #[tokio::test]
@@ -21,7 +21,10 @@ async fn live_recorder_is_healthy() {
 async fn disconnected_handle_fails_recording() {
     let report = Dial9Handle::disabled().smoke_tester().build().run().await;
     assert!(
-        failed_with(report.recording_status(), "not connected"),
+        failed_with(
+            report.recording_status(),
+            FailedReason::RecorderNotConnected
+        ),
         "{report}"
     );
     assert!(!report.is_healthy());
@@ -34,7 +37,7 @@ async fn stopped_recorder_fails_recording() {
     rec.graceful_shutdown(Duration::ZERO);
     let report = handle.smoke_tester().build().run().await;
     assert!(
-        failed_with(report.recording_status(), "shut down"),
+        failed_with(report.recording_status(), FailedReason::RecorderStopped),
         "{report}"
     );
     assert!(!report.is_healthy());

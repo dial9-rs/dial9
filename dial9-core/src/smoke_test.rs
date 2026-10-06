@@ -13,15 +13,17 @@ pub enum CheckStatus {
     /// The check doesn't apply. Not a failure.
     #[non_exhaustive]
     Disabled {
-        /// Why it doesn't apply.
+        /// Why the check doesn't apply.
         reason: DisabledReason,
-        /// The same, for people.
+        /// Human-readable explanation.
         detail: String,
     },
     /// Should work, doesn't.
     #[non_exhaustive]
     Failed {
-        /// Why.
+        /// Why the check failed.
+        reason: FailedReason,
+        /// Human-readable explanation.
         detail: String,
     },
 }
@@ -34,9 +36,20 @@ pub enum DisabledReason {
     RecordingPaused,
 }
 
+/// Why a check [`Failed`](CheckStatus::Failed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FailedReason {
+    /// The handle isn't connected to a recorder.
+    RecorderNotConnected,
+    /// The recorder has shut down.
+    RecorderStopped,
+}
+
 impl CheckStatus {
-    fn failed(detail: impl Into<String>) -> Self {
+    fn failed(reason: FailedReason, detail: impl Into<String>) -> Self {
         Self::Failed {
+            reason,
             detail: detail.into(),
         }
     }
@@ -54,7 +67,7 @@ impl fmt::Display for CheckStatus {
         match self {
             Self::Ok => f.write_str("ok"),
             Self::Disabled { detail, .. } => write!(f, "disabled: {detail}"),
-            Self::Failed { detail } => write!(f, "FAILED: {detail}"),
+            Self::Failed { detail, .. } => write!(f, "FAILED: {detail}"),
         }
     }
 }
@@ -83,9 +96,12 @@ impl Check {
 #[doc(hidden)]
 pub fn check_recording(handle: &Dial9Handle) -> CheckStatus {
     if !handle.is_connected() {
-        CheckStatus::failed("handle is not connected to a recorder")
+        CheckStatus::failed(
+            FailedReason::RecorderNotConnected,
+            "handle is not connected to a recorder",
+        )
     } else if handle.is_stopped() {
-        CheckStatus::failed("recorder has shut down")
+        CheckStatus::failed(FailedReason::RecorderStopped, "recorder has shut down")
     } else if !handle.is_enabled() {
         CheckStatus::disabled(DisabledReason::RecordingPaused, "recording is paused")
     } else {
