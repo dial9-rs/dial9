@@ -100,8 +100,7 @@ pub use dial9_tokio_telemetry::telemetry::{
     TaskDumpConfig, TokioAttachOptions, TokioDetachGuard, TokioDetachOutcome, TokioHooks,
 };
 
-#[cfg(feature = "tokio")]
-pub use dial9_tokio_telemetry::telemetry::smoke_test;
+pub mod smoke_test;
 
 /// Offline trace reading and analysis.
 #[cfg(all(feature = "tokio", feature = "analysis"))]

@@ -1,8 +1,7 @@
 //! Integration tests for `SmokeTester`'s recording check.
 
-use dial9_core::handle::Dial9Handle;
-use dial9_tokio_telemetry::telemetry::smoke_test::{Check, CheckStatus, DisabledReason};
-use dial9_tokio_telemetry::telemetry::{Dial9HandleTokioExt, MemoryBuffer, recorder};
+use dial9::smoke_test::{Check, CheckStatus, DisabledReason, SmokeTesterExt};
+use dial9::{Dial9Handle, MemoryBuffer, recorder};
 use std::time::Duration;
 
 fn failed_with(status: &CheckStatus, text: &str) -> bool {
