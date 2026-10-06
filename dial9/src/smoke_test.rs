@@ -74,10 +74,10 @@ impl fmt::Debug for SmokeTester {
 
 #[bon::bon]
 impl SmokeTester {
-    // `new` stays private: later settings become its parameters, so only the
-    // builder is public API.
+    // `new` and the start function stay private: `handle.smoke_tester()` is
+    // the one way in, and later settings become `new`'s parameters.
     #[builder(
-        start_fn(name = builder_owned, vis = ""),
+        start_fn(name = builder, vis = ""),
         finish_fn(name = build, vis = "pub"),
         builder_type(name = SmokeTesterBuilder, vis = "pub")
     )]
@@ -90,11 +90,6 @@ impl SmokeTester {
 }
 
 impl SmokeTester {
-    /// Tester for the recorder behind `handle`.
-    pub fn builder(handle: &Dial9Handle) -> SmokeTesterBuilder {
-        Self::builder_owned(handle.clone())
-    }
-
     /// Run every check. Works on any Tokio runtime.
     pub async fn run(&self) -> SmokeTestReport {
         SmokeTestReport {
@@ -105,8 +100,7 @@ impl SmokeTester {
 
 /// Adds [`smoke_tester`](Self::smoke_tester) to [`Dial9Handle`].
 pub trait SmokeTesterExt: smoke_tester_ext_sealed::Sealed {
-    /// Tester for the recorder behind this handle. Same as
-    /// [`SmokeTester::builder`].
+    /// Tester for the recorder behind this handle.
     fn smoke_tester(&self) -> SmokeTesterBuilder;
 }
 
@@ -117,7 +111,7 @@ mod smoke_tester_ext_sealed {
 
 impl SmokeTesterExt for Dial9Handle {
     fn smoke_tester(&self) -> SmokeTesterBuilder {
-        SmokeTester::builder(self)
+        SmokeTester::builder(self.clone())
     }
 }
 
