@@ -124,7 +124,12 @@ mod tests {
     fn wait_for(rec: &Recorder, want: WorkerState) -> WorkerState {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let state = rec.handle().pipeline_status().unwrap().worker().clone();
+            let state = rec
+                .handle()
+                .pipeline_status()
+                .unwrap()
+                .worker_state()
+                .clone();
             if state == want || Instant::now() > deadline {
                 return state;
             }
@@ -143,7 +148,7 @@ mod tests {
         let handle = rec.handle().clone();
         rec.graceful_shutdown(Duration::from_secs(5));
         assert_eq!(
-            handle.pipeline_status().unwrap().worker(),
+            handle.pipeline_status().unwrap().worker_state(),
             &WorkerState::Stopped
         );
     }
@@ -159,7 +164,7 @@ mod tests {
         // The drain timeout drops the hung `initialize()`.
         rec.graceful_shutdown(Duration::from_millis(10));
         assert_eq!(
-            handle.pipeline_status().unwrap().worker(),
+            handle.pipeline_status().unwrap().worker_state(),
             &WorkerState::Stopped
         );
     }

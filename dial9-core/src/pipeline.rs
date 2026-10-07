@@ -319,7 +319,7 @@ impl PipelineStatus {
     }
 
     /// What the pipeline worker is doing.
-    pub fn worker(&self) -> &WorkerState {
+    pub fn worker_state(&self) -> &WorkerState {
         &self.worker
     }
 }

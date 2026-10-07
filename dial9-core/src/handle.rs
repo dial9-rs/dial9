@@ -146,7 +146,7 @@ impl Dial9Handle {
     /// # fn f(handle: dial9_core::handle::Dial9Handle) {
     /// use dial9_core::pipeline::WorkerState;
     ///
-    /// match handle.pipeline_status().map(|s| s.worker().clone()) {
+    /// match handle.pipeline_status().map(|s| s.worker_state().clone()) {
     ///     Some(WorkerState::Running { .. }) => {}
     ///     Some(WorkerState::Initializing { stage, .. }) => eprintln!("waiting on {stage:?}"),
     ///     other => eprintln!("pipeline not running: {other:?}"),
