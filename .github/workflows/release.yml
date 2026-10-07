@@ -82,6 +82,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Mark release publication complete
+        run: |
+          # Write the marker only after every crate has published successfully.
+          # Pushing the same commit again is harmless if publishing is rerun.
+          release=$(git log --first-parent -1 --format=%H --extended-regexp \
+            '--grep=^chore: release($| )')
+          test -n "$release" || { echo "No merged release PR found"; exit 1; }
+          git push origin "$release:refs/tags/release-published/$release"
 
   # Extract the dial9-viewer tag from release-plz's output, then hand off to the
   # binary-build workflow.

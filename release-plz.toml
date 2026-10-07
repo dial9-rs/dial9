@@ -8,6 +8,8 @@ semver_check = true
 # creation restriction), which blocks release-plz from pushing its PR branch.
 # GitHub's `release-*` glob does not cross `/`, so `release-plz/...` is exempt.
 pr_branch_prefix = "release-plz/"
+# The CI publication gate identifies merged release PRs by this title.
+pr_name = "chore: release"
 pr_body = """
 {% for release in releases %}
 {% if release.title %}

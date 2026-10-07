@@ -12,6 +12,31 @@ env:
   STABLE_TOOLCHAIN: "1.94.1"
 
 jobs:
+  release-published:
+    name: Release publication gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: Test the release gate
+        run: python3 -m unittest discover -s scripts/tests -p 'test_release_gate.py'
+      - name: Require the previous release to be published
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_ref }}
+          CANDIDATE_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          # Read the current target branch, even if the PR's original base is
+          # stale. Merge-group checks also cover PRs whose earlier CI passed.
+          git fetch --no-tags origin "$BASE_REF"
+          base_sha=$(git rev-parse FETCH_HEAD)
+          args=("$base_sha")
+          if [[ -n "$CANDIDATE_SHA" ]]; then
+            args+=("$CANDIDATE_SHA")
+          fi
+          bash scripts/check_release_published.sh "${args[@]}"
+
   fmt:
     name: Cargo fmt
     runs-on: ubuntu-latest
@@ -534,7 +559,7 @@ jobs:
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, build, android-aarch64-build, feature-check, no-tokio-unstable, check-docs, trace-integrity, ui, asan, ecs-sim, frame-pointer-detection, shuttle, package, doctests]
+    needs: [release-published, fmt, clippy, build, android-aarch64-build, feature-check, no-tokio-unstable, check-docs, trace-integrity, ui, asan, ecs-sim, frame-pointer-detection, shuttle, package, doctests]
     if: always()
     steps:
       - run: |
