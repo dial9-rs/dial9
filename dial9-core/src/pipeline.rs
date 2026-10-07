@@ -336,10 +336,12 @@ pub enum WorkerState {
         stage: Option<&'static str>,
     },
     /// Every stage initialized; the worker loop is running.
+    #[non_exhaustive]
     Running,
     /// Exited by any path: normal exit, initialization error, panic
     /// (including in the thread-start hook or the runtime build), or drain
     /// timeout.
+    #[non_exhaustive]
     Stopped,
 }
 
