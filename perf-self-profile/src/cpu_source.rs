@@ -374,7 +374,7 @@ impl CpuProfiler {
     }
 
     /// Backend selected at start; `Auto` resolves to one of them.
-    pub fn effective_backend(&self) -> ActiveCpuBackend {
+    pub fn active_backend(&self) -> ActiveCpuBackend {
         self.effective_backend
     }
 
