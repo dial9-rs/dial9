@@ -229,6 +229,31 @@ describe("buildBlockingView", () => {
     expect(tokioFrame).toBeTruthy();
   });
 
+  it("removes only a leading scheduler prefix from blocking stacks", () => {
+    const callframes = symbols({
+      sched: "__schedule",
+      schedule: "schedule",
+      futex: "futex_wait_queue",
+      nested: "schedule",
+    });
+    const entries = [
+      {
+        sample: cpu(10, 1, ["sched", "schedule", "futex", "nested"]),
+        poll: poll(0, 100),
+        worker: 0,
+      },
+    ];
+
+    const view = buildBlockingView(entries, callframes, "leaf");
+
+    expect(view.groups[0]?.leafRaw).toBe("futex_wait_queue");
+    expect(view.groups[0]?.subStacks[0]?.frames.map((frame) => frame.text)).toEqual([
+      "futex_wait_queue",
+      "schedule",
+    ]);
+    expect(entries[0]?.sample.callchain).toEqual(["sched", "schedule", "futex", "nested"]);
+  });
+
   it("range filtering excludes out-of-range polls/samples", () => {
     const entries = collectSchedSamplesInRange(ws, [0], { startNs: 0, endNs: 150 });
     expect(entries).toHaveLength(2); // only the first poll's two lock samples
