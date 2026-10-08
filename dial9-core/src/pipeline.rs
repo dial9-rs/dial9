@@ -356,11 +356,33 @@ pub enum WorkerState {
     /// Every stage initialized; the worker loop is running.
     #[non_exhaustive]
     Running,
-    /// Exited by any path: normal exit, initialization error, panic
-    /// (including in the thread-start hook or the runtime build), or drain
-    /// timeout.
+    /// Exited; `cause` says how.
     #[non_exhaustive]
-    Stopped,
+    Stopped {
+        /// Why the worker stopped.
+        cause: StopCause,
+    },
+}
+
+/// Why the pipeline worker is [`Stopped`](WorkerState::Stopped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StopCause {
+    /// Shut down normally.
+    #[non_exhaustive]
+    Exited,
+    /// A stage's [`SegmentProcessor::initialize`] returned an error.
+    #[non_exhaustive]
+    InitializeFailed {
+        /// The stage whose `initialize()` failed.
+        stage: Option<PipelineStage>,
+    },
+    /// Panicked: in a stage, the thread-start hook or the runtime build.
+    #[non_exhaustive]
+    Panicked,
+    /// Still running when the shutdown drain timeout ran out.
+    #[non_exhaustive]
+    DrainTimedOut,
 }
 
 #[cfg(test)]

@@ -310,7 +310,12 @@ crate::shuttle_test! {
              run_background_task_inner's top-level catch_unwind, not \
              propagate to its caller"
         );
-        assert_eq!(state.status().worker_state(), &crate::pipeline::WorkerState::Stopped);
+        assert_eq!(
+            state.status().worker_state(),
+            &crate::pipeline::WorkerState::Stopped {
+                cause: crate::pipeline::StopCause::Panicked
+            }
+        );
     }
 }
 
@@ -375,7 +380,7 @@ crate::shuttle_test! {
             match state {
                 WorkerState::Initializing { .. } => 0,
                 WorkerState::Running => 1,
-                WorkerState::Stopped => 2,
+                WorkerState::Stopped { .. } => 2,
             }
         }
 
@@ -411,7 +416,14 @@ crate::shuttle_test! {
             .expect("worker holds the shutdown receiver until it exits");
         worker.join().unwrap();
         reader.join().unwrap();
-        assert_eq!(state.status().worker_state(), &WorkerState::Stopped);
+        // Shutdown with no drain time: the worker exits or the drain times
+        // out, depending on the schedule.
+        assert!(matches!(
+            state.status().worker_state(),
+            WorkerState::Stopped {
+                cause: crate::pipeline::StopCause::Exited | crate::pipeline::StopCause::DrainTimedOut
+            }
+        ));
         let status = state.status();
         let names: Vec<_> = status.stages().iter().map(|s| s.name()).collect();
         assert_eq!(names, ["CountingProcessor"]);

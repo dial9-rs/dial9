@@ -1,10 +1,10 @@
 //! Stage order and worker lifecycle, published for
 //! [`Dial9Handle::pipeline_status`](crate::handle::Dial9Handle::pipeline_status).
 
-use crate::pipeline::{PipelineStage, PipelineStatus, WorkerState};
+use crate::pipeline::{PipelineStage, PipelineStatus, StopCause, WorkerState};
 // Shuttle-aware, so the exit guard racing shutdown is explored.
-use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::{AtomicUsize, Ordering};
+use crate::primitives::sync::{Arc, Mutex};
 
 /// `phase` before the first `initialize()`.
 const NOT_STARTED: usize = usize::MAX - 2;
@@ -31,6 +31,8 @@ pub(crate) struct PipelineState {
     /// Index into `stages` of the stage initializing, or one of the
     /// constants above.
     phase: AtomicUsize,
+    /// Why the worker stopped. Recorded before `phase` becomes `STOPPED`.
+    cause: Mutex<Option<StopCause>>,
 }
 
 impl PipelineState {
@@ -38,6 +40,7 @@ impl PipelineState {
         Self {
             stages: stages.into_iter().map(PipelineStage::new).collect(),
             phase: AtomicUsize::new(NOT_STARTED),
+            cause: Mutex::new(None),
         }
     }
 
@@ -55,7 +58,14 @@ impl PipelineState {
 
     pub(crate) fn status(&self) -> PipelineStatus {
         let worker = match self.phase.load(Ordering::Acquire) {
-            STOPPED => WorkerState::Stopped,
+            STOPPED => WorkerState::Stopped {
+                cause: self
+                    .cause
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("the stop guard records a cause before publishing STOPPED"),
+            },
             RUNNING => WorkerState::Running,
             i => WorkerState::Initializing {
                 stage: self.stages.get(i).cloned(),
@@ -70,11 +80,27 @@ impl PipelineState {
 
 /// Marks the worker [`Stopped`](WorkerState::Stopped) when dropped, so every
 /// exit path is covered: normal exit, initialization error, panic, drain
-/// timeout.
+/// timeout. An exit that recorded no cause is a panic before
+/// `run_background_task_inner` got to record one.
 pub(crate) struct StoppedOnDrop(pub(crate) Arc<PipelineState>);
+
+impl StoppedOnDrop {
+    /// Record why the worker stopped; the first cause recorded wins.
+    pub(crate) fn record(&self, cause: StopCause) {
+        self.0.cause.lock().unwrap().get_or_insert(cause);
+    }
+
+    /// Record that the stage being initialized failed.
+    pub(crate) fn record_initialize_failed(&self) {
+        let phase = self.0.phase.load(Ordering::Acquire);
+        let stage = self.0.stages.get(phase).cloned();
+        self.record(StopCause::InitializeFailed { stage });
+    }
+}
 
 impl Drop for StoppedOnDrop {
     fn drop(&mut self) {
+        self.record(StopCause::Panicked);
         self.0.phase.store(STOPPED, Ordering::Release);
     }
 }
@@ -83,7 +109,7 @@ impl Drop for StoppedOnDrop {
 mod tests {
     use crate::buffer::MemoryBuffer;
     use crate::pipeline::{
-        PipelineStage, ProcessError, SegmentData, SegmentProcessor, WorkerState,
+        PipelineStage, ProcessError, SegmentData, SegmentProcessor, StopCause, WorkerState,
     };
     use crate::recorder::recorder;
     use crate::recording::Recorder;
@@ -161,7 +187,9 @@ mod tests {
         rec.graceful_shutdown(Duration::from_secs(5));
         assert_eq!(
             handle.pipeline_status().unwrap().worker_state(),
-            &WorkerState::Stopped
+            &WorkerState::Stopped {
+                cause: StopCause::Exited
+            }
         );
     }
 
@@ -177,14 +205,21 @@ mod tests {
         rec.graceful_shutdown(Duration::from_millis(10));
         assert_eq!(
             handle.pipeline_status().unwrap().worker_state(),
-            &WorkerState::Stopped
+            &WorkerState::Stopped {
+                cause: StopCause::DrainTimedOut
+            }
         );
     }
 
     #[test]
     fn failed_initialize_is_stopped() {
-        let rec = build(&[("Failing", Init::Fail)]);
-        assert_eq!(wait_for(&rec, WorkerState::Stopped), WorkerState::Stopped);
+        let rec = build(&[("First", Init::Ok), ("Failing", Init::Fail)]);
+        let want = WorkerState::Stopped {
+            cause: StopCause::InitializeFailed {
+                stage: Some(PipelineStage::new("Failing")),
+            },
+        };
+        assert_eq!(wait_for(&rec, want.clone()), want);
         rec.graceful_shutdown(Duration::from_secs(5));
     }
 
@@ -202,7 +237,10 @@ mod tests {
                 || {}
             })
             .build();
-        assert_eq!(wait_for(&rec, WorkerState::Stopped), WorkerState::Stopped);
+        let want = WorkerState::Stopped {
+            cause: StopCause::Panicked,
+        };
+        assert_eq!(wait_for(&rec, want.clone()), want);
         rec.graceful_shutdown(Duration::from_secs(5));
     }
 

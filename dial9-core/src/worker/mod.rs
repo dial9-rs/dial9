@@ -17,7 +17,7 @@ pub(crate) mod state;
 
 use crate::dump::{DumpError, DumpReceipt, DumpRequest, Lookback};
 use crate::fs::{EpochWindow, Fs, RemoveReason, TakenFiles, TakenSegment};
-use crate::pipeline::{ProcessErrorKind, SegmentData, SegmentProcessor};
+use crate::pipeline::{ProcessErrorKind, SegmentData, SegmentProcessor, StopCause};
 use crate::rate_limit::rate_limited;
 use crate::sealed::{self, SegmentRef};
 use crate::worker::metrics::{Operation, SegmentProcessMetrics, WorkerCycleMetrics};
@@ -137,8 +137,18 @@ async fn run_background_task_inner(
     let trigger = config.trigger.take();
     let state = config.state.take();
     // Dropped after `run_fut`, so `Stopped` is published after the processors
-    // drop.
-    let _stopped = state.clone().map(state::StoppedOnDrop);
+    // drop. Each exit below records its cause first.
+    let stopped = state.clone().map(state::StoppedOnDrop);
+    let record = |cause| {
+        if let Some(stopped) = &stopped {
+            stopped.record(cause);
+        }
+    };
+    let record_initialize_failed = || {
+        if let Some(stopped) = &stopped {
+            stopped.record_initialize_failed();
+        }
+    };
 
     tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), triggered = trigger.is_some(), "worker started");
 
@@ -163,12 +173,14 @@ async fn run_background_task_inner(
     let drain_timeout = crate::shuttle_select! {
         result = &mut run_fut => {
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => record(StopCause::Exited),
                 Ok(Err(error)) => {
                     tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
+                    record_initialize_failed();
                 }
                 Err(_) => {
                     tracing::error!(target: "dial9_worker", "worker panicked");
+                    record(StopCause::Panicked);
                 }
             }
             tracing::info!(target: "dial9_worker", "worker stopped");
@@ -181,12 +193,22 @@ async fn run_background_task_inner(
     stop.cancel();
     // Give it `drain_timeout` to finish; after that, drop the future.
     match crate::primitives::time::timeout(drain_timeout, run_fut).await {
-        Ok(Ok(Ok(()))) => tracing::info!(target: "dial9_worker", "drain complete"),
+        Ok(Ok(Ok(()))) => {
+            tracing::info!(target: "dial9_worker", "drain complete");
+            record(StopCause::Exited);
+        }
         Ok(Ok(Err(error))) => {
             tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
+            record_initialize_failed();
         }
-        Ok(Err(_)) => tracing::error!(target: "dial9_worker", "worker panicked"),
-        Err(_) => tracing::warn!(target: "dial9_worker", "drain timed out"),
+        Ok(Err(_)) => {
+            tracing::error!(target: "dial9_worker", "worker panicked");
+            record(StopCause::Panicked);
+        }
+        Err(_) => {
+            tracing::warn!(target: "dial9_worker", "drain timed out");
+            record(StopCause::DrainTimedOut);
+        }
     }
     tracing::info!(target: "dial9_worker", "worker stopped");
 }
