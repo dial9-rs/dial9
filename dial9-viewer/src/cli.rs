@@ -281,7 +281,22 @@ pub async fn run() -> anyhow::Result<()> {
             Some(AgentsAction::Toolkit { path }) => {
                 std::fs::create_dir_all(&path)?;
                 for (name, content) in skills::TOOLKIT_FILES {
-                    std::fs::write(path.join(name), content)?;
+                    let dest = path.join(name);
+                    // The toolkit's package.json pins its scripts to CommonJS
+                    // whatever package encloses them; never clobber the
+                    // project's own when extracted into a project root.
+                    if *name == "package.json"
+                        && dest.exists()
+                        && std::fs::read_to_string(&dest).ok().as_deref() != Some(*content)
+                    {
+                        eprintln!(
+                            "Left the existing {} in place. The toolkit is CommonJS: if that \
+                             package sets \"type\": \"module\", extract into an empty directory.",
+                            dest.display()
+                        );
+                        continue;
+                    }
+                    std::fs::write(dest, content)?;
                 }
                 let abs = std::fs::canonicalize(&path)?;
                 eprintln!("Toolkit written to {}", abs.display());

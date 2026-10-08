@@ -2131,6 +2131,7 @@ mod skills_unpack_tests {
         let expected = [
             "analyze.js",
             "decode.js",
+            "package.json",
             "trace_parser.js",
             "trace_analysis.js",
         ];
@@ -2170,14 +2171,22 @@ mod skills_unpack_tests {
     }
 
     fn unpack_skills() -> tempfile::TempDir {
-        let bin = env!("CARGO_BIN_EXE_dial9-viewer");
         let dir = tempfile::tempdir().unwrap();
+        run_agents("skills", dir.path());
+        dir
+    }
+
+    fn run_agents(action: &str, dir: &Path) -> std::process::Output {
+        let bin = env!("CARGO_BIN_EXE_dial9-viewer");
         let output = Command::new(bin)
-            .args(["agents", "skills", dir.path().to_str().unwrap()])
+            .args(["agents", action, dir.to_str().unwrap()])
             .output()
             .unwrap();
-        assert!(output.status.success(), "agents skills failed: {output:?}");
-        dir
+        assert!(
+            output.status.success(),
+            "agents {action} failed: {output:?}"
+        );
+        output
     }
 
     /// The unpacked toolkit is found by content: its directory name is
@@ -2207,19 +2216,15 @@ mod skills_unpack_tests {
             .unwrap_or_else(|e| panic!("`node` is required for this test: {e}"))
     }
 
-    /// Every analysis tool runs whatever the toolkit skill's directory is
-    /// called. The installer owns that name (Symposium suffixes a hash on a
-    /// collision), so the tools locate the shared libraries by content.
-    #[test]
-    fn analysis_tools_run_with_toolkit_dir_renamed() {
-        let dir = unpack_skills();
-        let toolkit = dir.path().join("renamed-by-the-installer");
-        std::fs::rename(unpacked_toolkit_dir(dir.path()), &toolkit).unwrap();
-
-        let fixture = trace_fixture();
-        let fixture = fixture.to_str().unwrap();
-        let scripts = dir.path();
-        let tools: [(PathBuf, Vec<&str>); 5] = [
+    /// Every analysis tool in an unpacked skills directory, with arguments
+    /// that make it analyze `fixture`.
+    fn unpacked_tools<'a>(
+        skills_root: &Path,
+        toolkit: &Path,
+        fixture: &'a str,
+    ) -> [(PathBuf, Vec<&'a str>); 5] {
+        let scripts = skills_root;
+        [
             (
                 scripts
                     .join("dial9-red-flags")
@@ -2246,7 +2251,20 @@ mod skills_unpack_tests {
                 toolkit.join("scripts").join("diagnose_setup.js"),
                 vec![fixture],
             ),
-        ];
+        ]
+    }
+
+    /// Every analysis tool runs whatever the toolkit skill's directory is
+    /// called. The installer owns that name (Symposium suffixes a hash on a
+    /// collision), so the tools locate the shared libraries by content.
+    #[test]
+    fn analysis_tools_run_with_toolkit_dir_renamed() {
+        let dir = unpack_skills();
+        let toolkit = dir.path().join("renamed-by-the-installer");
+        std::fs::rename(unpacked_toolkit_dir(dir.path()), &toolkit).unwrap();
+
+        let fixture = trace_fixture();
+        let tools = unpacked_tools(dir.path(), &toolkit, fixture.to_str().unwrap());
         for (script, args) in &tools {
             let output = run_node(script, args);
             assert!(
@@ -2261,6 +2279,60 @@ mod skills_unpack_tests {
                 script.display()
             );
         }
+    }
+
+    /// The scripts are CommonJS, and Node and Deno take a `.js` file's module
+    /// system from the nearest package.json. Each scripts directory carries
+    /// its own, so an enclosing `"type": "module"` package (common in JS/TS
+    /// repos) does not turn them into ES modules.
+    #[test]
+    fn analysis_tools_run_inside_an_esm_package() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("package.json"), r#"{"type": "module"}"#).unwrap();
+        let fixture = trace_fixture();
+        let fixture = fixture.to_str().unwrap();
+
+        let skills_root = project.path().join("skills");
+        run_agents("skills", &skills_root);
+        let mut tools =
+            unpacked_tools(&skills_root, &unpacked_toolkit_dir(&skills_root), fixture).to_vec();
+        let toolkit = project.path().join("toolkit");
+        run_agents("toolkit", &toolkit);
+        tools.push((toolkit.join("analyze.js"), vec![fixture]));
+
+        for (script, args) in &tools {
+            let output = run_node(script, args);
+            assert!(
+                output.status.success(),
+                "{} failed inside an ESM package:\n{}",
+                script.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                !output.stdout.is_empty(),
+                "{} printed nothing",
+                script.display()
+            );
+        }
+    }
+
+    /// Extracting the toolkit into a project root must not replace the
+    /// project's own package.json.
+    #[test]
+    fn toolkit_keeps_an_existing_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("package.json");
+        let original = r#"{"name": "someone-elses-project", "type": "module"}"#;
+        std::fs::write(&manifest, original).unwrap();
+
+        let output = run_agents("toolkit", dir.path());
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), original);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("Left the existing") && stderr.contains("empty directory"),
+            "stderr: {stderr}"
+        );
+        assert!(dir.path().join("analyze.js").is_file());
     }
 
     /// With no toolkit anywhere, a tool that needs it says so and names the
