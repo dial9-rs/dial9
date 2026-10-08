@@ -8,7 +8,7 @@ use std::any::Any;
 use std::cell::RefCell;
 
 /// First registered source of type `T`, if any.
-pub(crate) fn find_source<T: Source>(sources: &mut [Box<dyn Source>]) -> Option<&mut T> {
+fn find_source<T: Source>(sources: &mut [Box<dyn Source>]) -> Option<&mut T> {
     sources
         .iter_mut()
         .find_map(|source| (&mut **source as &mut dyn Any).downcast_mut::<T>())
