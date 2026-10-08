@@ -1406,6 +1406,70 @@ body {
 
 /* Event tab. */
 .d9-event-title { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; word-break: break-all; }
+.d9-event-cluster { margin-bottom: 16px; }
+.d9-event-cluster-heading,
+.d9-event-cluster-pages {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 0;
+}
+/* Visible scrollbar, edge shadows and a half-cut last row signal scrolling. */
+.d9-event-cluster-list {
+    max-height: 225px;
+    overflow-y: auto;
+    border: 1px solid #44446a;
+    border-radius: 4px;
+    overscroll-behavior: contain;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.45);
+    background:
+        linear-gradient(var(--d9-bg-track) 30%, transparent) top / 100% 24px no-repeat local,
+        linear-gradient(transparent, var(--d9-bg-track) 70%) bottom / 100% 24px no-repeat local,
+        radial-gradient(farthest-side at 50% 0, rgba(0, 0, 0, 0.6), transparent) top / 100% 10px no-repeat scroll,
+        radial-gradient(farthest-side at 50% 100%, rgba(0, 0, 0, 0.6), transparent) bottom / 100% 10px no-repeat scroll,
+        var(--d9-bg-track);
+}
+.d9-event-cluster-list::-webkit-scrollbar { width: 10px; }
+.d9-event-cluster-list::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.04);
+    border-left: 1px solid var(--d9-border);
+}
+.d9-event-cluster-list::-webkit-scrollbar-thumb {
+    background: #5a5a85;
+    border: 2px solid transparent;
+    border-radius: 5px;
+    background-clip: padding-box;
+}
+.d9-event-cluster-list::-webkit-scrollbar-thumb:hover { background-color: var(--d9-accent); }
+/* Firefox only: scrollbar-color disables ::-webkit-scrollbar in Chromium. */
+@supports (-moz-appearance: none) {
+    .d9-event-cluster-list { scrollbar-width: thin; scrollbar-color: #5a5a85 rgba(255, 255, 255, 0.04); }
+}
+.d9-event-cluster-member {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 6px 8px;
+    border: 0;
+    border-bottom: 1px solid var(--d9-border);
+    background: transparent;
+    color: var(--d9-fg);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.d9-event-cluster-member:last-child { border-bottom: 0; }
+.d9-event-cluster-member span { min-width: 0; overflow-wrap: anywhere; }
+.d9-event-cluster-member time { flex-shrink: 0; color: var(--d9-fg-muted); }
+.d9-event-cluster-member:hover,
+.d9-event-cluster-member[aria-pressed="true"] { background: rgba(143, 136, 255, 0.12); }
+.d9-event-cluster-member[aria-pressed="true"] { box-shadow: inset 3px 0 var(--d9-accent); }
+.d9-event-cluster-member:focus-visible,
+.d9-event-cluster-list:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+.d9-event-cluster-pages button:disabled { opacity: 0.4; cursor: default; }
 .d9-event-row {
     display: grid;
     grid-template-columns: minmax(72px, 3fr) minmax(0, 2fr) repeat(3, 24px);
