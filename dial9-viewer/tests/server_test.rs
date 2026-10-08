@@ -2044,6 +2044,17 @@ mod skills_unpack_tests {
             !(desc.starts_with('[') || desc.starts_with('{')),
             "description must be a scalar string in {skill_dir:?}: {desc:?}"
         );
+        // build.rs reads the value verbatim, so it must be a valid unquoted YAML
+        // scalar: `: ` would start a nested mapping and ` #` a comment, which strict
+        // parsers reject or truncate.
+        assert!(
+            !desc.starts_with(['"', '\'', '|', '>', '&', '*', '!', '%', '@', '`']),
+            "description must be an unquoted plain scalar in {skill_dir:?}: {desc:?}"
+        );
+        assert!(
+            !desc.contains(": ") && !desc.ends_with(':') && !desc.contains(" #"),
+            "description contains `: ` or ` #`, invalid in a plain YAML scalar, in {skill_dir:?}: {desc:?}"
+        );
         assert!(
             desc.len() <= 1024,
             "description too long ({}) in {:?}",
