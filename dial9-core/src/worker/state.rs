@@ -94,7 +94,8 @@ impl StoppedOnDrop {
     pub(crate) fn record_initialize_failed(&self) {
         let phase = self.0.phase.load(Ordering::Acquire);
         // An `initialize()` error only comes from the stage `phase` points
-        // at, so this always finds it.
+        // at, so this always finds it; if it didn't, nothing is recorded and
+        // the guard reports `Panicked`.
         match self.0.stages.get(phase) {
             Some(stage) => self.record(StopCause::InitializeFailed {
                 stage: stage.clone(),
