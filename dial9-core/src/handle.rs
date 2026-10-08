@@ -131,7 +131,7 @@ impl Dial9Handle {
     pub fn dump_trigger(&self) -> Option<crate::dump::DumpTrigger> {
         self.inner
             .as_ref()
-            .and_then(|i| i.shared.dump_trigger().cloned())
+            .and_then(|i| i.shared.pipeline().dump_trigger.clone())
     }
 
     /// The pipeline's stages and its worker's state. `None` on a disabled
@@ -159,7 +159,15 @@ impl Dial9Handle {
     /// ```
     #[cfg(feature = "pipeline")]
     pub fn pipeline_status(&self) -> Option<crate::pipeline::PipelineStatus> {
-        Some(self.inner.as_ref()?.shared.pipeline_state()?.status())
+        Some(
+            self.inner
+                .as_ref()?
+                .shared
+                .pipeline()
+                .state
+                .as_ref()?
+                .status(),
+        )
     }
 
     /// Return the [`Dial9Handle`] to record through, resolved in order:

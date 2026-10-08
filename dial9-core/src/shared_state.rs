@@ -32,15 +32,9 @@ struct SharedState {
     tl_buffers: Mutex<Vec<TlBufferHandle>>,
     /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
     pub(crate) sources: Mutex<Vec<Box<dyn crate::source::Source>>>,
-    /// On-demand dump trigger, set once at build time when the runtime is
-    /// built with `with_dump_trigger`. Reached by application code through
-    /// [`Dial9Handle::dump_trigger`](super::handle::Dial9Handle::dump_trigger).
+    /// What the handle reads about the pipeline, fixed at build.
     #[cfg(feature = "pipeline")]
-    dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
-    /// Stage order and worker state, set once at build when a pipeline worker
-    /// starts. Read by `Dial9Handle::pipeline_status`.
-    #[cfg(feature = "pipeline")]
-    pipeline_state: std::sync::OnceLock<Arc<crate::worker::state::PipelineState>>,
+    pipeline: crate::worker::state::PipelineShared,
 }
 }
 
@@ -64,9 +58,7 @@ impl SharedState {
                 tl_buffers: Mutex::new(Vec::new()),
                 sources: Mutex::new(Vec::new()),
                 #[cfg(feature = "pipeline")]
-                dump_trigger: std::sync::OnceLock::new(),
-                #[cfg(feature = "pipeline")]
-                pipeline_state: std::sync::OnceLock::new(),
+                pipeline: crate::worker::state::PipelineShared::default(),
             }
         }
     }
@@ -149,31 +141,17 @@ impl SharedState {
         self.state.load(Ordering::Relaxed) == State::Stopped as u8
     }
 
-    /// Install the on-demand dump trigger. Set once at build time by the
-    /// facade builder; later calls are ignored. `pub` so the facade (a
-    /// sibling crate) can wire the trigger in.
+    /// Set what the handle reads about the pipeline. Called by `build()`
+    /// before the state is shared.
     #[cfg(feature = "pipeline")]
-    pub(crate) fn set_dump_trigger(&self, trigger: crate::dump::DumpTrigger) {
-        let _ = self.dump_trigger.set(trigger);
-    }
-
-    /// The on-demand dump trigger, or `None` when the runtime was built
-    /// without `with_dump_trigger`.
-    #[cfg(feature = "pipeline")]
-    pub(crate) fn dump_trigger(&self) -> Option<&crate::dump::DumpTrigger> {
-        self.dump_trigger.get()
+    pub(crate) fn with_pipeline(mut self, pipeline: crate::worker::state::PipelineShared) -> Self {
+        self.pipeline = pipeline;
+        self
     }
 
     #[cfg(feature = "pipeline")]
-    pub(crate) fn set_pipeline_state(&self, state: Arc<crate::worker::state::PipelineState>) {
-        if self.pipeline_state.set(state).is_err() {
-            tracing::warn!(target: "dial9", "pipeline state installed twice, keeping the first");
-        }
-    }
-
-    #[cfg(feature = "pipeline")]
-    pub(crate) fn pipeline_state(&self) -> Option<&crate::worker::state::PipelineState> {
-        self.pipeline_state.get().map(|s| &**s)
+    pub(crate) fn pipeline(&self) -> &crate::worker::state::PipelineShared {
+        &self.pipeline
     }
 
     /// Check whether recording is currently enabled.

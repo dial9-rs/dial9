@@ -11,6 +11,17 @@ const NOT_STARTED: usize = usize::MAX - 2;
 const RUNNING: usize = usize::MAX - 1;
 const STOPPED: usize = usize::MAX;
 
+/// What a handle reads about the pipeline, fixed when the recorder is built.
+#[derive(Debug, Default)]
+pub(crate) struct PipelineShared {
+    /// On-demand dump trigger, when built with `with_dump_trigger`. Reached by
+    /// application code through
+    /// [`Dial9Handle::dump_trigger`](crate::handle::Dial9Handle::dump_trigger).
+    pub(crate) dump_trigger: Option<crate::dump::DumpTrigger>,
+    /// Stage order and worker state, when a pipeline worker runs.
+    pub(crate) state: Option<Arc<PipelineState>>,
+}
+
 /// Written by the worker, read by any handle.
 #[derive(Debug)]
 pub(crate) struct PipelineState {

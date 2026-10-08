@@ -275,14 +275,8 @@ impl<M: BufferMode> RecorderBuilder<M> {
             return recorder_disabled();
         };
 
-        let shared = Arc::new(SharedState::new(clock::clock_monotonic_ns()));
-
-        // Install the on-demand dump trigger so `Dial9Handle::dump_trigger` can
-        // reach it (paired with the `trigger` receiver handed to the worker).
-        #[cfg(feature = "pipeline")]
-        if let Some(trigger) = self.pending_dump_trigger {
-            shared.set_dump_trigger(trigger);
-        }
+        // Read now: the shared state is built after the worker starts.
+        let start_time_ns = clock::clock_monotonic_ns();
 
         // Sync any `boot_id` metadata to the writer's per-process namespace, so a
         // trace's identity matches its on-disk `{boot_id}/` directory (and its
@@ -316,15 +310,11 @@ impl<M: BufferMode> RecorderBuilder<M> {
             }
         };
 
-        for source in sources {
-            shared.push_source(source);
-        }
-
         // The worker borrows `&writer`, so it must be spawned before the writer
         // moves into `Recorder::start`.
         #[cfg(feature = "pipeline")]
-        let worker = if processors.is_empty() {
-            None
+        let (worker, pipeline_state) = if processors.is_empty() {
+            (None, None)
         } else {
             let stages = processors.iter().map(|p| p.name()).collect();
             let poll = self
@@ -350,11 +340,21 @@ impl<M: BufferMode> RecorderBuilder<M> {
             let worker = crate::worker::spawn(&writer, config, rx, move || hook())
                 .map(|wt| crate::recording::WorkerHandle::new(tx, wt));
             // No worker, no status: `pipeline_status()` stays `None`.
-            if worker.is_some() {
-                shared.set_pipeline_state(state);
-            }
-            worker
+            let state = worker.is_some().then_some(state);
+            (worker, state)
         };
+
+        let shared = SharedState::new(start_time_ns);
+        // The dump trigger pairs with the `trigger` receiver handed to the worker.
+        #[cfg(feature = "pipeline")]
+        let shared = shared.with_pipeline(crate::worker::state::PipelineShared {
+            dump_trigger: self.pending_dump_trigger,
+            state: pipeline_state,
+        });
+        let shared = Arc::new(shared);
+        for source in sources {
+            shared.push_source(source);
+        }
 
         let hook = self.thread_init.clone();
         #[allow(unused_mut)]
