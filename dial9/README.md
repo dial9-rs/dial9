@@ -191,6 +191,24 @@ See [Task dumps](#task-dumps-linux-only) for setup and usage details.
 
 Missing variables use defaults. Blank, invalid, or non-Unicode values emit a warning and are treated as missing. Some numeric defaults come from the underlying config builders and are listed here as the current `recorder_from_env` behavior.
 
+## Checking telemetry at startup
+
+To confirm dial9 is recording, for example from a startup probe or a deploy gate, build a smoke tester from the handle and run it. The report has one line per check, and `is_healthy()` is `false` if any check failed. A paused recorder shows up as `disabled`.
+
+```rust,no_run
+use dial9::smoke_test::SmokeTesterExt;
+
+# async fn startup_probe() {
+let tester = dial9::Dial9Handle::current().smoke_tester().build();
+let report = tester.run().await;
+if !report.is_healthy() {
+    eprintln!("dial9 smoke test failed:\n{report}");
+}
+# }
+```
+
+If your app turns telemetry off on purpose (`recorder_disabled()`, or `DIAL9_ENABLED` off with `recorder_from_env`), the handle isn't connected to a recorder and `recording` fails, so skip the check in that case.
+
 ## Why dial9?
 
 It can be hard to understand application performance and behavior in async code. dial9 tracks Tokio, operating system and application events to create a detailed, nanosecond-by-nanosecond trace of your application behavior that you can analyze. On Linux, you can capture CPU profiles and kernel scheduling events, so you can see not just _that_ a task was delayed but _what code_ was running on the worker instead.
