@@ -317,7 +317,7 @@ happens only inside the `/api/flamegraph` refinement loop.
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 dial9-core = { workspace = true }
 arrow = "54"
-parquet = { version = "54", features = ["arrow", "flate2", "snap"] }
+parquet = { version = "54", features = ["arrow", "zstd"] }
 blake3 = "1"
 bytes = "1"
 lasso = "0.7"       # string interning during decode

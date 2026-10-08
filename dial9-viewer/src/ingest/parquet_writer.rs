@@ -7,7 +7,8 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
@@ -17,6 +18,15 @@ use super::decode::ResolvedSample;
 use super::decode::ResolvedSpan;
 
 const SAMPLES_ROW_GROUP_SIZE: usize = 128 * 1024;
+
+/// Writer properties shared by every part-file: dictionary-encoded pages,
+/// compressed with zstd at parquet's default level (1). That roughly halves the
+/// part-files for a small encode cost; level 3 is only about 1% smaller.
+fn writer_props() -> WriterPropertiesBuilder {
+    WriterProperties::builder()
+        .set_dictionary_enabled(true)
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+}
 
 /// Write samples to a Parquet file.
 ///
@@ -29,8 +39,7 @@ pub fn write_samples<W: Write + Send>(
     metadata: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     let schema = samples_schema();
-    let props = WriterProperties::builder()
-        .set_dictionary_enabled(true)
+    let props = writer_props()
         .set_max_row_group_size(SAMPLES_ROW_GROUP_SIZE)
         .build();
 
@@ -150,9 +159,7 @@ pub fn write_stacks_dict<W: Write + Send>(
     stacks: &HashMap<[u8; 16], Vec<String>>,
 ) -> anyhow::Result<()> {
     let schema = stacks_schema();
-    let props = WriterProperties::builder()
-        .set_dictionary_enabled(true)
-        .build();
+    let props = writer_props().build();
 
     let mut arrow_writer = ArrowWriter::try_new(writer, schema.clone(), Some(props))?;
 
@@ -184,9 +191,7 @@ pub fn write_stacks_dict<W: Write + Send>(
 /// Write poll spans to a Parquet file.
 pub fn write_polls<W: Write + Send>(writer: W, polls: &[ResolvedPoll]) -> anyhow::Result<()> {
     let schema = polls_schema();
-    let props = WriterProperties::builder()
-        .set_dictionary_enabled(true)
-        .build();
+    let props = writer_props().build();
     let mut arrow_writer = ArrowWriter::try_new(writer, schema.clone(), Some(props))?;
 
     let n = polls.len();
@@ -420,10 +425,7 @@ fn write_spans_with_batch_size<W: Write + Send>(
 ) -> anyhow::Result<()> {
     anyhow::ensure!(batch_rows > 0, "span batch size must be positive");
     let schema = spans_schema();
-    let props = WriterProperties::builder()
-        .set_dictionary_enabled(true)
-        .set_max_row_group_size(128 * 1024)
-        .build();
+    let props = writer_props().set_max_row_group_size(128 * 1024).build();
     let mut arrow_writer = ArrowWriter::try_new(writer, schema.clone(), Some(props))?;
 
     if spans.is_empty() {
@@ -619,6 +621,24 @@ mod tests {
         }
     }
 
+    /// Every column chunk of a part-file is zstd-compressed.
+    fn assert_zstd(buf: &[u8]) {
+        use ::parquet::file::reader::{FileReader, SerializedFileReader};
+        let reader = SerializedFileReader::new(bytes::Bytes::copy_from_slice(buf)).unwrap();
+        let row_groups = reader.metadata().row_groups();
+        assert!(!row_groups.is_empty());
+        for rg in row_groups {
+            for col in rg.columns() {
+                assert!(
+                    matches!(col.compression(), Compression::ZSTD(_)),
+                    "{} is {:?}",
+                    col.column_path(),
+                    col.compression()
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_write_and_read_samples() {
         let samples = vec![ResolvedSample {
@@ -642,6 +662,7 @@ mod tests {
 
         let mut buf = Vec::new();
         write_samples(&mut buf, &samples, &spans, &metadata).unwrap();
+        assert_zstd(&buf);
 
         // Verify we can read it back
         let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
@@ -741,6 +762,7 @@ mod tests {
 
         let mut buf = Vec::new();
         write_polls(&mut buf, &polls).unwrap();
+        assert_zstd(&buf);
         let mut reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
             bytes::Bytes::from(buf),
             1024,
@@ -784,6 +806,7 @@ mod tests {
 
         let mut buf = Vec::new();
         write_stacks_dict(&mut buf, &stacks).unwrap();
+        assert_zstd(&buf);
 
         let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
             bytes::Bytes::from(buf),
@@ -838,6 +861,7 @@ mod tests {
 
         let mut buf = Vec::new();
         write_spans_with_batch_size(&mut buf, &spans, 2).unwrap();
+        assert_zstd(&buf);
 
         let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
             bytes::Bytes::from(buf),
