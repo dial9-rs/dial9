@@ -7,7 +7,7 @@ use std::io;
 
 use super::ctimer_sampler::CtimerSampler;
 use super::perf_sampler::PerfSamplerImpl;
-use crate::sampler::{Sample, SamplerConfig};
+use crate::sampler::{ActiveCpuBackend, Sample, SamplerConfig};
 
 pub(super) trait SamplerBackend: Send {
     fn track_current_thread(&mut self) -> io::Result<()>;
@@ -17,10 +17,7 @@ pub(super) trait SamplerBackend: Send {
     fn drain_samples(&mut self) -> Vec<Sample>;
     fn disable(&self);
     fn enable(&self);
-    #[cfg(feature = "cpu-profiling")]
-    fn is_ctimer(&self) -> bool {
-        false
-    }
+    fn backend(&self) -> ActiveCpuBackend;
 }
 
 /// CPU sampler dispatching to perf_event_open or ctimer (fallback).
@@ -198,10 +195,9 @@ impl PerfSampler {
         self.inner.track_current_thread()
     }
 
-    /// Whether this sampler runs on ctimer rather than perf.
-    #[cfg(feature = "cpu-profiling")]
-    pub(crate) fn is_ctimer(&self) -> bool {
-        self.inner.is_ctimer()
+    /// The backend this sampler runs on.
+    pub fn backend(&self) -> ActiveCpuBackend {
+        self.inner.backend()
     }
 
     pub fn stop_tracking_current_thread(&mut self) {

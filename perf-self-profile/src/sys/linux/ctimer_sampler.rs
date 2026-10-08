@@ -71,9 +71,8 @@ impl CtimerSampler {
 }
 
 impl SamplerBackend for CtimerSampler {
-    #[cfg(feature = "cpu-profiling")]
-    fn is_ctimer(&self) -> bool {
-        true
+    fn backend(&self) -> crate::sampler::ActiveCpuBackend {
+        crate::sampler::ActiveCpuBackend::Ctimer
     }
 
     fn track_current_thread(&mut self) -> io::Result<()> {

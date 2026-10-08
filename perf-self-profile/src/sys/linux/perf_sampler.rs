@@ -282,6 +282,10 @@ impl PerfSamplerImpl {
 }
 
 impl super::sampler::SamplerBackend for PerfSamplerImpl {
+    fn backend(&self) -> crate::sampler::ActiveCpuBackend {
+        crate::sampler::ActiveCpuBackend::Perf
+    }
+
     // Per-thread mode: call from the thread you want to monitor.
     // This opens an event fd scoped to the calling tid with cpu=-1.
     fn track_current_thread(&mut self) -> io::Result<()> {

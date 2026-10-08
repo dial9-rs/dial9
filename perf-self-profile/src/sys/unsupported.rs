@@ -20,7 +20,8 @@ pub(crate) fn system_metadata() -> Vec<(String, String)> {
 /// All constructors return [`io::ErrorKind::Unsupported`].
 #[derive(Debug)]
 pub struct PerfSampler {
-    _private: (),
+    // Uninhabited: no constructor succeeds, so no instance exists.
+    _never: std::convert::Infallible,
 }
 
 impl PerfSampler {
@@ -38,9 +39,9 @@ impl PerfSampler {
         unsupported()
     }
 
-    #[cfg(feature = "cpu-profiling")]
-    pub(crate) fn is_ctimer(&self) -> bool {
-        false
+    /// The backend this sampler runs on. Unreachable: no instance exists.
+    pub fn backend(&self) -> crate::sampler::ActiveCpuBackend {
+        match self._never {}
     }
 
     pub fn new_per_thread(_config: SamplerConfig) -> io::Result<Self> {

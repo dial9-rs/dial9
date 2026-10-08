@@ -96,7 +96,7 @@ pub mod memory_profiling;
 pub mod symbolize_processor;
 
 pub use offline_symbolize::SymbolTableEntry;
-pub use sampler::{EventSource, Sample, SamplerConfig, SamplingMode};
+pub use sampler::{ActiveCpuBackend, EventSource, Sample, SamplerConfig, SamplingMode};
 pub use symbolize::{CodeInfo, MapsEntry, SymbolInfo};
 pub use symbolize::{parse_proc_maps, read_proc_maps};
 
@@ -154,8 +154,7 @@ pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
 
 #[cfg(feature = "cpu-profiling")]
 pub use cpu_source::{
-    ActiveCpuBackend, CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig,
-    SchedProfiler,
+    CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
 
 #[cfg(any(

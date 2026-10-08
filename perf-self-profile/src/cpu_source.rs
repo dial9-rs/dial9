@@ -6,7 +6,7 @@
 //! - [`CpuProfiler`] — process-wide frequency-based CPU sampling.
 //! - [`SchedProfiler`] — per-worker-thread context-switch capture.
 
-use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode, sys};
+use crate::{ActiveCpuBackend, EventSource, PerfSampler, SamplerConfig, SamplingMode, sys};
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::source::{FlushContext, Source};
 use dial9_trace_format::encoder::FxHashMap;
@@ -271,29 +271,6 @@ impl SchedEventConfig {
 
 // ── CpuProfiler ─────────────────────────────────────────────────────────────
 
-/// CPU profiling backend a [`CpuProfiler`] runs on, after `Auto` resolves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ActiveCpuBackend {
-    /// `perf_event_open`: samples every thread descended from the one that
-    /// started the profiler.
-    #[non_exhaustive]
-    Perf,
-    /// Per-thread CPU timers: samples only threads dial9 tracks.
-    #[non_exhaustive]
-    Ctimer,
-}
-
-impl ActiveCpuBackend {
-    /// `"perf"` or `"ctimer"`, as written to segment metadata.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Perf => "perf",
-            Self::Ctimer => "ctimer",
-        }
-    }
-}
-
 /// Process-wide CPU profiler. Registers a `perf_event_open` sampler and
 /// drains raw stack traces into the trace stream on each flush cycle.
 ///
@@ -356,11 +333,7 @@ impl CpuProfiler {
         };
         // Ask this sampler, not the process-wide ctimer flag: another
         // profiler's ctimer sets that flag.
-        let effective_backend = if sampler.is_ctimer() {
-            ActiveCpuBackend::Ctimer
-        } else {
-            ActiveCpuBackend::Perf
-        };
+        let effective_backend = sampler.backend();
         Ok(Self {
             sampler,
             pid: std::process::id(),
