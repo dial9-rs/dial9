@@ -308,19 +308,37 @@ impl From<std::io::Error> for ProcessErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PipelineStatus {
-    pub(crate) stages: std::sync::Arc<[&'static str]>,
+    pub(crate) stages: std::sync::Arc<[PipelineStage]>,
     pub(crate) worker: WorkerState,
 }
 
 impl PipelineStatus {
-    /// [`SegmentProcessor::name`] of each stage, in pipeline order.
-    pub fn stages(&self) -> &[&'static str] {
+    /// Each stage, in pipeline order.
+    pub fn stages(&self) -> &[PipelineStage] {
         &self.stages
     }
 
     /// What the pipeline worker is doing.
     pub fn worker_state(&self) -> &WorkerState {
         &self.worker
+    }
+}
+
+/// One stage of the pipeline, from [`PipelineStatus::stages`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PipelineStage {
+    name: &'static str,
+}
+
+impl PipelineStage {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self { name }
+    }
+
+    /// [`SegmentProcessor::name`] of the stage.
+    pub fn name(&self) -> &'static str {
+        self.name
     }
 }
 
@@ -332,8 +350,8 @@ pub enum WorkerState {
     /// yet (`stage: None`).
     #[non_exhaustive]
     Initializing {
-        /// Name of the stage being initialized.
-        stage: Option<&'static str>,
+        /// The stage being initialized.
+        stage: Option<PipelineStage>,
     },
     /// Every stage initialized; the worker loop is running.
     #[non_exhaustive]

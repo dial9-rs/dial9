@@ -1,7 +1,7 @@
 //! Stage order and worker lifecycle, published for
 //! [`Dial9Handle::pipeline_status`](crate::handle::Dial9Handle::pipeline_status).
 
-use crate::pipeline::{PipelineStatus, WorkerState};
+use crate::pipeline::{PipelineStage, PipelineStatus, WorkerState};
 // Shuttle-aware, so the exit guard racing shutdown is explored.
 use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::{AtomicUsize, Ordering};
@@ -25,9 +25,9 @@ pub(crate) struct PipelineShared {
 /// Written by the worker, read by any handle.
 #[derive(Debug)]
 pub(crate) struct PipelineState {
-    /// Stage names in pipeline order, fixed at build. Shared with every
-    /// status, so reading one doesn't allocate.
-    stages: std::sync::Arc<[&'static str]>,
+    /// Stages in pipeline order, fixed at build. Shared with every status,
+    /// so reading one doesn't allocate.
+    stages: std::sync::Arc<[PipelineStage]>,
     /// Index into `stages` of the stage initializing, or one of the
     /// constants above.
     phase: AtomicUsize,
@@ -36,7 +36,7 @@ pub(crate) struct PipelineState {
 impl PipelineState {
     pub(crate) fn new(stages: Vec<&'static str>) -> Self {
         Self {
-            stages: stages.into(),
+            stages: stages.into_iter().map(PipelineStage::new).collect(),
             phase: AtomicUsize::new(NOT_STARTED),
         }
     }
@@ -58,7 +58,7 @@ impl PipelineState {
             STOPPED => WorkerState::Stopped,
             RUNNING => WorkerState::Running,
             i => WorkerState::Initializing {
-                stage: self.stages.get(i).copied(),
+                stage: self.stages.get(i).cloned(),
             },
         };
         PipelineStatus {
@@ -82,7 +82,9 @@ impl Drop for StoppedOnDrop {
 #[cfg(all(test, not(shuttle)))]
 mod tests {
     use crate::buffer::MemoryBuffer;
-    use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor, WorkerState};
+    use crate::pipeline::{
+        PipelineStage, ProcessError, SegmentData, SegmentProcessor, WorkerState,
+    };
     use crate::recorder::recorder;
     use crate::recording::Recorder;
     use std::future::Future;
@@ -151,10 +153,9 @@ mod tests {
     #[test]
     fn stages_in_pipeline_order_then_running_then_stopped() {
         let rec = build(&[("First", Init::Ok), ("Second", Init::Ok)]);
-        assert_eq!(
-            rec.handle().pipeline_status().unwrap().stages(),
-            ["First", "Second"]
-        );
+        let status = rec.handle().pipeline_status().unwrap();
+        let names: Vec<_> = status.stages().iter().map(PipelineStage::name).collect();
+        assert_eq!(names, ["First", "Second"]);
         assert_eq!(wait_for(&rec, WorkerState::Running), WorkerState::Running);
         let handle = rec.handle().clone();
         rec.graceful_shutdown(Duration::from_secs(5));
@@ -168,7 +169,7 @@ mod tests {
     fn names_the_stage_whose_initialize_hangs() {
         let rec = build(&[("First", Init::Ok), ("Hanging", Init::Hang)]);
         let want = WorkerState::Initializing {
-            stage: Some("Hanging"),
+            stage: Some(PipelineStage::new("Hanging")),
         };
         assert_eq!(wait_for(&rec, want.clone()), want);
         let handle = rec.handle().clone();

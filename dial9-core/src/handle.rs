@@ -152,7 +152,9 @@ impl Dial9Handle {
     /// };
     /// match status.worker_state() {
     ///     WorkerState::Running { .. } => {}
-    ///     WorkerState::Initializing { stage, .. } => eprintln!("waiting on {stage:?}"),
+    ///     WorkerState::Initializing { stage, .. } => {
+    ///         eprintln!("waiting on {:?}", stage.as_ref().map(|s| s.name()))
+    ///     }
     ///     other => eprintln!("pipeline not running: {other:?}"),
     /// }
     /// # }

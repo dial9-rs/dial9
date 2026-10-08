@@ -412,6 +412,8 @@ crate::shuttle_test! {
         worker.join().unwrap();
         reader.join().unwrap();
         assert_eq!(state.status().worker_state(), &WorkerState::Stopped);
-        assert_eq!(state.status().stages(), ["CountingProcessor"]);
+        let status = state.status();
+        let names: Vec<_> = status.stages().iter().map(|s| s.name()).collect();
+        assert_eq!(names, ["CountingProcessor"]);
     }
 }
