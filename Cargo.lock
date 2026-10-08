@@ -3877,14 +3877,12 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
- "flate2",
  "half",
  "hashbrown 0.15.5",
  "num",
  "num-bigint",
  "paste",
  "seq-macro",
- "snap",
  "thrift",
  "twox-hash",
  "zstd",
@@ -5051,12 +5049,6 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
-
-[[package]]
-name = "snap"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "socket2"
