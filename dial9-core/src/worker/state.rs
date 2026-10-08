@@ -93,8 +93,17 @@ impl StoppedOnDrop {
     /// Record that the stage being initialized failed.
     pub(crate) fn record_initialize_failed(&self) {
         let phase = self.0.phase.load(Ordering::Acquire);
-        let stage = self.0.stages.get(phase).cloned();
-        self.record(StopCause::InitializeFailed { stage });
+        // An `initialize()` error only comes from the stage `phase` points
+        // at, so this always finds it.
+        match self.0.stages.get(phase) {
+            Some(stage) => self.record(StopCause::InitializeFailed {
+                stage: stage.clone(),
+            }),
+            None => {
+                debug_assert!(false, "initialize() failed outside a stage: phase {phase}");
+                tracing::error!(target: "dial9_worker", phase, "initialize() failed outside a stage");
+            }
+        }
     }
 }
 
@@ -216,7 +225,7 @@ mod tests {
         let rec = build(&[("First", Init::Ok), ("Failing", Init::Fail)]);
         let want = WorkerState::Stopped {
             cause: StopCause::InitializeFailed {
-                stage: Some(PipelineStage::new("Failing")),
+                stage: PipelineStage::new("Failing"),
             },
         };
         assert_eq!(wait_for(&rec, want.clone()), want);

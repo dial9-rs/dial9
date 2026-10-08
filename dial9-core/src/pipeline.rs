@@ -375,7 +375,7 @@ pub enum StopCause {
     #[non_exhaustive]
     InitializeFailed {
         /// The stage whose `initialize()` failed.
-        stage: Option<PipelineStage>,
+        stage: PipelineStage,
     },
     /// Panicked: in a stage, the thread-start hook or the runtime build.
     #[non_exhaustive]
