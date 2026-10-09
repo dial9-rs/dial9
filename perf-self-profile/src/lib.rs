@@ -83,6 +83,9 @@ pub mod cuda;
 ))]
 pub mod recorder_ext;
 
+#[cfg(feature = "cpu-profiling")]
+mod start_failed;
+
 #[cfg(feature = "process-resource")]
 pub mod process_resource;
 
@@ -96,7 +99,7 @@ pub mod memory_profiling;
 pub mod symbolize_processor;
 
 pub use offline_symbolize::SymbolTableEntry;
-pub use sampler::{EventSource, Sample, SamplerConfig, SamplingMode};
+pub use sampler::{ActiveCpuBackend, EventSource, Sample, SamplerConfig, SamplingMode};
 pub use symbolize::{CodeInfo, MapsEntry, SymbolInfo};
 pub use symbolize::{parse_proc_maps, read_proc_maps};
 
@@ -165,6 +168,8 @@ pub use cpu_source::{
     feature = "linux-socket"
 ))]
 pub use recorder_ext::RecorderPerfExt;
+#[cfg(feature = "cpu-profiling")]
+pub use start_failed::StartFailed;
 
 #[cfg(all(feature = "process-resource", unix))]
 pub use process_resource::ProcessResourceUsageSource;

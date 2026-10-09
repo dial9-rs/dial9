@@ -71,6 +71,10 @@ impl CtimerSampler {
 }
 
 impl SamplerBackend for CtimerSampler {
+    fn backend(&self) -> crate::sampler::ActiveCpuBackend {
+        crate::sampler::ActiveCpuBackend::Ctimer
+    }
+
     fn track_current_thread(&mut self) -> io::Result<()> {
         ctimer::register_thread()
             .map_err(|e| io::Error::other(format!("ctimer::register_thread failed: {e}")))

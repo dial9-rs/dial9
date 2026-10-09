@@ -1,8 +1,9 @@
 //! `.with_*` sugar for plugging this crate's profiling `Source`s into a
-//! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. Each
-//! method is `.source(<Source>::new(cfg))` that warns and skips on a start
-//! failure or unsupported platform. Use `.source(CpuProfiler::start(cfg)?)` to
-//! propagate the failure instead.
+//! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. The
+//! CPU and scheduler profilers warn on a start failure and register a
+//! `StartFailed` placeholder. The other methods register nothing on failure;
+//! see each method. Use `.source(CpuProfiler::start(cfg)?)` to propagate the
+//! failure instead.
 
 use dial9_core::buffer::BufferMode;
 use dial9_core::recorder::RecorderBuilder;
@@ -24,11 +25,13 @@ pub trait RecorderPerfExt: recorder_perf_ext_sealed::Sealed + Sized {
         config: crate::cuda::CudaGpuConfig,
     ) -> Result<Self, crate::cuda::CudaGpuStartError>;
 
-    /// Register the process-wide CPU profiler. Warns and skips on start failure.
+    /// Register the process-wide CPU profiler. On a start failure, warns and
+    /// registers a [`StartFailed`](crate::StartFailed) placeholder.
     #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self;
 
-    /// Register the per-thread scheduler-event profiler. Warns and skips on start failure.
+    /// Register the per-thread scheduler-event profiler. On a start failure,
+    /// warns and registers a [`StartFailed`](crate::StartFailed) placeholder.
     #[cfg(feature = "cpu-profiling")]
     fn with_sched_events(self, config: crate::SchedEventConfig) -> Self;
 
@@ -87,7 +90,7 @@ impl<M: BufferMode> RecorderPerfExt for RecorderBuilder<M> {
                 rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::warn!("failed to start CPU profiler: {e}");
                 });
-                self
+                self.source(crate::StartFailed::<crate::CpuProfiler>::new(&e))
             }
         }
     }
@@ -100,7 +103,7 @@ impl<M: BufferMode> RecorderPerfExt for RecorderBuilder<M> {
                 rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::warn!("failed to start scheduler event profiler: {e}");
                 });
-                self
+                self.source(crate::StartFailed::<crate::SchedProfiler>::new(&e))
             }
         }
     }
@@ -175,5 +178,36 @@ mod tests {
             "expected the process resource usage source to be registered, got {names:?}"
         );
         recorder.graceful_shutdown(Duration::ZERO);
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "cpu-profiling",
+    not(any(
+        target_os = "linux",
+        all(target_os = "android", target_arch = "aarch64")
+    ))
+))]
+mod start_failed_tests {
+    use crate::{CpuProfiler, StartFailed};
+
+    /// Off Linux the profiler can't start, so the builder registers the
+    /// placeholder instead of skipping the source.
+    #[test]
+    fn a_failed_start_registers_the_placeholder() {
+        use super::RecorderPerfExt;
+        use dial9_core::buffer::MemoryBuffer;
+        use dial9_core::recorder::recorder;
+
+        let rec = recorder(MemoryBuffer::new(64 * 1024).expect("writer"))
+            .with_cpu_profiling(crate::CpuProfilingConfig::default())
+            .build();
+        let found = rec
+            .handle()
+            .with_source(|f: &mut StartFailed<CpuProfiler>| f.message().to_string());
+        assert!(found.is_some(), "no StartFailed<CpuProfiler> registered");
+        assert!(rec.handle().with_source(|_: &mut CpuProfiler| ()).is_none());
+        rec.graceful_shutdown(std::time::Duration::ZERO);
     }
 }

@@ -130,3 +130,84 @@ fn falls_back_to_ctimer_when_perf_event_open_blocked() {
     assert!(libc::WIFEXITED(status), "child did not exit normally");
     assert_eq!(libc::WEXITSTATUS(status), 0, "fallback did not trigger");
 }
+
+/// Run `child` in a forked process and assert it returned `true`.
+#[cfg(feature = "cpu-profiling")]
+fn in_fork(what: &str, child: impl FnOnce() -> bool) {
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork failed");
+    if pid == 0 {
+        let ok = child();
+        unsafe { libc::_exit(!ok as i32) };
+    }
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert!(libc::WIFEXITED(status), "child did not exit normally");
+    assert_eq!(libc::WEXITSTATUS(status), 0, "{what}");
+}
+
+/// The `Auto` backend reports ctimer when perf is blocked: the path production
+/// takes, as opposed to forcing ctimer.
+#[cfg(feature = "cpu-profiling")]
+#[test]
+fn auto_backend_reports_ctimer_when_perf_event_open_blocked() {
+    use dial9_perf_self_profile::{ActiveCpuBackend, CpuProfiler, CpuProfilingConfig};
+
+    in_fork("Auto did not report ctimer", || {
+        install_seccomp_blocking_perf_event_open();
+        CpuProfiler::start(CpuProfilingConfig::default())
+            .is_ok_and(|p| matches!(p.active_backend(), ActiveCpuBackend::Ctimer { .. }))
+    });
+}
+
+/// Another profiler's ctimer doesn't make a perf profiler report ctimer.
+/// Forked: ctimer is process-wide.
+#[cfg(feature = "cpu-profiling")]
+#[test]
+fn auto_reports_perf_while_another_profiler_runs_ctimer() {
+    use dial9_perf_self_profile::{ActiveCpuBackend, CpuProfiler, CpuProfilingConfig};
+
+    if !perf_event_open_works() {
+        eprintln!("skipping: perf_event_open blocked in this env");
+        return;
+    }
+    in_fork("Auto on perf reported ctimer", || {
+        let Ok(_ctimer) = CpuProfiler::start(CpuProfilingConfig::with_ctimer_backend()) else {
+            return false;
+        };
+        CpuProfiler::start(CpuProfilingConfig::default())
+            .is_ok_and(|p| matches!(p.active_backend(), ActiveCpuBackend::Perf { .. }))
+    });
+}
+
+/// With perf blocked, `with_cpu_profiling` (perf backend) and
+/// `with_sched_events` register `StartFailed` placeholders. The scheduler
+/// profiler's error says how to allow `perf_event_open`.
+#[cfg(feature = "cpu-profiling")]
+#[test]
+fn failed_profilers_register_placeholders_when_perf_event_open_blocked() {
+    use dial9_core::buffer::MemoryBuffer;
+    use dial9_core::recorder::recorder;
+    use dial9_perf_self_profile::{
+        CpuProfiler, CpuProfilingConfig, RecorderPerfExt, SchedEventConfig, SchedProfiler,
+        StartFailed,
+    };
+
+    in_fork("placeholders not registered", || {
+        install_seccomp_blocking_perf_event_open();
+        let rec = recorder(MemoryBuffer::new(64 * 1024).expect("writer"))
+            .with_cpu_profiling(CpuProfilingConfig::with_perf_backend())
+            .with_sched_events(SchedEventConfig::default())
+            .build();
+        let h = rec.handle();
+        let ok = h
+            .with_source(|_: &mut StartFailed<CpuProfiler>| ())
+            .is_some()
+            && h.with_source(|f: &mut StartFailed<SchedProfiler>| f.message().to_string())
+                .is_some_and(|m| m.contains("perf_event_paranoid"))
+            && h.with_source(|_: &mut CpuProfiler| ()).is_none()
+            && h.with_source(|_: &mut SchedProfiler| ()).is_none();
+        rec.graceful_shutdown(std::time::Duration::ZERO);
+        ok
+    });
+}

@@ -7,7 +7,7 @@ use std::io;
 
 use super::ctimer_sampler::CtimerSampler;
 use super::perf_sampler::PerfSamplerImpl;
-use crate::sampler::{Sample, SamplerConfig};
+use crate::sampler::{ActiveCpuBackend, Sample, SamplerConfig};
 
 pub(super) trait SamplerBackend: Send {
     fn track_current_thread(&mut self) -> io::Result<()>;
@@ -17,6 +17,7 @@ pub(super) trait SamplerBackend: Send {
     fn drain_samples(&mut self) -> Vec<Sample>;
     fn disable(&self);
     fn enable(&self);
+    fn backend(&self) -> ActiveCpuBackend;
 }
 
 /// CPU sampler dispatching to perf_event_open or ctimer (fallback).
@@ -27,6 +28,21 @@ pub struct PerfSampler {
 impl std::fmt::Debug for PerfSampler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PerfSampler").finish_non_exhaustive()
+    }
+}
+
+/// `"; <how to allow it>"` when `err` from a bare `perf_event_open` call says
+/// it was denied, else `""`. Ends up in the profiler's start error, and from
+/// there in the trace. Period-mode events don't set `exclude_kernel`, so they
+/// need paranoid 1.
+fn enable_perf_hint(err: &io::Error) -> &'static str {
+    match err.raw_os_error() {
+        Some(libc::EACCES | libc::EPERM) => {
+            "; to enable it, set kernel.perf_event_paranoid to 1 or lower, grant \
+             CAP_PERFMON (CAP_SYS_ADMIN before Linux 5.8), or allow perf_event_open \
+             in the container's seccomp profile"
+        }
+        _ => "",
     }
 }
 
@@ -149,7 +165,8 @@ impl PerfSampler {
                     io::ErrorKind::Unsupported,
                     format!(
                         "perf_event_open blocked ({e}) and event-based sampling \
-                         has no userspace fallback (requires kernel support)"
+                         has no userspace fallback (requires kernel support){}",
+                        enable_perf_hint(&e)
                     ),
                 )),
             },
@@ -194,6 +211,11 @@ impl PerfSampler {
         self.inner.track_current_thread()
     }
 
+    /// The backend this sampler runs on.
+    pub fn backend(&self) -> ActiveCpuBackend {
+        self.inner.backend()
+    }
+
     pub fn stop_tracking_current_thread(&mut self) {
         self.inner.stop_tracking_current_thread()
     }
@@ -224,6 +246,20 @@ impl PerfSampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A denied `perf_event_open` says how to allow it; a missing one doesn't.
+    #[test]
+    fn denied_perf_errors_say_how_to_enable_it() {
+        for errno in [libc::EACCES, libc::EPERM] {
+            let err = io::Error::from_raw_os_error(errno);
+            let hint = enable_perf_hint(&err);
+            assert!(hint.contains("perf_event_paranoid to 1"), "{errno}: {hint}");
+        }
+        for errno in [libc::ENOSYS, libc::EOPNOTSUPP] {
+            let err = io::Error::from_raw_os_error(errno);
+            assert_eq!(enable_perf_hint(&err), "");
+        }
+    }
 
     #[test]
     fn is_perf_blocked_recognizes_blocked_errors() {

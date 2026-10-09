@@ -124,8 +124,8 @@ pub use dial9_perf_self_profile::RecorderPerfExt;
 #[cfg(feature = "cpu-profiling")]
 pub mod cpu {
     pub use dial9_perf_self_profile::{
-        CpuProfiler, CpuProfilingConfig, CpuSampleSource, EventSource, SchedEventConfig,
-        SchedProfiler,
+        ActiveCpuBackend, CpuProfiler, CpuProfilingConfig, CpuSampleSource, EventSource,
+        SchedEventConfig, SchedProfiler, StartFailed,
     };
 }
 
