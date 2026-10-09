@@ -33,17 +33,17 @@ impl std::fmt::Debug for PerfSampler {
 
 /// `"; <how to allow it>"` when `err` from a bare `perf_event_open` call says
 /// it was denied, else `""`. Ends up in the profiler's start error, and from
-/// there in the trace. Kernel samples need paranoid 1; user-only ones need 2.
-fn enable_perf_hint(err: &io::Error, include_kernel: bool) -> String {
-    if !matches!(err.raw_os_error(), Some(libc::EACCES | libc::EPERM)) {
-        return String::new();
+/// there in the trace. Period-mode events don't set `exclude_kernel`, so they
+/// need paranoid 1.
+fn enable_perf_hint(err: &io::Error) -> &'static str {
+    match err.raw_os_error() {
+        Some(libc::EACCES | libc::EPERM) => {
+            "; to enable it, set kernel.perf_event_paranoid to 1 or lower, grant \
+             CAP_PERFMON (CAP_SYS_ADMIN before Linux 5.8), or allow perf_event_open \
+             in the container's seccomp profile"
+        }
+        _ => "",
     }
-    let paranoid = if include_kernel { 1 } else { 2 };
-    format!(
-        "; to enable it, set kernel.perf_event_paranoid to {paranoid} or lower, grant \
-         CAP_PERFMON (CAP_SYS_ADMIN before Linux 5.8), or allow perf_event_open in \
-         the container's seccomp profile"
-    )
 }
 
 /// Returns `true` if the error indicates `perf_event_open` is blocked by
@@ -166,7 +166,7 @@ impl PerfSampler {
                     format!(
                         "perf_event_open blocked ({e}) and event-based sampling \
                          has no userspace fallback (requires kernel support){}",
-                        enable_perf_hint(&e, config.include_kernel)
+                        enable_perf_hint(&e)
                     ),
                 )),
             },
@@ -252,20 +252,12 @@ mod tests {
     fn denied_perf_errors_say_how_to_enable_it() {
         for errno in [libc::EACCES, libc::EPERM] {
             let err = io::Error::from_raw_os_error(errno);
-            let user_only = enable_perf_hint(&err, false);
-            assert!(
-                user_only.contains("perf_event_paranoid to 2"),
-                "{errno}: {user_only}"
-            );
-            let with_kernel = enable_perf_hint(&err, true);
-            assert!(
-                with_kernel.contains("perf_event_paranoid to 1"),
-                "{errno}: {with_kernel}"
-            );
+            let hint = enable_perf_hint(&err);
+            assert!(hint.contains("perf_event_paranoid to 1"), "{errno}: {hint}");
         }
         for errno in [libc::ENOSYS, libc::EOPNOTSUPP] {
             let err = io::Error::from_raw_os_error(errno);
-            assert_eq!(enable_perf_hint(&err, false), "");
+            assert_eq!(enable_perf_hint(&err), "");
         }
     }
 
