@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.3...dial9-v0.5.4) - 2026-10-09
+
+### Fixed
+
+- *(viewer)* pin skill scripts to CommonJS with a package.json ([#1026](https://github.com/dial9-rs/dial9/pull/1026))
+- *(viewer)* make the zoom-window skill description valid YAML ([#1027](https://github.com/dial9-rs/dial9/pull/1027))
+- *(viewer)* keep task dumps from extending the trace timeline ([#1012](https://github.com/dial9-rs/dial9/pull/1012))
+
+### Other
+
+- update Cargo.lock dependencies
+- *(dial9-core)* shuttle test-infrastructure cleanup ([#936](https://github.com/dial9-rs/dial9/pull/936))
+- *(viewer)* zstd-compress folded Parquet part-files ([#1023](https://github.com/dial9-rs/dial9/pull/1023))
+- Fix unused_must_use clippy warning in FoldFileMetricsBuilder::emit ([#1016](https://github.com/dial9-rs/dial9/pull/1016))
+- Bump to Tokio 1.53.2 ([#1017](https://github.com/dial9-rs/dial9/pull/1017))
+
 ## [0.5.3](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.2...dial9-v0.5.3) - 2026-10-02
 
 ### Added
