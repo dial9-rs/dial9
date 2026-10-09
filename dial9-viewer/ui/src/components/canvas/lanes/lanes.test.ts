@@ -3,6 +3,7 @@
 
 import { QueueSampleIndex } from "../../../lib/trace/queue-samples.js";
 import { EMPTY_WAKE_INDEX } from "../../../lib/trace/wake-index.js";
+import { ColumnarWorkerSpans } from "../../../lib/trace/columnar-worker-spans.js";
 import { describe, it, expect } from "vitest";
 import {
   LANE_ROW_H,
@@ -145,6 +146,31 @@ function poll(start: number, end: number, taskId = 1): PollSpan {
 // ── Downsample / coalesce usage ───────────────────────────
 
 describe("renderLanes: pixel-bounded fills (downsample+coalesce)", () => {
+  it.each(["object", "columnar"] as const)(
+    "renders a long selected poll after a short selected poll in the same pixel (%s)",
+    (representation) => {
+      const lane = {
+        ...emptyLane(),
+        polls: [poll(10, 11, 7), poll(12, 500, 7)],
+      };
+      const workerSpans = representation === "columnar"
+        ? ColumnarWorkerSpans.fromWorkerSpans({ 0: lane }).workerLanes()
+        : { 0: lane };
+      const rec = recordingCtx();
+      renderLanes(
+        rec.ctx,
+        baseInput({ workerSpans, selectedTaskId: 7 }),
+        { time: layout(0, 1000, 100), height: 60 },
+      );
+      // Both starts map to pixel 1; the long poll must still cover its midpoint.
+      const midpoint = ((12 + 500) / 2) / 1000 * 100;
+      expect(rec.fillRectCalls.some((call) =>
+        call.fill === "#ffeb3b" && call.y === 10 && call.h === 20 &&
+        call.x <= midpoint && call.x + call.w >= midpoint,
+      )).toBe(true);
+    },
+  );
+
   it("draws O(width) fillRects for a million polls, not O(polls)", () => {
     const drawW = 200;
     const n = 1_000_000;

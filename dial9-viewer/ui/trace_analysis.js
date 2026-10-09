@@ -352,7 +352,9 @@
         bestW = weightOf(s);
       } else {
         const wgt = weightOf(s);
-        if (wgt > bestW) { bestW = wgt; bestSpan = s; }
+        // Selected spans have infinite weight. Keep the latest on that tie so
+        // an earlier sub-pixel span cannot hide a following long span.
+        if (wgt > bestW || wgt === Infinity) { bestW = wgt; bestSpan = s; }
       }
     }
     if (bestSpan !== null) out.push(bestSpan);
