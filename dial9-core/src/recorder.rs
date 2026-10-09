@@ -275,7 +275,6 @@ impl<M: BufferMode> RecorderBuilder<M> {
             return recorder_disabled();
         };
 
-        // Trace start time, taken before the worker starts.
         let start_time_ns = clock::clock_monotonic_ns();
 
         // Sync any `boot_id` metadata to the writer's per-process namespace, so a
@@ -339,7 +338,8 @@ impl<M: BufferMode> RecorderBuilder<M> {
             let hook = self.thread_init.clone();
             let worker = crate::worker::spawn(&writer, config, rx, move || hook())
                 .map(|wt| crate::recording::WorkerHandle::new(tx, wt));
-            // No worker, no status: `pipeline_status()` stays `None`.
+            // No worker, no status: a status here would report `Initializing`
+            // forever.
             let state = worker.is_some().then_some(state);
             (worker, state)
         };

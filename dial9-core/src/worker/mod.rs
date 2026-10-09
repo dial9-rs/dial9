@@ -136,9 +136,10 @@ async fn run_background_task_inner(
     let metrics_sink = config.metrics_sink.clone();
     let trigger = config.trigger.take();
     let state = config.state.take();
-    // Declared before `run_fut` so it drops after it: `Stopped` is published
-    // once the stages have dropped (tasks they spawned may still be running).
-    // Each exit below records its cause first.
+    // Declared before `run_fut` so it drops after it: a reader that sees
+    // `Stopped` knows no stage code is still running (tasks they spawned may
+    // be). Each exit below records its cause first; otherwise the guard says
+    // `Panicked`.
     let stopped = state.clone().map(state::StoppedOnDrop);
     let record = |cause| {
         if let Some(stopped) = &stopped {
@@ -234,7 +235,8 @@ where
 {
     let fs = writer.fs_handle()?;
     // Covers a panic in `thread_init` or the runtime build, before
-    // `run_background_task_inner` sets its own guard.
+    // `run_background_task_inner` sets its own guard; without it, the status
+    // would stay `Initializing` forever.
     let stopped = config.state.clone().map(state::StoppedOnDrop);
     Some(crate::primitives::thread::spawn_named(
         "dial9-worker",

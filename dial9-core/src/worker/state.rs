@@ -31,7 +31,8 @@ pub(crate) struct PipelineState {
     /// Index into `stages` of the stage initializing, or one of the
     /// constants above.
     phase: AtomicUsize,
-    /// Why the worker stopped. Recorded before `phase` becomes `STOPPED`.
+    /// Why the worker stopped. Recorded before `phase` becomes `STOPPED`, so a
+    /// reader that sees `STOPPED` always finds a cause.
     cause: Mutex<Option<StopCause>>,
 }
 
