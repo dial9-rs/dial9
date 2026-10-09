@@ -814,7 +814,8 @@ export class ColumnarWorkerSpans {
    * Columnar port of the frozen pixelDownsampleSpans for POLLS: one
    * representative (weight-winning) poll per pixel column across [viewStart,
    * viewEnd], iterating the start column from `startIdx`. Weight matches the
-   * render: a selected task's polls force-win (Infinity), else later start wins
+   * render: a selected task's polls force-win (Infinity), with the latest start
+   * winning that tie; otherwise later start wins
    * - computed from raw columns so only the <=pw WINNERS are materialized (never
    * per-candidate). Byte-identical representatives to the frozen reducer.
    */
@@ -843,7 +844,7 @@ export class ColumnarWorkerSpans {
         curPx = px; bestIdx = i; bestW = weight(i);
       } else {
         const wg = weight(i);
-        if (wg > bestW) { bestW = wg; bestIdx = i; }
+        if (wg > bestW || wg === Infinity) { bestW = wg; bestIdx = i; }
       }
     }
     if (bestIdx >= 0) out.push(this.pollAt(w, bestIdx)!);
