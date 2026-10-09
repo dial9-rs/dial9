@@ -498,6 +498,9 @@ export function buildBlockingView(
   const groups = new Map<string, Acc>();
   for (const { sample, poll, worker } of entries) {
     const frames = symbolizeChain(sample.callchain, callframeSymbols);
+    while (frames[0]?.symbol === "__schedule" || frames[0]?.symbol === "schedule") {
+      frames.shift();
+    }
     const first = frames[0];
     const leafRaw = first ? first.symbol : "(unknown)";
     const leafDisplay = first ? formatFrame(first).text : "(unknown)";
