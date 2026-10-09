@@ -141,6 +141,10 @@ mod tests {
         Ok,
         Hang,
         Fail,
+        /// Returns after a delay, so shutdown can start while it runs.
+        SlowOk,
+        /// Fails after a delay, so shutdown can start while it runs.
+        SlowFail,
     }
 
     impl SegmentProcessor for Stage {
@@ -151,7 +155,17 @@ mod tests {
             match self.init {
                 Init::Ok => Box::pin(std::future::ready(Ok(()))),
                 Init::Hang => Box::pin(std::future::pending()),
-                Init::Fail => Box::pin(std::future::ready(Err(std::io::Error::other("no")))),
+                Init::Fail => Box::pin(std::future::ready(Err(std::io::Error::other(
+                    "test stage failed to initialize",
+                )))),
+                Init::SlowOk => Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Ok(())
+                }),
+                Init::SlowFail => Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Err(std::io::Error::other("test stage failed to initialize"))
+                }),
             }
         }
         fn process(&mut self, data: SegmentData) -> ProcessFuture<'_> {
@@ -279,6 +293,37 @@ mod tests {
             state.status().worker_state(),
             &WorkerState::Stopped {
                 cause: StopCause::Panicked
+            }
+        );
+    }
+
+    /// A stage still in `initialize()` when shutdown starts finishes during
+    /// the drain, and the worker exits normally.
+    #[test]
+    fn initialize_finishing_during_the_drain_is_exited() {
+        let rec = build(&[("Slow", Init::SlowOk)]);
+        let handle = rec.handle().clone();
+        rec.graceful_shutdown(Duration::from_secs(5));
+        assert_eq!(
+            handle.pipeline_status().unwrap().worker_state(),
+            &WorkerState::Stopped {
+                cause: StopCause::Exited
+            }
+        );
+    }
+
+    /// A stage whose `initialize()` fails during the drain is named.
+    #[test]
+    fn initialize_failing_during_the_drain_is_initialize_failed() {
+        let rec = build(&[("Slow", Init::SlowFail)]);
+        let handle = rec.handle().clone();
+        rec.graceful_shutdown(Duration::from_secs(5));
+        assert_eq!(
+            handle.pipeline_status().unwrap().worker_state(),
+            &WorkerState::Stopped {
+                cause: StopCause::InitializeFailed {
+                    stage: PipelineStage::new("Slow")
+                }
             }
         );
     }

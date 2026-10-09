@@ -383,7 +383,8 @@ pub enum StopCause {
     Panicked,
     /// Still running when the shutdown drain timeout ran out. A `Recorder`
     /// dropped without `graceful_shutdown` allows no drain time, so a worker
-    /// that was mid-segment stops this way.
+    /// that was mid-segment, or still in a stage's `initialize()`, stops this
+    /// way.
     #[non_exhaustive]
     DrainTimedOut,
 }
