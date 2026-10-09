@@ -303,6 +303,92 @@ impl From<std::io::Error> for ProcessErrorKind {
     }
 }
 
+/// The pipeline's stages and its worker's state, from
+/// [`Dial9Handle::pipeline_status`](crate::handle::Dial9Handle::pipeline_status).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PipelineStatus {
+    pub(crate) stages: std::sync::Arc<[PipelineStage]>,
+    pub(crate) worker: WorkerState,
+}
+
+impl PipelineStatus {
+    /// Each stage, in pipeline order.
+    pub fn stages(&self) -> &[PipelineStage] {
+        &self.stages
+    }
+
+    /// What the pipeline worker is doing.
+    pub fn worker_state(&self) -> &WorkerState {
+        &self.worker
+    }
+}
+
+/// One stage of the pipeline, from [`PipelineStatus::stages`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PipelineStage {
+    name: &'static str,
+}
+
+impl PipelineStage {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self { name }
+    }
+
+    /// [`SegmentProcessor::name`] of the stage.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// Lifecycle of the pipeline worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WorkerState {
+    /// Awaiting a stage's [`SegmentProcessor::initialize`], or not started
+    /// yet (`stage: None`).
+    #[non_exhaustive]
+    Initializing {
+        /// The stage being initialized.
+        stage: Option<PipelineStage>,
+    },
+    /// Every stage initialized; the worker loop is running.
+    #[non_exhaustive]
+    Running,
+    /// Final: the worker doesn't restart.
+    #[non_exhaustive]
+    Stopped {
+        /// Why the worker stopped.
+        cause: StopCause,
+    },
+}
+
+/// Why the pipeline worker is [`Stopped`](WorkerState::Stopped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StopCause {
+    /// Shut down normally, including a `Recorder` dropped without
+    /// `graceful_shutdown` while the worker was idle.
+    #[non_exhaustive]
+    Exited,
+    /// A stage's [`SegmentProcessor::initialize`] returned an error.
+    #[non_exhaustive]
+    InitializeFailed {
+        /// The stage whose `initialize()` failed.
+        stage: PipelineStage,
+    },
+    /// Panicked: in a stage, the thread-start hook or the runtime build.
+    #[non_exhaustive]
+    Panicked,
+    /// Still running when the shutdown drain timeout ran out. A `Recorder`
+    /// dropped without `graceful_shutdown` allows no drain time, so a worker
+    /// that was mid-segment, or still in a stage's `initialize()`, stops this
+    /// way.
+    #[non_exhaustive]
+    DrainTimedOut,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

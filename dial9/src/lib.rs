@@ -51,8 +51,8 @@ pub mod core {
     #[cfg(feature = "pipeline")]
     pub mod pipeline {
         pub use dial9_core::pipeline::{
-            MemorySegment, Payload, ProcessError, ProcessErrorKind, SealedSegment, SegmentData,
-            SegmentProcessor, SegmentRef,
+            MemorySegment, Payload, PipelineStage, PipelineStatus, ProcessError, ProcessErrorKind,
+            SealedSegment, SegmentData, SegmentProcessor, SegmentRef, StopCause, WorkerState,
         };
 
         /// Offline symbolization processor. Needs the CPU profiler for stack frames.

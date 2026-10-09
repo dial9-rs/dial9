@@ -131,7 +131,45 @@ impl Dial9Handle {
     pub fn dump_trigger(&self) -> Option<crate::dump::DumpTrigger> {
         self.inner
             .as_ref()
-            .and_then(|i| i.shared.dump_trigger().cloned())
+            .and_then(|i| i.shared.pipeline().dump_trigger.clone())
+    }
+
+    /// The pipeline's stages and its worker's state. `None` on a disabled
+    /// handle or a recorder without a pipeline worker. Reads shared state;
+    /// the worker isn't involved.
+    ///
+    /// Shutdown stops recording before the worker stops, so this can still
+    /// report `Running` after [`is_stopped`](Self::is_stopped) returns `true`,
+    /// until the worker exits.
+    ///
+    /// ```no_run
+    /// # fn f(handle: dial9_core::handle::Dial9Handle) {
+    /// use dial9_core::pipeline::WorkerState;
+    ///
+    /// let Some(status) = handle.pipeline_status() else {
+    ///     eprintln!("no pipeline worker");
+    ///     return;
+    /// };
+    /// match status.worker_state() {
+    ///     WorkerState::Running { .. } => {}
+    ///     WorkerState::Initializing { stage, .. } => {
+    ///         eprintln!("waiting on {:?}", stage.as_ref().map(|s| s.name()))
+    ///     }
+    ///     other => eprintln!("pipeline not running: {other:?}"),
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "pipeline")]
+    pub fn pipeline_status(&self) -> Option<crate::pipeline::PipelineStatus> {
+        Some(
+            self.inner
+                .as_ref()?
+                .shared
+                .pipeline()
+                .state
+                .as_ref()?
+                .status(),
+        )
     }
 
     /// Return the [`Dial9Handle`] to record through, resolved in order:
