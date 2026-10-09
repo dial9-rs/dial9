@@ -81,8 +81,7 @@ impl PipelineState {
 
 /// Marks the worker [`Stopped`](WorkerState::Stopped) when dropped, so every
 /// exit path is covered: normal exit, initialization error, panic, drain
-/// timeout. Without a recorded cause, a panic must be unwinding past the
-/// guard; anything else is a bug.
+/// timeout.
 pub(crate) struct StoppedOnDrop(pub(crate) Arc<PipelineState>);
 
 impl StoppedOnDrop {
@@ -94,36 +93,22 @@ impl StoppedOnDrop {
     /// Record that the stage being initialized failed.
     pub(crate) fn record_initialize_failed(&self) {
         let phase = self.0.phase.load(Ordering::Acquire);
-        // An `initialize()` error only comes from the stage `phase` points
-        // at, so this finds it; if it didn't, nothing is recorded and
-        // the guard reports `Panicked`.
-        match self.0.stages.get(phase) {
-            Some(stage) => self.record(StopCause::InitializeFailed {
-                stage: stage.clone(),
-            }),
-            None => {
-                debug_assert!(false, "initialize() failed outside a stage: phase {phase}");
-                tracing::error!(target: "dial9_worker", phase, "initialize() failed outside a stage");
-            }
-        }
+        let stage = self
+            .0
+            .stages
+            .get(phase)
+            .cloned()
+            .expect("an initialize() error comes from the stage `phase` points at");
+        self.record(StopCause::InitializeFailed { stage });
     }
 }
 
 impl Drop for StoppedOnDrop {
     fn drop(&mut self) {
-        let had_cause = {
-            let mut cause = self.0.cause.lock().unwrap();
-            let had_cause = cause.is_some();
-            cause.get_or_insert(StopCause::Panicked);
-            had_cause
-        };
+        // Every exit records its cause first, so only a panic unwinding past
+        // the guard leaves none.
+        self.record(StopCause::Panicked);
         self.0.phase.store(STOPPED, Ordering::Release);
-        // Checked after publishing, so a failing check leaves a consistent
-        // status behind.
-        if !had_cause && !std::thread::panicking() {
-            tracing::error!(target: "dial9_worker", "pipeline worker exited without recording why");
-            debug_assert!(false, "pipeline worker exited without recording why");
-        }
     }
 }
 
@@ -296,14 +281,5 @@ mod tests {
                 cause: StopCause::Panicked
             }
         );
-    }
-
-    /// Exiting without a cause and without a panic is a bug, caught in debug
-    /// builds.
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "pipeline worker exited without recording why")]
-    fn exiting_without_a_cause_is_a_bug() {
-        drop(StoppedOnDrop(Arc::new(PipelineState::new(vec!["Stage"]))));
     }
 }

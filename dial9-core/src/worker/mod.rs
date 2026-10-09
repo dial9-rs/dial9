@@ -138,8 +138,8 @@ async fn run_background_task_inner(
     let state = config.state.take();
     // Declared before `run_fut` so it drops after it: a reader that sees
     // `Stopped` knows no stage code is still running (tasks they spawned may
-    // be). Each exit below records its cause first; the guard only assumes
-    // `Panicked` while a panic is unwinding.
+    // be). Each exit below records its cause first; a panic outside `run_fut`
+    // skips that, and the guard records `Panicked`.
     let stopped = state.clone().map(state::StoppedOnDrop);
     let record = |cause| {
         if let Some(stopped) = &stopped {
