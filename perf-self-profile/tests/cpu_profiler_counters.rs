@@ -1,4 +1,4 @@
-//! `CpuProfiler`'s backend and sample counter, read through the recorder.
+//! The profilers' backends and sample counters, read through the recorder.
 //!
 //! Its own test binary: ctimer writes to a process-wide sample buffer that the
 //! library's unit tests exercise directly, so running there would race them.
@@ -7,7 +7,10 @@
 use dial9_core::buffer::MemoryBuffer;
 use dial9_core::recorder::recorder;
 use dial9_core::test_util::drain_encoded_batches;
-use dial9_perf_self_profile::{ActiveCpuBackend, CpuProfiler, CpuProfilingConfig, RecorderPerfExt};
+use dial9_perf_self_profile::{
+    ActiveCpuBackend, CpuProfiler, CpuProfilingConfig, RecorderPerfExt, SchedEventConfig,
+    SchedProfiler,
+};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
@@ -25,7 +28,11 @@ struct DecodedCpuSample {
     source: u8,
 }
 
-fn cpu_samples(batches: &[Vec<u8>]) -> u64 {
+/// `CpuSampleSource` values on the wire.
+const CPU_PROFILE: u8 = 0;
+const SCHED_EVENT: u8 = 1;
+
+fn count_samples(batches: &[Vec<u8>], source: u8) -> u64 {
     let mut n = 0;
     for bytes in batches {
         let mut decoder = dial9_trace_format::decoder::Decoder::new(bytes)
@@ -33,7 +40,7 @@ fn cpu_samples(batches: &[Vec<u8>]) -> u64 {
         decoder
             .for_each_event(|raw| {
                 if let Ok(DecodedEvent::CpuSampleEvent(sample)) = raw.deserialize()
-                    && sample.source == 0
+                    && sample.source == source
                 {
                     n += 1;
                 }
@@ -84,6 +91,45 @@ fn ctimer_reports_its_backend_and_counts_drained_samples() {
 
     let (_, seen) = read();
     assert!(seen > 0, "no CPU samples within 5s of burning");
-    assert_eq!(seen, cpu_samples(&batches));
+    assert_eq!(seen, count_samples(&batches, CPU_PROFILE));
+    rec.graceful_shutdown(Duration::ZERO);
+}
+
+/// The scheduler profiler's `samples_seen` counts exactly the scheduler
+/// samples a drain writes. Skips where perf is blocked, like the crate's other
+/// perf tests.
+#[test]
+fn sched_profiler_counts_drained_samples() {
+    // Paused so the flush thread doesn't drain: the test drives the drain.
+    let rec = recorder(MemoryBuffer::new(16 << 20).expect("writer"))
+        .with_sched_events(SchedEventConfig::default())
+        .paused()
+        .build();
+    let handle = rec.handle().clone();
+    let shared = rec.shared().expect("live recorder").clone();
+    let read = || handle.with_source(|p: &mut SchedProfiler| p.samples_seen());
+    if read().is_none() {
+        eprintln!("skipping: the scheduler profiler didn't start (perf blocked?)");
+        rec.graceful_shutdown(Duration::ZERO);
+        return;
+    }
+    assert_eq!(read(), Some(0));
+
+    // Sleeping switches this tracked thread out, which is what it samples.
+    let tracking = handle.track_current_thread().expect("track this thread");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut batches = Vec::new();
+    while read() == Some(0) && Instant::now() < deadline {
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        shared.flush_sources();
+        batches.extend(drain_encoded_batches(&shared));
+    }
+    drop(tracking);
+
+    let seen = read().expect("still registered");
+    assert!(seen > 0, "no scheduler samples within 5s of sleeping");
+    assert_eq!(seen, count_samples(&batches, SCHED_EVENT));
     rec.graceful_shutdown(Duration::ZERO);
 }

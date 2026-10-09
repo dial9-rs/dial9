@@ -498,6 +498,8 @@ pub struct SchedProfiler {
     config: SchedEventConfig,
     /// Whether segment metadata has been emitted yet (emit-once).
     metadata_emitted: bool,
+    /// Scheduler samples drained since start.
+    samples_seen: u64,
 }
 
 impl std::fmt::Debug for SchedProfiler {
@@ -521,7 +523,15 @@ impl SchedProfiler {
             sampler,
             config,
             metadata_emitted: false,
+            samples_seen: 0,
         })
+    }
+
+    /// Scheduler samples drained since start. Updated on the flush thread each
+    /// flush cycle while recording; unchanged while paused. Next to
+    /// [`CpuProfiler::samples_seen`], shows whether scheduler sampling works.
+    pub fn samples_seen(&self) -> u64 {
+        self.samples_seen
     }
 
     pub(crate) fn track_current_thread(&mut self) -> io::Result<()> {
@@ -534,6 +544,7 @@ impl SchedProfiler {
 
     pub(crate) fn drain(&mut self, mut f: impl FnMut(RawCpuSample)) {
         self.sampler.for_each_sample(|sample| {
+            self.samples_seen += 1;
             f(RawCpuSample {
                 tid: sample.tid,
                 timestamp_nanos: sample.time,
