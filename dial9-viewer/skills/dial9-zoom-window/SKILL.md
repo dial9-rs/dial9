@@ -1,6 +1,6 @@
 ---
 name: dial9-zoom-window
-description: Zoom into a narrow time window of a dial9 trace to see every worker and OS thread at one moment. Use after an aggregate pass (`analyze.js`, `red_flag_scan.js`) flags a timestamp: a long poll, a queue spike, a latency outlier. Use when the user says "zoom in", "what was happening at +6953ms", or "show me the window around that poll". Also covers sharing a window as a dial9 viewer deep link, with the full list of viewer URL parameters.
+description: Zoom into a narrow time window of a dial9 trace to see every worker and OS thread at one moment. Use after an aggregate pass (`analyze.js`, `red_flag_scan.js`) flags a timestamp (a long poll, a queue spike, a latency outlier). Use when the user says "zoom in", "what was happening at +6953ms", or "show me the window around that poll". Also covers sharing a window as a dial9 viewer deep link, with the full list of viewer URL parameters.
 ---
 
 # Zooming into a time window
