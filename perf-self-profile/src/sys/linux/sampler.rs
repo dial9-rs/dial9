@@ -34,20 +34,16 @@ impl std::fmt::Debug for PerfSampler {
 /// `"; <how to allow it>"` when `err` from a bare `perf_event_open` call says
 /// it was denied, else `""`. Ends up in the profiler's start error, and from
 /// there in the trace. Kernel samples need paranoid 1; user-only ones need 2.
-fn enable_perf_hint(err: &io::Error, include_kernel: bool) -> &'static str {
-    match (err.raw_os_error(), include_kernel) {
-        (Some(libc::EACCES | libc::EPERM), true) => {
-            "; to enable it, set kernel.perf_event_paranoid to 1 or lower, grant \
-             CAP_PERFMON (CAP_SYS_ADMIN before Linux 5.8), or allow perf_event_open \
-             in the container's seccomp profile"
-        }
-        (Some(libc::EACCES | libc::EPERM), false) => {
-            "; to enable it, set kernel.perf_event_paranoid to 2 or lower, grant \
-             CAP_PERFMON (CAP_SYS_ADMIN before Linux 5.8), or allow perf_event_open \
-             in the container's seccomp profile"
-        }
-        _ => "",
+fn enable_perf_hint(err: &io::Error, include_kernel: bool) -> String {
+    if !matches!(err.raw_os_error(), Some(libc::EACCES | libc::EPERM)) {
+        return String::new();
     }
+    let paranoid = if include_kernel { 1 } else { 2 };
+    format!(
+        "; to enable it, set kernel.perf_event_paranoid to {paranoid} or lower, grant \
+         CAP_PERFMON (CAP_SYS_ADMIN before Linux 5.8), or allow perf_event_open in \
+         the container's seccomp profile"
+    )
 }
 
 /// Returns `true` if the error indicates `perf_event_open` is blocked by
