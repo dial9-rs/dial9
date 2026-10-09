@@ -83,6 +83,9 @@ pub mod cuda;
 ))]
 pub mod recorder_ext;
 
+#[cfg(feature = "cpu-profiling")]
+mod start_failed;
+
 #[cfg(feature = "process-resource")]
 pub mod process_resource;
 
@@ -166,7 +169,7 @@ pub use cpu_source::{
 ))]
 pub use recorder_ext::RecorderPerfExt;
 #[cfg(feature = "cpu-profiling")]
-pub use recorder_ext::StartFailed;
+pub use start_failed::StartFailed;
 
 #[cfg(all(feature = "process-resource", unix))]
 pub use process_resource::ProcessResourceUsageSource;
