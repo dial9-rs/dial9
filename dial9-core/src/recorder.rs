@@ -275,7 +275,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
             return recorder_disabled();
         };
 
-        // Read now: the shared state is built after the worker starts.
+        // Trace start time, taken before the worker starts.
         let start_time_ns = clock::clock_monotonic_ns();
 
         // Sync any `boot_id` metadata to the writer's per-process namespace, so a

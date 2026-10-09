@@ -356,7 +356,7 @@ pub enum WorkerState {
     /// Every stage initialized; the worker loop is running.
     #[non_exhaustive]
     Running,
-    /// Exited; `cause` says how.
+    /// Final: the worker doesn't restart.
     #[non_exhaustive]
     Stopped {
         /// Why the worker stopped.
@@ -368,7 +368,8 @@ pub enum WorkerState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StopCause {
-    /// Shut down normally.
+    /// Shut down normally, including a `Recorder` dropped without
+    /// `graceful_shutdown` while the worker was idle.
     #[non_exhaustive]
     Exited,
     /// A stage's [`SegmentProcessor::initialize`] returned an error.
@@ -380,7 +381,9 @@ pub enum StopCause {
     /// Panicked: in a stage, the thread-start hook or the runtime build.
     #[non_exhaustive]
     Panicked,
-    /// Still running when the shutdown drain timeout ran out.
+    /// Still running when the shutdown drain timeout ran out. A `Recorder`
+    /// dropped without `graceful_shutdown` allows no drain time, so a worker
+    /// that was mid-segment stops this way.
     #[non_exhaustive]
     DrainTimedOut,
 }

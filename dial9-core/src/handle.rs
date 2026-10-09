@@ -138,9 +138,9 @@ impl Dial9Handle {
     /// handle or a recorder without a pipeline worker. Reads shared state;
     /// the worker isn't involved.
     ///
-    /// A `Recorder` dropped without `graceful_shutdown` doesn't wait for the
-    /// worker, so the worker can still show as running briefly after
-    /// [`is_stopped`](Self::is_stopped) returns `true`.
+    /// Shutdown stops recording before the worker stops, so this can still
+    /// report `Running` after [`is_stopped`](Self::is_stopped) returns `true`,
+    /// until the worker exits.
     ///
     /// ```no_run
     /// # fn f(handle: dial9_core::handle::Dial9Handle) {

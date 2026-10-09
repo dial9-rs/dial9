@@ -136,8 +136,9 @@ async fn run_background_task_inner(
     let metrics_sink = config.metrics_sink.clone();
     let trigger = config.trigger.take();
     let state = config.state.take();
-    // Dropped after `run_fut`, so `Stopped` is published after the processors
-    // drop. Each exit below records its cause first.
+    // Declared before `run_fut` so it drops after it: `Stopped` is published
+    // once the stages have dropped (tasks they spawned may still be running).
+    // Each exit below records its cause first.
     let stopped = state.clone().map(state::StoppedOnDrop);
     let record = |cause| {
         if let Some(stopped) = &stopped {

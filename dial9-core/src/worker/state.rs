@@ -44,9 +44,9 @@ impl PipelineState {
         }
     }
 
-    // Release/Acquire: a reader that sees `RUNNING` and then reads what a
-    // stage's `initialize()` stored (e.g. the S3 client slot) sees the stored
-    // value. The stage's own lock doesn't order that read after this one.
+    // Release/Acquire keeps the status consistent with the stages: a reader that
+    // sees `Running` also sees what their `initialize()` built, such as the S3
+    // stage's client.
     pub(crate) fn set_initializing(&self, stage: usize) {
         debug_assert!(stage < self.stages.len(), "stage index out of range");
         self.phase.store(stage, Ordering::Release);
