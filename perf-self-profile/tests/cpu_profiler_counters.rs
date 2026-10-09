@@ -39,10 +39,11 @@ fn count_samples(batches: &[Vec<u8>], source: u8) -> u64 {
             .expect("encoded batch should have a valid trace header");
         decoder
             .for_each_event(|raw| {
-                if let Ok(DecodedEvent::CpuSampleEvent(sample)) = raw.deserialize()
-                    && sample.source == source
-                {
-                    n += 1;
+                // Other event types decode to `Other`, so an error here is a
+                // decode failure.
+                match raw.deserialize().expect("event should deserialize") {
+                    DecodedEvent::CpuSampleEvent(sample) if sample.source == source => n += 1,
+                    _ => {}
                 }
             })
             .expect("encoded batch should decode");

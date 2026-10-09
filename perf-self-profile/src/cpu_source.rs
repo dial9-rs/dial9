@@ -331,8 +331,7 @@ impl CpuProfiler {
                     .include_kernel(false),
             )?,
         };
-        // Ask this sampler, not the process-wide ctimer flag: another
-        // profiler's ctimer sets that flag.
+        // `Auto` resolves inside the sampler, which reports what it picked.
         let active_backend = sampler.backend();
         Ok(Self {
             sampler,
