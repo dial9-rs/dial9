@@ -234,14 +234,14 @@ where
     Teardown: FnOnce(),
 {
     let fs = writer.fs_handle()?;
-    // Covers a panic in `thread_init` or the runtime build, before
-    // `run_background_task_inner` sets its own guard; without it, the status
-    // would stay `Initializing` forever.
-    let stopped = config.state.clone().map(state::StoppedOnDrop);
+    let pipeline_state = config.state.clone();
     Some(crate::primitives::thread::spawn_named(
         "dial9-worker",
         move || {
-            let _stopped = stopped;
+            // Covers a panic before `run_background_task_inner` sets its own
+            // guard, which would leave the status `Initializing`. Created in
+            // the thread so a failed spawn doesn't drop it.
+            let _stopped = pipeline_state.map(state::StoppedOnDrop);
             let teardown = thread_init();
             run_background_task(config, shutdown, fs);
             teardown();

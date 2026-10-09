@@ -369,9 +369,8 @@ crate::shuttle_test! {
 
 crate::shuttle_test! {
     default;
-    // The worker's published state only moves forward (initializing, then
-    // running, then stopped), and shutdown always leaves it stopped, however
-    // the reads interleave with initialization and the exit guard.
+    // Under any interleaving, readers see the state only move forward
+    // (initializing, running, stopped), and it ends stopped.
     fn shuttle_pipeline_state_races_shutdown() {
         use crate::pipeline::WorkerState;
         use state::PipelineState;

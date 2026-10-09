@@ -32,7 +32,7 @@ pub(crate) struct PipelineState {
     /// constants above.
     phase: AtomicUsize,
     /// Why the worker stopped. Recorded before `phase` becomes `STOPPED`, so a
-    /// reader that sees `STOPPED` always finds a cause.
+    /// reader that sees `STOPPED` finds a cause.
     cause: Mutex<Option<StopCause>>,
 }
 
@@ -95,7 +95,7 @@ impl StoppedOnDrop {
     pub(crate) fn record_initialize_failed(&self) {
         let phase = self.0.phase.load(Ordering::Acquire);
         // An `initialize()` error only comes from the stage `phase` points
-        // at, so this always finds it; if it didn't, nothing is recorded and
+        // at, so this finds it; if it didn't, nothing is recorded and
         // the guard reports `Panicked`.
         match self.0.stages.get(phase) {
             Some(stage) => self.record(StopCause::InitializeFailed {
@@ -111,20 +111,19 @@ impl StoppedOnDrop {
 
 impl Drop for StoppedOnDrop {
     fn drop(&mut self) {
-        {
+        let had_cause = {
             let mut cause = self.0.cause.lock().unwrap();
-            if cause.is_none() {
-                if !std::thread::panicking() {
-                    debug_assert!(false, "pipeline worker exited without recording why");
-                    tracing::error!(
-                        target: "dial9_worker",
-                        "pipeline worker exited without recording why"
-                    );
-                }
-                *cause = Some(StopCause::Panicked);
-            }
-        }
+            let had_cause = cause.is_some();
+            cause.get_or_insert(StopCause::Panicked);
+            had_cause
+        };
         self.0.phase.store(STOPPED, Ordering::Release);
+        // Checked after publishing, so a failing check leaves a consistent
+        // status behind.
+        if !had_cause && !std::thread::panicking() {
+            tracing::error!(target: "dial9_worker", "pipeline worker exited without recording why");
+            debug_assert!(false, "pipeline worker exited without recording why");
+        }
     }
 }
 

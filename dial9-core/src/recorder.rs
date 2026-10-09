@@ -338,8 +338,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
             let hook = self.thread_init.clone();
             let worker = crate::worker::spawn(&writer, config, rx, move || hook())
                 .map(|wt| crate::recording::WorkerHandle::new(tx, wt));
-            // No worker, no status: a status here would report `Initializing`
-            // forever.
+            // No worker, no status: a status here would stay `Initializing`.
             let state = worker.is_some().then_some(state);
             (worker, state)
         };
