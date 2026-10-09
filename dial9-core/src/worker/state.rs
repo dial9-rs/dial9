@@ -81,8 +81,8 @@ impl PipelineState {
 
 /// Marks the worker [`Stopped`](WorkerState::Stopped) when dropped, so every
 /// exit path is covered: normal exit, initialization error, panic, drain
-/// timeout. An exit that recorded no cause is a panic before
-/// `run_background_task_inner` got to record one.
+/// timeout. Without a recorded cause, a panic must be unwinding past the
+/// guard; anything else is a bug.
 pub(crate) struct StoppedOnDrop(pub(crate) Arc<PipelineState>);
 
 impl StoppedOnDrop {
@@ -111,13 +111,26 @@ impl StoppedOnDrop {
 
 impl Drop for StoppedOnDrop {
     fn drop(&mut self) {
-        self.record(StopCause::Panicked);
+        {
+            let mut cause = self.0.cause.lock().unwrap();
+            if cause.is_none() {
+                if !std::thread::panicking() {
+                    debug_assert!(false, "pipeline worker exited without recording why");
+                    tracing::error!(
+                        target: "dial9_worker",
+                        "pipeline worker exited without recording why"
+                    );
+                }
+                *cause = Some(StopCause::Panicked);
+            }
+        }
         self.0.phase.store(STOPPED, Ordering::Release);
     }
 }
 
 #[cfg(all(test, not(shuttle)))]
 mod tests {
+    use super::{PipelineState, StoppedOnDrop};
     use crate::buffer::MemoryBuffer;
     use crate::pipeline::{
         PipelineStage, ProcessError, SegmentData, SegmentProcessor, StopCause, WorkerState,
@@ -126,6 +139,7 @@ mod tests {
     use crate::recording::Recorder;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     type ProcessFuture<'a> =
@@ -265,5 +279,32 @@ mod tests {
                 .pipeline_status()
                 .is_none()
         );
+    }
+
+    /// A panic unwinding past the guard is reported as `Panicked`.
+    #[test]
+    fn a_panic_past_the_guard_is_panicked() {
+        let state = Arc::new(PipelineState::new(vec!["Stage"]));
+        let guarded = Arc::clone(&state);
+        let result = std::panic::catch_unwind(move || {
+            let _stopped = StoppedOnDrop(guarded);
+            panic!("worker panicked");
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            state.status().worker_state(),
+            &WorkerState::Stopped {
+                cause: StopCause::Panicked
+            }
+        );
+    }
+
+    /// Exiting without a cause and without a panic is a bug, caught in debug
+    /// builds.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "pipeline worker exited without recording why")]
+    fn exiting_without_a_cause_is_a_bug() {
+        drop(StoppedOnDrop(Arc::new(PipelineState::new(vec!["Stage"]))));
     }
 }
