@@ -98,6 +98,9 @@ pub use dial9_tokio_telemetry::telemetry::{
     TaskDumpConfig, TokioAttachOptions, TokioHooks,
 };
 
+#[cfg(feature = "unstable-task-sampling")]
+pub use dial9_tokio_telemetry::telemetry::TaskSamplingConfig;
+
 /// Offline trace reading and analysis.
 #[cfg(all(feature = "tokio", feature = "analysis"))]
 pub mod analysis {

@@ -4,6 +4,9 @@ edition = "2024"
 version = "0.1.0"
 publish = false
 
+[features]
+unstable-task-sampling = ["dial9/unstable-task-sampling"]
+
 [dependencies]
 tokio = { version = "1.51.0", features = ["rt-multi-thread", "macros", "time", "sync", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }

@@ -132,6 +132,9 @@ worker-s3 = ["tokio", "dep:dial9-destinations-s3", "dial9-tokio-telemetry/worker
 ## Async backtraces at Tokio yield points (Linux only).
 taskdump = ["tokio", "dial9-tokio-telemetry/taskdump"]
 
+## Experimental per-worker task sampling. API and behavior may change. Linux-only.
+unstable-task-sampling = ["taskdump", "dial9-tokio-telemetry/unstable-task-sampling"]
+
 ## TCP accept-queue depth sampling as a standalone `Source` (Linux only).
 ## Auto-wires into the Tokio runtime when the `tokio` feature is also on.
 linux-socket = [

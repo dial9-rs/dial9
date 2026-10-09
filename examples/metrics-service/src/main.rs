@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
+#[cfg(feature = "unstable-task-sampling")]
+use dial9::TaskSamplingConfig;
 #[cfg(target_os = "linux")]
 use dial9::cpu::{CpuProfilingConfig, SchedEventConfig};
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
@@ -91,6 +93,11 @@ struct Args {
 
     #[arg(long, help = "Disable task dump capture")]
     no_task_dumps: bool,
+
+    /// Use experimental task sampling instead of legacy task dumps (target, not a cap).
+    #[arg(long, conflicts_with = "no_task_dumps", value_parser = clap::value_parser!(u32).range(1..))]
+    #[cfg(feature = "unstable-task-sampling")]
+    task_sampling_per_worker_hz: Option<u32>,
 
     #[arg(long, help = "Spawn a task that leaks memory continuously")]
     leak: bool,
@@ -253,17 +260,26 @@ fn main() -> std::io::Result<()> {
             .idle_threshold(Duration::from_millis(5))
             .build()
     });
+    #[cfg(feature = "unstable-task-sampling")]
+    let task_dumps = task_dumps.filter(|_| args.task_sampling_per_worker_hz.is_none());
+
+    let options = TokioAttachOptions::builder()
+        .task_tracking_enabled(true)
+        .maybe_task_dump_config(task_dumps);
+    #[cfg(feature = "unstable-task-sampling")]
+    let options =
+        options.maybe_task_sampling_config(args.task_sampling_per_worker_hz.map(|rate| {
+            TaskSamplingConfig::builder()
+                .captures_per_second_per_worker(rate)
+                .build()
+        }));
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all().worker_threads(args.worker_threads);
 
-    let runtime = recorder.handle().attach_tokio_runtime(
-        builder,
-        TokioAttachOptions::builder()
-            .task_tracking_enabled(true)
-            .maybe_task_dump_config(task_dumps)
-            .build(),
-    )?;
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, options.build())?;
 
     // In demo mode, attach a second named runtime ("io") sharing the same trace
     // session and run a small background workload on it. This makes the demo
