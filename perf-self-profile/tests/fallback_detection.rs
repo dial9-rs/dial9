@@ -181,7 +181,8 @@ fn auto_reports_perf_while_another_profiler_runs_ctimer() {
 }
 
 /// With perf blocked, `with_cpu_profiling` (perf backend) and
-/// `with_sched_events` register `StartFailed` placeholders.
+/// `with_sched_events` register `StartFailed` placeholders, whose errors say
+/// how to allow `perf_event_open`.
 #[cfg(feature = "cpu-profiling")]
 #[test]
 fn failed_profilers_register_placeholders_when_perf_event_open_blocked() {
@@ -199,11 +200,12 @@ fn failed_profilers_register_placeholders_when_perf_event_open_blocked() {
             .with_sched_events(SchedEventConfig::default())
             .build();
         let h = rec.handle();
+        let says_how = |m: String| m.contains("perf_event_paranoid");
         let ok = h
-            .with_source(|_: &mut StartFailed<CpuProfiler>| ())
-            .is_some()
-            && h.with_source(|_: &mut StartFailed<SchedProfiler>| ())
-                .is_some()
+            .with_source(|f: &mut StartFailed<CpuProfiler>| f.message().to_string())
+            .is_some_and(says_how)
+            && h.with_source(|f: &mut StartFailed<SchedProfiler>| f.message().to_string())
+                .is_some_and(says_how)
             && h.with_source(|_: &mut CpuProfiler| ()).is_none()
             && h.with_source(|_: &mut SchedProfiler| ()).is_none();
         rec.graceful_shutdown(std::time::Duration::ZERO);

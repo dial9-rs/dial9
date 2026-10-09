@@ -31,6 +31,19 @@ impl std::fmt::Debug for PerfSampler {
     }
 }
 
+/// `"; <how to allow it>"` when `err` says `perf_event_open` was denied, else
+/// `""`. Ends up in the profiler's start error, and from there in the trace.
+fn enable_perf_hint(err: &io::Error) -> &'static str {
+    match err.raw_os_error() {
+        Some(libc::EACCES | libc::EPERM) => {
+            "; to enable it, set kernel.perf_event_paranoid to 1 or lower, grant \
+             CAP_PERFMON (CAP_SYS_ADMIN before Linux 5.8), or allow perf_event_open \
+             in the container's seccomp profile"
+        }
+        _ => "",
+    }
+}
+
 /// Returns `true` if the error indicates `perf_event_open` is blocked by
 /// the kernel (seccomp, perf_event_paranoid, missing syscall).
 pub(crate) fn is_perf_blocked(err: &io::Error) -> bool {
@@ -54,7 +67,11 @@ impl PerfSampler {
     /// Returns an error if `perf_event_open` is blocked or fails for any reason.
     #[cfg(feature = "cpu-profiling")]
     pub(crate) fn start_perf_only(config: SamplerConfig) -> io::Result<Self> {
-        let perf = PerfSamplerImpl::start_for_pid(0, &config)?;
+        let perf =
+            PerfSamplerImpl::start_for_pid(0, &config).map_err(|e| match enable_perf_hint(&e) {
+                "" => e,
+                hint => io::Error::new(e.kind(), format!("{e}{hint}")),
+            })?;
         Ok(Self {
             inner: Box::new(perf),
         })
@@ -150,7 +167,8 @@ impl PerfSampler {
                     io::ErrorKind::Unsupported,
                     format!(
                         "perf_event_open blocked ({e}) and event-based sampling \
-                         has no userspace fallback (requires kernel support)"
+                         has no userspace fallback (requires kernel support){}",
+                        enable_perf_hint(&e)
                     ),
                 )),
             },
@@ -230,6 +248,18 @@ impl PerfSampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A denied `perf_event_open` says how to allow it; a missing one doesn't.
+    #[test]
+    fn denied_perf_errors_say_how_to_enable_it() {
+        for errno in [libc::EACCES, libc::EPERM] {
+            let hint = enable_perf_hint(&io::Error::from_raw_os_error(errno));
+            assert!(hint.contains("perf_event_paranoid"), "{errno}: {hint}");
+        }
+        for errno in [libc::ENOSYS, libc::EOPNOTSUPP] {
+            assert_eq!(enable_perf_hint(&io::Error::from_raw_os_error(errno)), "");
+        }
+    }
 
     #[test]
     fn is_perf_blocked_recognizes_blocked_errors() {
