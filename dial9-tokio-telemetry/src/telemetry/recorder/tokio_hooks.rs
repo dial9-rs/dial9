@@ -65,8 +65,7 @@ impl TokioHook<TaskMetaCb> {
 /// [`Dial9Handle::current`](crate::telemetry::Dial9Handle::current) there falls
 /// back to the process-global handle, if one is installed.
 ///
-/// Registering the same hook multiple times (either within one closure or
-/// across multiple `with_tokio_hooks` calls) stacks the callbacks — all
+/// Registering the same hook multiple times stacks the callbacks — all
 /// registered callbacks will fire.
 ///
 /// # Example

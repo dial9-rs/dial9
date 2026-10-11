@@ -74,9 +74,9 @@ use std::io;
 pub trait RecorderPipelineExt<M: BufferMode>: sealed::Sealed + Sized {
     /// Replace the default pipeline with your own processors, run verbatim.
     ///
-    /// Nothing is added for you, so chain
-    /// [`symbolize`](crate::background_task::PipelineBuilder::symbolize)
-    /// yourself if the trace has CPU samples. Disk-only steps like
+    /// Nothing is added for you, so chain `.symbolize()` on the
+    /// [`PipelineBuilder`](crate::background_task::PipelineBuilder) yourself if
+    /// the trace has CPU samples (`cpu-profiling` feature). Disk-only steps like
     /// [`write_back`](crate::background_task::PipelineBuilder::write_back) are
     /// out of scope on a memory writer (compile error).
     fn with_custom_pipeline<F>(self, build: F) -> Self
