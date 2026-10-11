@@ -50,10 +50,10 @@
 //! Shut down in that order or the workers' last events never reach the trace.
 //! `#[dial9::main]` does it for you.
 
-use super::register_runtime_hooks;
 use super::runtime_context::{
     RuntimeContext, RuntimeContextRegistry, TokioRuntimesSource, WorkerIdCounter,
 };
+use super::{install_user_hooks, register_runtime_hooks};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
 use crate::telemetry::task_dump_config::TaskDumpConfig;
@@ -188,8 +188,9 @@ pub struct TokioAttachOptions {
     /// `runtime.{name}`.
     #[builder(into)]
     runtime_name: Option<String>,
-    /// Install dial9's Tokio runtime hooks. When `false`, attaching is a no-op
-    /// and the runtime you build records nothing. Default `true`.
+    /// Install dial9's Tokio runtime hooks. When `false`, dial9 installs none
+    /// of its own hooks and the runtime records nothing; hooks passed via
+    /// `tokio_hooks` are still installed. Default `true`.
     #[builder(default = true)]
     tokio_instrumentation_enabled: bool,
     /// Record task spawn/terminate events for this runtime. Default `false`.
@@ -210,7 +211,8 @@ pub struct TokioAttachOptions {
     ///
     /// </div>
     task_dump_config: Option<TaskDumpConfig>,
-    /// User-composed Tokio hooks, run after dial9's own.
+    /// User-composed Tokio hooks, run after dial9's own. Installed even when
+    /// the recorder is disabled or `tokio_instrumentation_enabled` is `false`.
     #[builder(default)]
     tokio_hooks: super::TokioHooks,
 }
@@ -260,7 +262,8 @@ pub trait Dial9HandleTokioExt: dial9_handle_tokio_ext_sealed::Sealed {
     ///
     /// On a disabled recorder this still returns a working, untraced runtime, as
     /// does `tokio_instrumentation_enabled(false)`, which skips instrumentation
-    /// for this runtime only.
+    /// for this runtime only. Hooks passed via
+    /// [`TokioHooks`](super::TokioHooks) are installed in both cases.
     ///
     /// Do not set builder thread/task callbacks directly (`on_thread_start` and
     /// friends) because dial9 installs its own and would overwrite yours. Pass
@@ -418,6 +421,7 @@ where
     R: AttachedTokioRuntime,
 {
     if !handle.is_connected() {
+        install_user_hooks(&mut builder, options.tokio_hooks);
         return build(builder);
     }
     if handle.is_stopped() {
@@ -426,6 +430,7 @@ where
         ));
     }
     if !options.tokio_instrumentation_enabled {
+        install_user_hooks(&mut builder, options.tokio_hooks);
         return build(builder);
     }
     let Some(state) = tokio_attach_state(handle) else {

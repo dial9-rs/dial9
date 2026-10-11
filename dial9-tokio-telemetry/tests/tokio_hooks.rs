@@ -628,3 +628,191 @@ fn hook_stacking_task_meta_hooks_fire_in_order() {
         "expected poll_a before poll_b, got: {entries:?}"
     );
 }
+
+/// Regression test for #1005: a disabled recorder must still install user hooks.
+#[test]
+fn thread_hooks_fire_on_disabled_recorder() {
+    let start_count = Arc::new(AtomicUsize::new(0));
+    let stop_count = Arc::new(AtomicUsize::new(0));
+    let park_count = Arc::new(AtomicUsize::new(0));
+    let unpark_count = Arc::new(AtomicUsize::new(0));
+    let (sc, stc, pc, uc) = (
+        start_count.clone(),
+        stop_count.clone(),
+        park_count.clone(),
+        unpark_count.clone(),
+    );
+
+    let num_workers = 2;
+    let recorder = dial9_core::recorder::recorder_disabled();
+
+    let mut hooks = TokioHooks::default();
+    hooks
+        .on_thread_start(move || {
+            sc.fetch_add(1, Ordering::Relaxed);
+        })
+        .on_thread_stop(move || {
+            stc.fetch_add(1, Ordering::Relaxed);
+        })
+        .on_thread_park(move || {
+            pc.fetch_add(1, Ordering::Relaxed);
+        })
+        .on_thread_unpark(move || {
+            uc.fetch_add(1, Ordering::Relaxed);
+        });
+
+    let rt = common::attach(
+        &recorder,
+        num_workers,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
+
+    rt.block_on(async {
+        for _ in 0..4 {
+            tokio::spawn(tokio::time::sleep(Duration::from_millis(5)))
+                .await
+                .unwrap();
+        }
+    });
+
+    drop(rt);
+    drop(recorder);
+
+    for (name, count) in [
+        ("on_thread_start", &start_count),
+        ("on_thread_stop", &stop_count),
+    ] {
+        assert!(
+            count.load(Ordering::Relaxed) >= num_workers,
+            "expected {name} to fire at least {num_workers} times on a disabled recorder, got {}",
+            count.load(Ordering::Relaxed)
+        );
+    }
+    for (name, count) in [
+        ("on_thread_park", &park_count),
+        ("on_thread_unpark", &unpark_count),
+    ] {
+        assert!(
+            count.load(Ordering::Relaxed) > 0,
+            "expected {name} to fire on a disabled recorder"
+        );
+    }
+}
+
+#[cfg(tokio_unstable)]
+#[test]
+fn task_hooks_fire_on_disabled_recorder() {
+    let spawn_count = Arc::new(AtomicUsize::new(0));
+    let terminate_count = Arc::new(AtomicUsize::new(0));
+    let before_poll_count = Arc::new(AtomicUsize::new(0));
+    let after_poll_count = Arc::new(AtomicUsize::new(0));
+    let (sc, tc, bc, ac) = (
+        spawn_count.clone(),
+        terminate_count.clone(),
+        before_poll_count.clone(),
+        after_poll_count.clone(),
+    );
+
+    let num_tasks = 5;
+    let recorder = dial9_core::recorder::recorder_disabled();
+
+    let mut hooks = TokioHooks::default();
+    hooks
+        .on_task_spawn(move |_meta| {
+            sc.fetch_add(1, Ordering::Relaxed);
+        })
+        .on_task_terminate(move |_meta| {
+            tc.fetch_add(1, Ordering::Relaxed);
+        })
+        .on_before_task_poll(move |_meta| {
+            bc.fetch_add(1, Ordering::Relaxed);
+        })
+        .on_after_task_poll(move |_meta| {
+            ac.fetch_add(1, Ordering::Relaxed);
+        });
+
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .tokio_hooks(hooks)
+            .build(),
+    );
+
+    rt.block_on(async {
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            handles.push(tokio::spawn(async {
+                tokio::task::yield_now().await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+    });
+
+    drop(rt);
+    drop(recorder);
+
+    for (name, count) in [
+        ("on_task_spawn", &spawn_count),
+        ("on_task_terminate", &terminate_count),
+        ("on_before_task_poll", &before_poll_count),
+        ("on_after_task_poll", &after_poll_count),
+    ] {
+        assert!(
+            count.load(Ordering::Relaxed) >= num_tasks,
+            "expected {name} to fire at least {num_tasks} times on a disabled recorder, got {}",
+            count.load(Ordering::Relaxed)
+        );
+    }
+}
+
+/// `attach_tokio_local_runtime` shares the attach path; check it too. A
+/// current-thread runtime fires no `on_thread_start` for the `block_on`
+/// thread, so this checks park/unpark.
+#[test]
+fn local_runtime_hooks_fire_on_disabled_recorder() {
+    use dial9_tokio_telemetry::telemetry::Dial9HandleTokioExt;
+
+    let park_count = Arc::new(AtomicUsize::new(0));
+    let unpark_count = Arc::new(AtomicUsize::new(0));
+    let (pc, uc) = (park_count.clone(), unpark_count.clone());
+
+    let recorder = dial9_core::recorder::recorder_disabled();
+
+    let mut hooks = TokioHooks::default();
+    hooks
+        .on_thread_park(move || {
+            pc.fetch_add(1, Ordering::Relaxed);
+        })
+        .on_thread_unpark(move || {
+            uc.fetch_add(1, Ordering::Relaxed);
+        });
+
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    let rt = recorder
+        .handle()
+        .attach_tokio_local_runtime(
+            builder,
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+        )
+        .expect("build local runtime");
+
+    rt.block_on(async { tokio::time::sleep(Duration::from_millis(5)).await });
+
+    drop(rt);
+    drop(recorder);
+
+    for (name, count) in [
+        ("on_thread_park", &park_count),
+        ("on_thread_unpark", &unpark_count),
+    ] {
+        assert!(
+            count.load(Ordering::Relaxed) > 0,
+            "expected {name} to fire on a disabled recorder's local runtime"
+        );
+    }
+}

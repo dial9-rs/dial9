@@ -371,8 +371,9 @@ DIAL9_CPU_PROFILE_ENABLED=true
 DIAL9_TOKIO_INSTRUMENTATION_ENABLED=false
 ```
 
-In this mode, dial9 does not install Tokio runtime hooks. APIs that depend on
-those hooks will not observe runtime context.
+In this mode, dial9 does not install its own Tokio runtime hooks. APIs that
+depend on those hooks will not observe runtime context. Hooks you pass via
+`TokioHooks` are still installed.
 
 #### System requirements
 - `perf_event_paranoid`: CPU profiling requires <= 2. `sched_events` requires <= 1.
@@ -669,6 +670,8 @@ let runtime = recorder
 ```
 
 dial9's internal hooks always run first, then your callbacks fire in registration order. This ensures `Dial9Handle::current()` is available in your `on_thread_start` callback. Registering the same hook multiple times stacks the callbacks — all of them will fire.
+
+Your hooks are also installed when dial9 does not instrument the runtime (a disabled recorder, or `tokio_instrumentation_enabled(false)`). There they run alone, so `Dial9Handle::current()` falls back to the process-global handle, if one is installed.
 
 **Important:** Do not set thread or task hooks on the `tokio::runtime::Builder` you hand to `attach_tokio_runtime`; dial9 installs its own and yours would be overwritten. Always go through `TokioHooks` so your callbacks compose with dial9's instrumentation.
 

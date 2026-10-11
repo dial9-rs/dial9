@@ -205,6 +205,39 @@ fn register_hooks(
     });
 }
 
+/// Install only the user's hooks, for a runtime dial9 does not instrument
+/// (disabled recorder or `tokio_instrumentation_enabled(false)`). Unset hooks
+/// are left alone.
+fn install_user_hooks(builder: &mut tokio::runtime::Builder, tokio_hooks: TokioHooks) {
+    if let Some(hook) = tokio_hooks.on_thread_start {
+        builder.on_thread_start(move || hook.execute());
+    }
+    if let Some(hook) = tokio_hooks.on_thread_stop {
+        builder.on_thread_stop(move || hook.execute());
+    }
+    if let Some(hook) = tokio_hooks.on_thread_park {
+        builder.on_thread_park(move || hook.execute());
+    }
+    if let Some(hook) = tokio_hooks.on_thread_unpark {
+        builder.on_thread_unpark(move || hook.execute());
+    }
+    #[cfg(tokio_unstable)]
+    {
+        if let Some(hook) = tokio_hooks.on_task_spawn {
+            builder.on_task_spawn(move |meta| hook.execute(meta));
+        }
+        if let Some(hook) = tokio_hooks.on_task_terminate {
+            builder.on_task_terminate(move |meta| hook.execute(meta));
+        }
+        if let Some(hook) = tokio_hooks.on_before_task_poll {
+            builder.on_before_task_poll(move |meta| hook.execute(meta));
+        }
+        if let Some(hook) = tokio_hooks.on_after_task_poll {
+            builder.on_after_task_poll(move |meta| hook.execute(meta));
+        }
+    }
+}
+
 /// Register telemetry hooks and return a runtime context.
 /// Worker IDs are reserved lazily on the first poll.
 fn register_runtime_hooks(
@@ -346,12 +379,14 @@ mod tests {
     }
 
     #[test]
-    fn tokio_instrumentation_can_be_disabled_without_installing_hooks() {
+    fn tokio_instrumentation_disabled_still_installs_user_hooks() {
         let (capture, data) = CapturingProcessor::new();
-        let hook_calls = Arc::new(AtomicUsize::new(0));
-        let on_thread_start_calls = hook_calls.clone();
+        let thread_start_calls = Arc::new(AtomicUsize::new(0));
+        let on_thread_start_calls = thread_start_calls.clone();
         #[cfg(tokio_unstable)]
-        let on_before_poll_calls = hook_calls.clone();
+        let before_poll_calls = Arc::new(AtomicUsize::new(0));
+        #[cfg(tokio_unstable)]
+        let on_before_poll_calls = before_poll_calls.clone();
 
         let mut hooks = TokioHooks::default();
         hooks.on_thread_start(move || {
@@ -410,14 +445,21 @@ mod tests {
             !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "disabled Tokio instrumentation should not produce runtime metadata after running work"
         );
-        assert_eq!(
-            hook_calls.load(Ordering::Relaxed),
-            0,
-            "user Tokio hooks should not be installed when Tokio instrumentation is disabled"
-        );
 
         drop(rt);
         rec.graceful_shutdown(Duration::from_secs(1));
+
+        assert!(
+            thread_start_calls.load(Ordering::Relaxed) >= 2,
+            "user on_thread_start should fire for each worker when Tokio instrumentation is disabled, got {}",
+            thread_start_calls.load(Ordering::Relaxed)
+        );
+        #[cfg(tokio_unstable)]
+        assert!(
+            before_poll_calls.load(Ordering::Relaxed) >= 8,
+            "user on_before_task_poll should fire for each task when Tokio instrumentation is disabled, got {}",
+            before_poll_calls.load(Ordering::Relaxed)
+        );
 
         let raw = data.lock().unwrap();
         let events = if raw.is_empty() {

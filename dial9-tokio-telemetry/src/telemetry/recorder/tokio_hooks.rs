@@ -59,6 +59,12 @@ impl TokioHook<TaskMetaCb> {
 /// first, then the user callbacks fire in registration order. This applies to
 /// all 8 hooks.
 ///
+/// The callbacks are installed even when dial9 does not instrument the runtime
+/// (a disabled recorder, or `tokio_instrumentation_enabled(false)`). They then
+/// run alone: dial9 installs no thread-local handle on the runtime's threads, so
+/// [`Dial9Handle::current`](crate::telemetry::Dial9Handle::current) there falls
+/// back to the process-global handle, if one is installed.
+///
 /// Registering the same hook multiple times (either within one closure or
 /// across multiple `with_tokio_hooks` calls) stacks the callbacks — all
 /// registered callbacks will fire.
