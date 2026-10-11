@@ -107,7 +107,7 @@ pub struct Sample {
     /// The actual period for this sample.
     pub period: u64,
     /// Stack frames from the callchain.
-    /// First entry is the instruction pointer (leaf), rest are return addresses.
+    /// First entry is the instruction pointer (leaf), rest are return addresses minus one.
     /// Kernel context markers and hypervisor frames are filtered out.
     pub callchain: Vec<u64>,
     /// Raw tracepoint data, present only for [`EventSource::Tracepoint`] events.

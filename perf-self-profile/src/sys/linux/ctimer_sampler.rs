@@ -12,7 +12,7 @@ use super::fp_profiler::{
     self, ctimer, sample_buffer,
     unwind::{self, MAX_FRAMES},
 };
-use super::gettid;
+use super::{call_site_addr, gettid};
 
 use super::sampler::SamplerBackend;
 use libc::{timer_getoverrun, timer_settime};
@@ -105,6 +105,10 @@ impl SamplerBackend for CtimerSampler {
             let n = (raw.num_frames as usize).min(MAX_FRAMES);
             sample.callchain.clear();
             sample.callchain.extend_from_slice(&raw.frames[..n]);
+            // Frame 0 is the interrupted PC; the rest are return addresses.
+            for ret in sample.callchain.iter_mut().skip(1) {
+                *ret = call_site_addr(*ret);
+            }
             sample.ip = sample.callchain.first().copied().unwrap_or(0);
             sample.pid = raw.pid;
             sample.tid = raw.tid;

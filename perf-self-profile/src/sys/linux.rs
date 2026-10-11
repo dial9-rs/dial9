@@ -23,6 +23,12 @@ pub(crate) const USER_ADDR_LIMIT: u64 = 0x8000_0000_0000_0000;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("perf-self-profile: USER_ADDR_LIMIT not defined for this architecture");
 
+/// Address inside the call instruction, which symbolizes to the call site.
+#[inline]
+pub(crate) fn call_site_addr(return_addr: u64) -> u64 {
+    return_addr.saturating_sub(1)
+}
+
 /// Thread ID of the calling thread.
 #[inline]
 pub(crate) fn gettid() -> libc::pid_t {

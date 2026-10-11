@@ -11,7 +11,7 @@ use perf_event_data::Record;
 use perf_event_data::endian::Little;
 use perf_event_data::parse::{ParseConfig, Parser};
 use perf_event_open_sys::bindings::{
-    PERF_CONTEXT_MAX as PERF_CONTEXT_START_MARKER, PERF_COUNT_HW_CPU_CYCLES,
+    PERF_CONTEXT_MAX as PERF_CONTEXT_START_MARKER, PERF_CONTEXT_USER, PERF_COUNT_HW_CPU_CYCLES,
     PERF_COUNT_SW_CONTEXT_SWITCHES, PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK,
     PERF_FLAG_FD_CLOEXEC, PERF_SAMPLE_CALLCHAIN, PERF_SAMPLE_CPU, PERF_SAMPLE_IP,
     PERF_SAMPLE_PERIOD, PERF_SAMPLE_RAW, PERF_SAMPLE_TID, PERF_SAMPLE_TIME, PERF_TYPE_HARDWARE,
@@ -19,6 +19,7 @@ use perf_event_open_sys::bindings::{
 };
 
 use super::USER_ADDR_LIMIT;
+use super::call_site_addr;
 use super::gettid;
 use super::ring_buffer::{RingBuffer, page_size};
 use crate::sampler::{EventSource, Sample, SamplerConfig};
@@ -389,9 +390,22 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
 
 /// Filter a raw perf callchain, removing zero addresses, perf context markers
 /// (PERF_CONTEXT_KERNEL, PERF_CONTEXT_USER, etc.), and optionally kernel addresses.
+/// User return addresses become call-site addresses.
 fn filter_callchain(raw: &[u64], include_kernel: bool) -> Vec<u64> {
+    let sampled_pc = raw
+        .iter()
+        .position(|&a| a == PERF_CONTEXT_USER)
+        .map_or(0, |marker| marker + 1);
     raw.iter()
         .copied()
+        .enumerate()
+        .map(|(i, a)| {
+            if i == sampled_pc || a >= USER_ADDR_LIMIT {
+                a
+            } else {
+                call_site_addr(a)
+            }
+        })
         .filter(|&a| {
             a != 0 && a < PERF_CONTEXT_START_MARKER && (include_kernel || a < USER_ADDR_LIMIT)
         })
@@ -441,7 +455,7 @@ mod tests {
 
     #[test]
     fn filter_callchain_removes_zeros_and_context_markers() {
-        let raw = [0, 0x1000, PERF_CONTEXT_START_MARKER, 0x2000, 0];
+        let raw = [PERF_CONTEXT_USER, 0x1000, 0, 0x2001, 0];
         let result = filter_callchain(&raw, false);
         assert_eq!(result, vec![0x1000, 0x2000]);
     }
@@ -460,6 +474,13 @@ mod tests {
         let user_addr = 0x5555_0000_1000u64;
         let raw = [user_addr, kernel_addr];
         assert_eq!(filter_callchain(&raw, true), vec![user_addr, kernel_addr]);
+    }
+
+    #[test]
+    fn filter_callchain_adjusts_user_return_addrs_but_not_the_sampled_pc() {
+        let (pc, ret) = (0x5555_0000_1000u64, 0x5555_0000_2000u64);
+        let raw = [PERF_CONTEXT_USER, pc, ret];
+        assert_eq!(filter_callchain(&raw, false), vec![pc, ret - 1]);
     }
 
     #[test]
