@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 14405,
+  "total_samples": 9523,
   "by_source": {
-    "0": 190,
-    "1": 14215
+    "0": 84,
+    "1": 9439
   },
   "on_off_all": {
-    "on_runtime": 14379,
-    "off_runtime": 26
+    "on_runtime": 9508,
+    "off_runtime": 15
   },
   "on_off_by_source": {
     "0": {
-      "on": 164,
-      "off": 26
+      "on": 69,
+      "off": 15
     },
     "1": {
-      "on": 14215,
+      "on": 9439,
       "off": 0
     }
   },
@@ -26,18 +26,13 @@
     3
   ],
   "cpu_profile": {
-    "count": 190,
-    "distinct_stacks": 151,
-    "stack_sig_digest": "0293365dce8ccf83",
-    "ts_count": 190,
-    "ts_span_ns": 4487783336,
-    "ts_delta_digest": "8d4657f0e04eeb4d",
+    "count": 84,
+    "distinct_stacks": 68,
+    "stack_sig_digest": "d645eae97c0696cd",
+    "ts_count": 84,
+    "ts_span_ns": 3904353959,
+    "ts_delta_digest": "bcd9ef17ac315379",
     "top_stacks": [
-      {
-        "count": 10,
-        "depth": 1,
-        "leaf": "__lll_unlock_wake"
-      },
       {
         "count": 9,
         "depth": 1,
@@ -46,32 +41,37 @@
       {
         "count": 5,
         "depth": 1,
-        "leaf": "dl_iterate_phdr"
+        "leaf": "_Unwind_IteratePhdrCallback"
       },
       {
-        "count": 4,
-        "depth": 1,
-        "leaf": "_int_malloc"
+        "count": 2,
+        "depth": 87,
+        "leaf": "uw_frame_state_for"
       },
       {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__strlen_sse2"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__malloc"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__pthread_mutex_unlock_usercnt"
+        "count": 2,
+        "depth": 3,
+        "leaf": "get_cie"
       },
       {
         "count": 2,
         "depth": 1,
-        "leaf": "[unknown] 0x7f59f31543aa"
+        "leaf": "uw_update_context_1"
+      },
+      {
+        "count": 2,
+        "depth": 2,
+        "leaf": "execute_cfa_program"
+      },
+      {
+        "count": 1,
+        "depth": 104,
+        "leaf": "<aws_smithy_runtime::client::http::body::minimum_throughput::MaybeUploadThroughputCheckFuture as core::future::future::Future>::poll"
+      },
+      {
+        "count": 1,
+        "depth": 47,
+        "leaf": "epoll_wait"
       }
     ]
   }
