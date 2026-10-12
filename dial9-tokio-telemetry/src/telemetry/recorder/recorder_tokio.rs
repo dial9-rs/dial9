@@ -205,13 +205,13 @@ fn apply_s3_uploader<M: BufferMode, P: SegmentProcessor + 'static>(
     mut config: S3Config,
     configure: impl FnOnce(S3Config) -> P,
 ) -> RecorderBuilder<M> {
+    if let Some(boot_id) = builder.writer_boot_id() {
+        config.set_boot_id(boot_id);
+    }
     let metadata: Vec<(String, String)> = config
         .as_metadata()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    if let Some(boot_id) = builder.writer_boot_id() {
-        config.set_boot_id(boot_id);
-    }
     builder
         .segment_metadata(metadata)
         .terminal_processor(configure(config))
@@ -253,8 +253,10 @@ impl SegmentProcessor for S3FallbackProcessor {
     fn initialize(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async move {
             self.uploader.initialize().await?;
-            if self.uploader.is_disabled() {
-                self.active_processor().initialize().await?;
+            if self.uploader.is_disabled()
+                && let Some(write_back) = &mut self.write_back
+            {
+                write_back.initialize().await?;
             }
             Ok(())
         })

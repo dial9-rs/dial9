@@ -28,7 +28,7 @@ use std::time::Duration;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 struct MemoryWorkingDirectory {
-    original: PathBuf,
+    original: Option<PathBuf>,
     directory: tempfile::TempDir,
     _lock: MutexGuard<'static, ()>,
 }
@@ -41,7 +41,7 @@ impl MemoryWorkingDirectory {
         let directory = tempfile::tempdir().unwrap();
         std::env::set_current_dir(directory.path()).unwrap();
         Self {
-            original,
+            original: Some(original),
             directory,
             _lock: lock,
         }
@@ -55,11 +55,26 @@ impl MemoryWorkingDirectory {
                 .is_none()
         );
     }
+
+    fn restore(mut self) -> std::io::Result<()> {
+        if let Some(original) = self.original.take() {
+            std::env::set_current_dir(original)?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for MemoryWorkingDirectory {
     fn drop(&mut self) {
-        std::env::set_current_dir(&self.original).unwrap();
+        if let Some(original) = &self.original
+            && let Err(error) = std::env::set_current_dir(original)
+        {
+            tracing::error!(
+                %error,
+                path = %original.display(),
+                "Failed to restore test working directory"
+            );
+        }
     }
 }
 
@@ -536,14 +551,15 @@ fn custom_disk_pipeline_bypasses_only_s3_without_implicit_writeback() {
 }
 
 #[test]
-fn custom_memory_pipeline_keeps_alternate_consumer_without_writing_files() {
+fn custom_memory_pipeline_keeps_alternate_consumer_without_writing_files() -> std::io::Result<()> {
     let directory = MemoryWorkingDirectory::new();
     assert_custom_disable_s3(memory_writer());
     directory.assert_no_files();
+    directory.restore()
 }
 
 #[test]
-fn disable_s3_memory_preset_discards_processed_data_but_keeps_recording() {
+fn disable_s3_memory_preset_discards_processed_data_but_keeps_recording() -> std::io::Result<()> {
     let directory = MemoryWorkingDirectory::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let metrique_writer::test_util::TestEntrySink { inspector, sink } =
@@ -594,6 +610,7 @@ fn disable_s3_memory_preset_discards_processed_data_but_keeps_recording() {
         assert!(!entry.metrics.contains_key("S3Upload.Success"));
     }
     directory.assert_no_files();
+    directory.restore()
 }
 
 fn assert_worker_stopped(handle: &Dial9Handle) {
