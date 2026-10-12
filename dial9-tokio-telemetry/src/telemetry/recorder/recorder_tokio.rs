@@ -121,14 +121,15 @@ impl<M: BufferMode> RecorderPipelineExt<M> for RecorderBuilder<M> {
 
     #[cfg(feature = "worker-s3")]
     fn with_s3_uploader(self, config: S3Config) -> Self {
-        apply_s3_uploader(self, config, |uploader| uploader)
+        apply_s3_uploader(self, config, |config| {
+            crate::background_task::S3PipelineUploader::new(config, None)
+        })
     }
 
     #[cfg(feature = "worker-s3")]
     fn with_s3_uploader_client(self, config: S3Config, client: aws_sdk_s3::Client) -> Self {
-        apply_s3_uploader(self, config, |mut uploader| {
-            uploader.set_client(client);
-            uploader
+        apply_s3_uploader(self, config, |config| {
+            crate::background_task::S3PipelineUploader::new(config, Some(client))
         })
     }
 }
@@ -152,8 +153,9 @@ impl<M: BufferMode> RecorderS3ClientExt<M> for RecorderBuilder<M> {
     where
         F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static,
     {
-        apply_s3_uploader(self, config, |uploader| {
-            uploader.with_client_future(client_future)
+        apply_s3_uploader(self, config, |config| {
+            crate::background_task::S3PipelineUploader::new(config, None)
+                .with_client_future(client_future)
         })
     }
 }
@@ -161,18 +163,12 @@ impl<M: BufferMode> RecorderS3ClientExt<M> for RecorderBuilder<M> {
 /// Fallible asynchronous S3 client construction on the recorder's worker.
 #[cfg(feature = "worker-s3")]
 pub trait RecorderTryS3Ext<M: BufferMode>: sealed::Sealed + Sized {
-    /// Upload to S3 using a client future returning an explicit failure policy.
+    /// Upload to S3 using a
+    /// [`FailureBehavior`](dial9_destinations_s3::FailureBehavior) policy.
     ///
     /// Construction runs once on the pipeline worker, not the caller's runtime.
     /// `build` does not wait for it. Put setup inside the future's async body.
-    /// `DisableS3` preserves source processors and compression; disk writers
-    /// write back locally. Memory writers discard processed data without
-    /// another consumer. Custom pipelines override this preset entirely.
-    ///
-    /// `DisableDial9` permanently disables recording, even across `enable`,
-    /// but does not delete existing files or replace normal shutdown.
-    /// Log the underlying error before returning the policy. Upload failures
-    /// after successful construction keep their existing retry behavior.
+    /// Custom pipelines override this preset entirely.
     fn try_s3_async<F>(self, config: S3Config, client_future: F) -> Self
     where
         F: std::future::Future<
@@ -190,8 +186,11 @@ impl<M: BufferMode> RecorderTryS3Ext<M> for RecorderBuilder<M> {
             > + Send
             + 'static,
     {
-        apply_s3_uploader(self, config, |uploader| S3RecorderTerminal {
-            uploader: uploader.with_fallible_client_future(client_future),
+        apply_s3_uploader(self, config, |config| S3FallbackProcessor {
+            uploader: crate::background_task::S3PipelineUploader::from_client_future()
+                .config(config)
+                .client_future(client_future)
+                .build(),
             write_back: M::IS_DISK.then(crate::background_task::WriteBackProcessor::default),
         })
     }
@@ -203,31 +202,29 @@ impl<M: BufferMode> RecorderTryS3Ext<M> for RecorderBuilder<M> {
 #[cfg(feature = "worker-s3")]
 fn apply_s3_uploader<M: BufferMode, P: SegmentProcessor + 'static>(
     builder: RecorderBuilder<M>,
-    config: S3Config,
-    configure: impl FnOnce(crate::background_task::S3PipelineUploader) -> P,
+    mut config: S3Config,
+    configure: impl FnOnce(S3Config) -> P,
 ) -> RecorderBuilder<M> {
     let metadata: Vec<(String, String)> = config
         .as_metadata()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    let boot_id = builder.writer_boot_id().map(str::to_owned);
-    let mut uploader = crate::background_task::S3PipelineUploader::new(config, None);
-    if let Some(boot_id) = boot_id {
-        uploader.set_boot_id(boot_id);
+    if let Some(boot_id) = builder.writer_boot_id() {
+        config.set_boot_id(boot_id);
     }
     builder
         .segment_metadata(metadata)
-        .terminal_processor(configure(uploader))
+        .terminal_processor(configure(config))
 }
 
 #[cfg(feature = "worker-s3")]
-struct S3RecorderTerminal {
+struct S3FallbackProcessor {
     uploader: crate::background_task::S3PipelineUploader,
     write_back: Option<crate::background_task::WriteBackProcessor>,
 }
 
 #[cfg(feature = "worker-s3")]
-impl S3RecorderTerminal {
+impl S3FallbackProcessor {
     fn active_processor(&mut self) -> &mut dyn SegmentProcessor {
         if self.uploader.is_disabled()
             && let Some(write_back) = &mut self.write_back
@@ -239,7 +236,7 @@ impl S3RecorderTerminal {
 }
 
 #[cfg(feature = "worker-s3")]
-impl SegmentProcessor for S3RecorderTerminal {
+impl SegmentProcessor for S3FallbackProcessor {
     fn name(&self) -> &'static str {
         if self.uploader.is_disabled()
             && let Some(write_back) = &self.write_back

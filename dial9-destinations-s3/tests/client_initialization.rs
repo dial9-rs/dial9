@@ -23,22 +23,23 @@ async fn cancelled_initialization_resumes_and_caches_each_outcome() {
         let (complete_tx, complete_rx) = oneshot::channel();
         let calls = Arc::new(AtomicUsize::new(0));
         let future_calls = calls.clone();
-        let mut uploader = S3PipelineUploader::new(
-            S3Config::builder()
-                .bucket("unused")
-                .service_name("test")
-                .region("us-east-1")
-                .build(),
-            None,
-        )
-        .with_fallible_client_future(async move {
-            let not_sync = Cell::new(0);
-            future_calls.fetch_add(1, Ordering::SeqCst);
-            started_tx.send(()).unwrap();
-            let result = complete_rx.await.unwrap();
-            not_sync.set(1);
-            result
-        });
+        let mut uploader = S3PipelineUploader::from_client_future()
+            .config(
+                S3Config::builder()
+                    .bucket("unused")
+                    .service_name("test")
+                    .region("us-east-1")
+                    .build(),
+            )
+            .client_future(async move {
+                let not_sync = Cell::new(0);
+                future_calls.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                let result = complete_rx.await.unwrap();
+                not_sync.set(1);
+                result
+            })
+            .build();
 
         let mut initialization = uploader.initialize();
         tokio::select! {

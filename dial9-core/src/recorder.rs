@@ -333,15 +333,15 @@ impl<M: BufferMode> RecorderBuilder<M> {
                 .metrics_sink
                 .clone()
                 .unwrap_or_else(metrique::writer::sink::DevNullSink::boxed);
-            let mut config = crate::worker::BackgroundTaskConfig::builder()
+            let config = crate::worker::BackgroundTaskConfig::builder()
                 .maybe_trace_dir(M::IS_DISK.then(|| writer.trace_dir().to_path_buf()))
                 .maybe_trace_stem(M::IS_DISK.then(|| writer.trace_stem().to_string()))
                 .poll_interval(poll)
                 .processors(processors)
                 .metrics_sink(metrics)
                 .maybe_trigger(self.trigger)
+                .recording_state(shared.clone())
                 .build();
-            config.recording_state = Some(shared.clone());
             let (tx, rx) = tokio::sync::oneshot::channel();
             let hook = self.thread_init.clone();
             crate::worker::spawn(&writer, config, rx, move || hook())

@@ -58,9 +58,8 @@ pub struct BackgroundTaskConfig {
     /// and the pipeline only runs on an explicit dump request. Wired by the
     /// facade builder; absent for continuous processing.
     trigger: Option<crate::dump::DumpRx>,
-    #[builder(skip)]
-    pub(crate) recording_state:
-        Option<crate::primitives::sync::Arc<crate::shared_state::SharedState>>,
+    #[builder(setters(vis = "pub(crate)"))]
+    recording_state: Option<crate::primitives::sync::Arc<crate::shared_state::SharedState>>,
 }
 
 impl std::fmt::Debug for BackgroundTaskConfig {

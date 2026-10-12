@@ -17,6 +17,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 struct FailingProcessor {
     error: Option<io::Error>,
     initialized: Arc<AtomicUsize>,
+    processed: Arc<AtomicUsize>,
 }
 
 impl SegmentProcessor for FailingProcessor {
@@ -26,17 +27,19 @@ impl SegmentProcessor for FailingProcessor {
 
     fn initialize(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         self.initialized.fetch_add(1, Ordering::SeqCst);
-        Box::pin(std::future::ready(Err(self
-            .error
-            .take()
-            .expect("initialized only once"))))
+        let error = match self.error.take() {
+            Some(error) => error,
+            None => io::Error::other("processor initialized more than once"),
+        };
+        Box::pin(std::future::ready(Err(error)))
     }
 
     fn process(
         &mut self,
-        _data: SegmentData,
+        data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
-        panic!("failed processor must not process segments")
+        self.processed.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::ready(Ok(data)))
     }
 }
 
@@ -44,6 +47,7 @@ struct WorkerGate {
     release: mpsc::Sender<()>,
     stopped: mpsc::Receiver<()>,
     initialized: Arc<AtomicUsize>,
+    processed: Arc<AtomicUsize>,
 }
 
 impl WorkerGate {
@@ -53,6 +57,7 @@ impl WorkerGate {
             .recv_timeout(TIMEOUT)
             .expect("worker teardown completes");
         assert_eq!(self.initialized.load(Ordering::SeqCst), 1);
+        assert_eq!(self.processed.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -61,10 +66,12 @@ fn failing_recorder(error: io::Error) -> (RecorderBuilder<Memory>, WorkerGate) {
     let (stopped_tx, stopped_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
     let initialized = Arc::new(AtomicUsize::new(0));
+    let processed = Arc::new(AtomicUsize::new(0));
     let builder = recorder(MemoryBuffer::new(1 << 20).expect("writer"))
         .pipe(FailingProcessor {
             error: Some(error),
             initialized: initialized.clone(),
+            processed: processed.clone(),
         })
         .on_recording_thread_start(move || {
             let is_worker = std::thread::current().name() == Some("dial9-worker");
@@ -88,6 +95,7 @@ fn failing_recorder(error: io::Error) -> (RecorderBuilder<Memory>, WorkerGate) {
             release: release_tx,
             stopped: stopped_rx,
             initialized,
+            processed,
         },
     )
 }
@@ -97,27 +105,6 @@ fn permanent_failure() -> io::Error {
         io::ErrorKind::PermissionDenied,
         DisableRecording::new(io::Error::other("destination authorization failed")),
     )
-}
-
-#[test]
-fn failure_before_initial_enable_cannot_be_reenabled() {
-    let (builder, worker) = failing_recorder(permanent_failure());
-    let recorder = builder.paused().build();
-    worker.finish();
-
-    let handle = recorder.handle();
-    assert!(handle.is_connected());
-    assert!(!handle.is_stopped());
-    handle.enable();
-    assert!(!handle.is_enabled());
-    recorder.enable();
-    assert!(!handle.is_enabled());
-    handle.disable();
-    recorder.enable();
-    assert!(!handle.is_enabled());
-    handle.record_event_with(|| -> dial9_core::format::ClockSyncEvent {
-        panic!("permanently disabled recording must not construct events")
-    });
 }
 
 #[test]
@@ -134,39 +121,45 @@ fn paused_failure_refuses_enable_without_running_start_hooks() {
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     worker.finish();
 
+    let handle = recorder.handle();
+    assert!(handle.is_connected());
+    assert!(!handle.is_stopped());
+    handle.enable();
+    assert!(!handle.is_enabled());
     recorder.enable();
+    assert!(!handle.is_enabled());
+    handle.disable();
+    recorder.enable();
+    assert!(!handle.is_enabled());
+    handle.record_event_with(|| -> dial9_core::format::ClockSyncEvent {
+        panic!("permanently disabled recording must not construct events")
+    });
     recorder.disable();
     recorder.enable();
-    assert!(!recorder.handle().is_enabled());
+    assert!(!handle.is_enabled());
     assert_eq!(starts.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn initialization_failure_disables_already_enabled_recording() {
-    let (builder, worker) = failing_recorder(permanent_failure());
-    let recorder = builder.build();
-    assert!(recorder.handle().is_enabled());
-    worker.finish();
-
-    assert!(!recorder.handle().is_enabled());
-    recorder.enable();
-    assert!(!recorder.handle().is_enabled());
-}
-
-#[test]
-fn nested_io_errors_do_not_hide_permanent_failure() {
-    for depth in 1..=3 {
+fn wrapped_failures_disable_already_enabled_recording() {
+    let io_errors = (0..=3).map(|depth| {
         let mut error = permanent_failure();
         for _ in 0..depth {
             error = io::Error::other(error);
         }
+        error
+    });
+    let context_error =
+        io::Error::other(InitializationContext(io::Error::other(permanent_failure())));
+    for error in io_errors.chain(std::iter::once(context_error)) {
         let (builder, worker) = failing_recorder(error);
         let recorder = builder.build();
+        assert!(recorder.handle().is_enabled());
         worker.finish();
 
-        assert!(!recorder.handle().is_enabled(), "I/O wrapper depth {depth}");
+        assert!(!recorder.handle().is_enabled());
         recorder.enable();
-        assert!(!recorder.handle().is_enabled(), "I/O wrapper depth {depth}");
+        assert!(!recorder.handle().is_enabled());
     }
 }
 
@@ -183,18 +176,6 @@ impl Error for InitializationContext {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Some(&self.0)
     }
-}
-
-#[test]
-fn error_sources_and_io_payloads_are_both_checked_for_permanent_failure() {
-    let error = io::Error::other(InitializationContext(io::Error::other(permanent_failure())));
-    let (builder, worker) = failing_recorder(error);
-    let recorder = builder.build();
-    worker.finish();
-
-    assert!(!recorder.handle().is_enabled());
-    recorder.enable();
-    assert!(!recorder.handle().is_enabled());
 }
 
 struct NoopSource;
@@ -258,17 +239,22 @@ fn ordinary_initialization_failure_allows_enable_and_start_hooks_once() {
 async fn initialization_error_preserves_processor_and_io_context() {
     let source = io::Error::from_raw_os_error(libc::EACCES);
     let message = source.to_string();
+    let initialized = Arc::new(AtomicUsize::new(0));
+    let processed = Arc::new(AtomicUsize::new(0));
     let error = dial9_core::test_util::run_pipeline_continuous(
         Vec::new(),
         vec![Box::new(FailingProcessor {
             error: Some(source),
-            initialized: Arc::new(AtomicUsize::new(0)),
+            initialized: initialized.clone(),
+            processed: processed.clone(),
         })],
         Duration::from_secs(1),
     )
     .await
     .expect_err("initialization fails");
 
+    assert_eq!(initialized.load(Ordering::SeqCst), 1);
+    assert_eq!(processed.load(Ordering::SeqCst), 0);
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(
         error.to_string(),

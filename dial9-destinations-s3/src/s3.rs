@@ -485,6 +485,8 @@ pub struct S3PipelineUploader {
 /// What to do when asynchronous S3 client construction fails.
 ///
 /// Applies only to the constructor's result, not later upload failures.
+/// Log the original error before returning a policy; dial9 receives only the
+/// policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FailureBehavior {
@@ -500,10 +502,10 @@ pub enum FailureBehavior {
 
 impl std::fmt::Display for FailureBehavior {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::DisableDial9 => "S3 client construction failed; disabling dial9",
-            Self::DisableS3 => "S3 client construction failed; disabling S3 uploads",
-        })
+        match self {
+            Self::DisableDial9 => f.write_str("S3 client construction failed (DisableDial9)"),
+            Self::DisableS3 => f.write_str("S3 client construction failed (DisableS3)"),
+        }
     }
 }
 
@@ -562,6 +564,7 @@ impl std::fmt::Debug for S3PipelineUploader {
     }
 }
 
+#[bon::bon]
 impl S3PipelineUploader {
     fn default_client_source(s3_config: &S3Config) -> S3ClientSource {
         let operation_attempt_timeout = s3_config.operation_attempt_timeout();
@@ -603,34 +606,45 @@ impl S3PipelineUploader {
     /// The future is created by the caller and driven to completion once on the
     /// worker's Tokio runtime. If initialization is cancelled while pending,
     /// a later attempt resumes the same pinned future.
+    ///
+    /// # Panics
+    ///
+    /// Panics if client initialization has already completed.
     #[must_use]
-    pub fn with_client_future<F>(self, client_future: F) -> Self
+    pub fn with_client_future<F>(mut self, client_future: F) -> Self
     where
         F: Future<Output = aws_sdk_s3::Client> + Send + 'static,
     {
-        self.with_fallible_client_future(async move { Ok(client_future.await) })
-    }
-
-    /// Construct a client on the pipeline worker, with an explicit failure
-    /// policy. The result is cached, including failures; initialization never
-    /// restarts the future. Cancellation resumes the same pinned future.
-    ///
-    /// Log the underlying construction error before returning a failure policy.
-    /// dial9 logs the policy, but does not receive the original error.
-    #[must_use]
-    pub fn with_fallible_client_future<F>(mut self, client_future: F) -> Self
-    where
-        F: Future<Output = Result<aws_sdk_s3::Client, FailureBehavior>> + Send + 'static,
-    {
         match &mut self.state {
             S3UploaderState::Pending { client_source, .. } => {
-                *client_source = S3ClientSource::Future(S3ClientFuture::new(client_future));
+                *client_source =
+                    S3ClientSource::Future(S3ClientFuture::new(
+                        async move { Ok(client_future.await) },
+                    ));
             }
             S3UploaderState::Ready { .. } | S3UploaderState::Failed(_) => {
-                unreachable!("with_fallible_client_future called after uploader initialization")
+                unreachable!("with_client_future called after uploader initialization")
             }
         }
         self
+    }
+
+    /// Build a fresh uploader with a fallible client future.
+    ///
+    /// The worker caches the result, including [`FailureBehavior`]. Cancelled
+    /// initialization resumes the same pinned future.
+    #[builder(finish_fn = build)]
+    pub fn from_client_future<F>(config: S3Config, client_future: F) -> Self
+    where
+        F: Future<Output = Result<aws_sdk_s3::Client, FailureBehavior>> + Send + 'static,
+    {
+        Self {
+            state: S3UploaderState::Pending {
+                s3_config: config,
+                client_source: S3ClientSource::Future(S3ClientFuture::new(client_future)),
+            },
+            dump_keys: HashMap::new(),
+        }
     }
 
     /// Whether client construction selected [`FailureBehavior::DisableS3`].
@@ -646,8 +660,10 @@ impl S3PipelineUploader {
 
     /// Set (or override) the pre-built S3 client. Must be called before the
     /// pipeline worker initializes the uploader.
-    /// Note: the only caller is the builder, which runs before the
-    /// worker is spawned, so reaching the `Ready` arm is a programmer error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if client initialization has already completed.
     pub fn set_client(&mut self, client: aws_sdk_s3::Client) {
         match &mut self.state {
             S3UploaderState::Pending { client_source, .. } => {
@@ -682,8 +698,7 @@ impl S3PipelineUploader {
     }
 
     /// Override the pending config's boot_id so S3 keys use the on-disk
-    /// namespace identity. The builder calls this before the worker spawns, so
-    /// the `Ready` arm is unreachable in practice; a no-op there keeps it safe.
+    /// namespace identity. Has no effect after initialization.
     pub fn set_boot_id(&mut self, boot_id: impl Into<String>) {
         if let S3UploaderState::Pending { s3_config, .. } = &mut self.state {
             s3_config.set_boot_id(boot_id);
@@ -691,7 +706,7 @@ impl S3PipelineUploader {
     }
 
     /// Construct an uploader directly in the `Ready` state. Test-only;
-    /// production code goes through [`new`](Self::new) and worker initialization.
+    /// production code initializes on the pipeline worker.
     #[cfg(test)]
     pub(crate) fn from_ready(
         uploader: S3Uploader,
@@ -744,7 +759,11 @@ impl S3PipelineUploader {
                             Err(behavior) => {
                                 self.state = S3UploaderState::Failed(behavior);
                                 if behavior == FailureBehavior::DisableS3 {
-                                    tracing::warn!(target: "dial9_worker", %behavior);
+                                    tracing::warn!(
+                                        target: "dial9_worker",
+                                        ?behavior,
+                                        "S3 client construction failed; disabling S3 uploads"
+                                    );
                                 }
                                 return behavior.initialization_result();
                             }

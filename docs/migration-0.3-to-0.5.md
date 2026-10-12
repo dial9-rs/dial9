@@ -532,13 +532,10 @@ let recorder = dial9::recorder(writer)
 Here `create_s3_client` is your fallible setup function. Log its original error
 before returning a policy; do not substitute a dummy client.
 
-`DisableDial9` permanently disables this recorder and stops its pipeline.
-Existing files remain, and normal shutdown is still required.
-`DisableS3` preserves recording and other processors. The disk preset falls
-back to local gzip write-back under the writer's existing retention settings.
-Custom pipelines bypass only the S3 stage and add no disk I/O; memory pipelines
-need another consumer to retain processed data. Neither policy changes later
-upload retries after successful construction.
+Choose `DisableDial9` to permanently disable recording, or `DisableS3` to keep
+recording without uploads. See
+[S3 configuration](../dial9/README.md#exporting-data-to-s3) for disk and memory
+retention, shutdown, and retry behavior.
 
 ---
 

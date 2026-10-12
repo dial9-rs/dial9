@@ -212,7 +212,7 @@ impl Snapshot {
 enum Visit {
     Initialize(&'static str),
     Process(&'static str, Snapshot),
-    Finalize(&'static str, String, usize, Vec<(String, String)>),
+    Finalize(&'static str, String, usize, Vec<(String, String)>, bool),
 }
 
 #[derive(Debug)]
@@ -258,12 +258,12 @@ impl SegmentProcessor for Observe {
         &mut self,
         completion: &DumpCompletion,
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
-        assert!(!completion.failed);
         self.visits.lock().unwrap().push(Visit::Finalize(
             self.name,
             completion.dump_id.to_string(),
             completion.segments_processed,
             completion.metadata.clone(),
+            completion.failed,
         ));
         Box::pin(async { None })
     }
@@ -508,6 +508,7 @@ fn assert_custom_disable_s3<M: BufferMode>(writer: SegmentWriter<M>) {
                     receipt.dump_id.to_string(),
                     receipt.segments_processed,
                     vec![("reason".into(), "fallible-s3".into())],
+                    false,
                 ))
             );
             remaining = &remaining[1..];
