@@ -229,30 +229,89 @@ describe("buildBlockingView", () => {
     expect(tokioFrame).toBeTruthy();
   });
 
-  it("removes only a leading scheduler prefix from blocking stacks", () => {
-    const callframes = symbols({
-      sched: "__schedule",
-      schedule: "schedule",
-      futex: "futex_wait_queue",
-      nested: "schedule",
-    });
-    const entries = [
-      {
-        sample: cpu(10, 1, ["sched", "schedule", "futex", "nested"]),
+  it.each(["leaf", "full"] as const)(
+    "removes only a leading scheduler prefix when grouping by %s",
+    (groupBy) => {
+      const callframes = symbols({
+        sched: "__schedule",
+        schedule: "schedule",
+        futex: "futex_wait_queue",
+        nested: "schedule",
+      });
+      const entries = [
+        {
+          sample: cpu(10, 1, ["sched", "schedule", "futex", "nested"]),
+          poll: poll(0, 100),
+          worker: 0,
+        },
+      ];
+
+      const view = buildBlockingView(entries, callframes, groupBy);
+
+      expect(view.groups[0]?.leafRaw).toBe("futex_wait_queue");
+      expect(view.groups[0]?.subStacks[0]?.frames.map((frame) => frame.text)).toEqual([
+        "futex_wait_queue",
+        "schedule",
+      ]);
+      expect(entries[0]?.sample.callchain).toEqual(["sched", "schedule", "futex", "nested"]);
+    },
+  );
+
+  it.each(["leaf", "full"] as const)(
+    "merges stacks with different scheduler prefixes when grouping by %s",
+    (groupBy) => {
+      const callframes = symbols({
+        sched: "__schedule",
+        schedule: "schedule",
+        futex: "futex_wait_queue",
+        caller: "my_crate::block",
+      });
+      const entries = [
+        ["sched", "schedule", "futex", "caller"],
+        ["schedule", "futex", "caller"],
+        ["futex", "caller"],
+      ].map((callchain, i) => ({
+        sample: cpu(i + 1, 1, callchain),
         poll: poll(0, 100),
         worker: 0,
-      },
-    ];
+      }));
 
-    const view = buildBlockingView(entries, callframes, "leaf");
+      const view = buildBlockingView(entries, callframes, groupBy);
 
-    expect(view.groups[0]?.leafRaw).toBe("futex_wait_queue");
-    expect(view.groups[0]?.subStacks[0]?.frames.map((frame) => frame.text)).toEqual([
-      "futex_wait_queue",
-      "schedule",
-    ]);
-    expect(entries[0]?.sample.callchain).toEqual(["sched", "schedule", "futex", "nested"]);
-  });
+      expect(view.total).toBe(3);
+      expect(view.groups).toHaveLength(1);
+      expect(view.groups[0]?.leafRaw).toBe("futex_wait_queue");
+      expect(view.groups[0]?.count).toBe(3);
+      expect(view.groups[0]?.subStacks).toEqual([
+        {
+          count: 3,
+          pct: 100,
+          frames: [
+            { text: "futex_wait_queue", docsUrl: null, isTokio: false },
+            { text: "my_crate::block", docsUrl: null, isTokio: false },
+          ],
+        },
+      ]);
+    },
+  );
+
+  it.each(["leaf", "full"] as const)(
+    "handles empty and scheduler-only stacks when grouping by %s",
+    (groupBy) => {
+      const callframes = symbols({ sched: "__schedule", schedule: "schedule" });
+      const entries = [[], ["sched", "schedule"]].map((callchain, i) => ({
+        sample: cpu(i + 1, 1, callchain),
+        poll: poll(0, 100),
+        worker: 0,
+      }));
+
+      const view = buildBlockingView(entries, callframes, groupBy);
+
+      expect(view.groups).toHaveLength(1);
+      expect(view.groups[0]?.leafRaw).toBe("(unknown)");
+      expect(view.groups[0]?.subStacks).toEqual([{ count: 2, pct: 100, frames: [] }]);
+    },
+  );
 
   it("range filtering excludes out-of-range polls/samples", () => {
     const entries = collectSchedSamplesInRange(ws, [0], { startNs: 0, endNs: 150 });

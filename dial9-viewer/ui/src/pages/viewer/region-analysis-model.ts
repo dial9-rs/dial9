@@ -492,19 +492,30 @@ export function buildBlockingView(
     leaf: string;
     leafRaw: string;
     count: number;
-    stacks: Map<string, { count: number; frames: { symbol: string; location: string | null }[] }>;
+    stacks: Map<
+      string,
+      { count: number; frames: { symbol: string; location: string | null }[]; framesStart: number }
+    >;
     polls: { poll: PollSpan; worker: number }[];
   }
   const groups = new Map<string, Acc>();
   for (const { sample, poll, worker } of entries) {
     const frames = symbolizeChain(sample.callchain, callframeSymbols);
-    while (frames[0]?.symbol === "__schedule" || frames[0]?.symbol === "schedule") {
-      frames.shift();
+    let framesStart = 0;
+    while (
+      frames[framesStart]?.symbol === "__schedule" ||
+      frames[framesStart]?.symbol === "schedule"
+    ) {
+      framesStart += 1;
     }
-    const first = frames[0];
+    const first = frames[framesStart];
     const leafRaw = first ? first.symbol : "(unknown)";
     const leafDisplay = first ? formatFrame(first).text : "(unknown)";
-    const fullKey = frames.map((f) => f.symbol).join("\0");
+    let fullKey = "";
+    for (let i = framesStart; i < frames.length; i++) {
+      if (i > framesStart) fullKey += "\0";
+      fullKey += frames[i]!.symbol;
+    }
     const key = groupBy === "leaf" ? leafRaw : fullKey;
     let g = groups.get(key);
     if (!g) {
@@ -515,7 +526,7 @@ export function buildBlockingView(
     g.polls.push({ poll, worker });
     let sub = g.stacks.get(fullKey);
     if (!sub) {
-      sub = { count: 0, frames };
+      sub = { count: 0, frames, framesStart };
       g.stacks.set(fullKey, sub);
     }
     sub.count += 1;
@@ -528,7 +539,7 @@ export function buildBlockingView(
       .map((sub) => ({
         count: sub.count,
         pct: g.count > 0 ? Math.round((sub.count / g.count) * 100) : 0,
-        frames: sub.frames.map(frameOf),
+        frames: sub.frames.slice(sub.framesStart).map(frameOf),
       }));
     const examples: BlockingExample[] = g.polls.slice(0, 5).map((p) => ({
       worker: p.worker,
