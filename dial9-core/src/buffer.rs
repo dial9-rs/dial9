@@ -864,10 +864,12 @@ impl<M: BufferMode> SegmentWriter<M> {
         }
 
         let new_index = self.next_index.get();
-        self.next_index = self
-            .next_index
-            .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("trace segment index overflow"))?;
+        let Some(next_index) = self.next_index.checked_add(1) else {
+            // The final sealed segment still counts toward the retention budget.
+            self.evict_oldest()?;
+            return Err(std::io::Error::other("trace segment index overflow"));
+        };
+        self.next_index = next_index;
         let new_path = Self::active_path(&self.dir, &self.stem, new_index);
 
         // Open the new active segment. The backend self-heals if a disk
@@ -1038,11 +1040,13 @@ impl<M: BufferMode> SegmentWriter<M> {
     }
 
     pub(crate) fn should_drain(&self) -> bool {
-        self.has_real_events && time_source().instant().as_std() >= self.next_drain_time
+        matches!(self.state, WriterState::Active { .. })
+            && self.has_real_events
+            && time_source().instant().as_std() >= self.next_drain_time
     }
 
     pub(crate) fn drained(&mut self) -> std::io::Result<bool> {
-        if !self.has_real_events {
+        if matches!(self.state, WriterState::Finished) || !self.has_real_events {
             return Ok(false);
         }
         let now = time_source().instant().as_std();
@@ -1504,6 +1508,77 @@ mod tests {
         assert!(!DiskBuffer::active_path(dir.path(), SEGMENT_STEM, 0).exists());
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn test_rotation_index_overflow_evicts_to_budget() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let retained_index = u32::MAX.checked_sub(2).unwrap();
+        let retained = rotating_file(&base, retained_index);
+        std::fs::write(&retained, vec![0u8; 9_000]).unwrap();
+        let budget = 10_000;
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(budget)
+            .build()
+            .unwrap();
+        assert!(Path::new(&retained).exists());
+        while writer.total_size() <= u128::from(budget) {
+            writer.write_encoded_batch(&test_batch()).unwrap();
+        }
+        assert!(writer.active_bytes() < budget);
+
+        assert_eq!(
+            writer.rotate(SealKind::Drained).unwrap_err().to_string(),
+            "trace segment index overflow"
+        );
+        assert!(
+            total_disk_usage(dir.path()) <= budget,
+            "index exhaustion must enforce the retention budget"
+        );
+        assert!(!Path::new(&retained).exists());
+        let sealed_index = u32::MAX.checked_sub(1).unwrap();
+        assert!(!read_trace_events(&rotating_file(&base, sealed_index)).is_empty());
+
+        writer.finalize().unwrap();
+        assert!(total_disk_usage(dir.path()) <= budget);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timed_rotation_index_overflow_stops_drains() {
+        use metrique_timesource::{TimeSource, tokio::set_time_source_for_current_runtime};
+        let _guard = set_time_source_for_current_runtime(TimeSource::tokio(std::time::UNIX_EPOCH));
+        let dir = TempDir::new().unwrap();
+        let retained_index = u32::MAX.checked_sub(2).unwrap();
+        std::fs::write(dir.path().join(format!("trace.{retained_index}.bin")), []).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(100_000)
+            .rotation_period(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(writer.should_drain());
+        assert_eq!(
+            writer.drained().unwrap_err().to_string(),
+            "trace segment index overflow"
+        );
+        assert!(!writer.should_drain());
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(
+            !writer.should_drain(),
+            "a finished writer must not request drains after its deadlines expire"
+        );
+        assert!(
+            !writer.drained().unwrap(),
+            "a finished writer must not report a rotation"
+        );
     }
 
     #[test]
