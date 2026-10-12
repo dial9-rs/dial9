@@ -194,6 +194,35 @@ pub trait SegmentProcessor: Send {
     }
 }
 
+/// An initialization error that permanently disables the owning recorder.
+///
+/// Return this inside an [`io::Error`] from [`SegmentProcessor::initialize`]
+/// when continuing to record without this pipeline would be undesirable.
+#[derive(Debug)]
+pub struct DisableRecording {
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl DisableRecording {
+    pub fn new(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
+
+impl std::fmt::Display for DisableRecording {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "recording disabled: {}", self.source)
+    }
+}
+
+impl std::error::Error for DisableRecording {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 /// Error returned by a [`SegmentProcessor`].
 ///
 /// Carries the [`SegmentData`] back so the caller can recover it for retry,
