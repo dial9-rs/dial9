@@ -71,3 +71,13 @@ runs:
               # one-process-per-test model avoids that without changing any
               # test to work around it.
               cargo nextest run -p dial9-core --lib
+        - name: Test optimized caller stacks on both CPU sampling backends
+          if: runner.os == 'Linux'
+          shell: bash
+          env:
+              DIAL9_REQUIRE_PERF: "1"
+              RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
+          run: |
+              sudo prlimit --pid $$ --memlock=unlimited:unlimited
+              cargo test --release -p dial9-perf-self-profile \
+                --features cpu-profiling --test call_site_inline_stack
