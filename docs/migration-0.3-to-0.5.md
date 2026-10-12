@@ -502,11 +502,16 @@ The viewer reads both this and the historical layout, and custom `S3KeyFn` outpu
 
 For custom credentials or endpoints, defer client construction to the pipeline worker runtime with `with_s3_uploader_client_future(config, fut)`. The future is polled when the worker starts, and the client (including credential refresh) stays on that runtime.
 
-The trait is `dial9::RecorderS3ClientExt`. The future must be `Send + 'static` and must resolve to `aws_sdk_s3::Client` directly — not `Result<Client, E>`. Handle credential or config initialization errors inside the future; a panic will take down the pipeline worker thread.
+The infallible method uses `dial9::RecorderS3ClientExt`. For fallible
+construction, import `dial9::RecorderTryS3Ext` and use
+`try_s3_async(config, future)`. Its future returns
+`Result<aws_sdk_s3::Client, dial9::s3::FailureBehavior>`. Both methods require
+`Send + 'static`, not `Sync`, and `build()` starts the worker without waiting
+for the future.
 
 ```rust
-use dial9::RecorderS3ClientExt;
-use dial9::s3::S3Config;
+use dial9::RecorderTryS3Ext;
+use dial9::s3::{FailureBehavior, S3Config};
 
 let s3_config = S3Config::builder()
     .bucket("my-bucket")
@@ -515,19 +520,25 @@ let s3_config = S3Config::builder()
     .build();
 
 let recorder = dial9::recorder(writer)
-    .with_s3_uploader_client_future(s3_config, async {
-        // Credential/config errors must be handled here, not propagated.
-        // If initialization fails, degrade to a dummy client or log and
-        // disable telemetry rather than crashing the application.
-        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-        aws_sdk_s3::Client::new(&config)
+    .try_s3_async(s3_config, async move {
+        create_s3_client().await.map_err(|error| {
+            tracing::warn!(%error, "S3 client construction failed");
+            FailureBehavior::DisableDial9
+        })
     })
     .build();
 ```
 
-A good default policy for the error branch is to log the failure and return a client that will fail uploads (the worker retries and eventually drops segments), effectively degrading telemetry instead of taking down the process.
+Here `create_s3_client` is your fallible setup function. Log its original error
+before returning a policy; do not substitute a dummy client.
+
+`DisableDial9` permanently disables this recorder and stops its pipeline.
+Existing files remain, and normal shutdown is still required.
+`DisableS3` preserves recording and other processors. The disk preset falls
+back to local gzip write-back under the writer's existing retention settings.
+Custom pipelines bypass only the S3 stage and add no disk I/O; memory pipelines
+need another consumer to retain processed data. Neither policy changes later
+upload retries after successful construction.
 
 ---
 

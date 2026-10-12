@@ -51,8 +51,8 @@ pub mod core {
     #[cfg(feature = "pipeline")]
     pub mod pipeline {
         pub use dial9_core::pipeline::{
-            MemorySegment, Payload, ProcessError, ProcessErrorKind, SealedSegment, SegmentData,
-            SegmentProcessor, SegmentRef,
+            DisableRecording, MemorySegment, Payload, ProcessError, ProcessErrorKind,
+            SealedSegment, SegmentData, SegmentProcessor, SegmentRef,
         };
 
         /// Offline symbolization processor. Needs the CPU profiler for stack frames.
@@ -68,7 +68,8 @@ pub mod core {
 #[cfg(all(feature = "tokio", feature = "worker-s3"))]
 pub mod s3 {
     pub use dial9_destinations_s3::{
-        InstanceIdentity, KeyContext, S3Config, S3ConfigBuilder, S3KeyFn, S3PipelineUploader,
+        FailureBehavior, InstanceIdentity, KeyContext, S3Config, S3ConfigBuilder, S3KeyFn,
+        S3PipelineUploader,
     };
 }
 
@@ -90,13 +91,13 @@ pub use dial9_tokio_telemetry::{
     TracedFuture, block_on, block_on_local, spawn, spawn_in, spawn_local, spawn_local_in,
 };
 
-#[cfg(all(feature = "tokio", feature = "worker-s3"))]
-pub use dial9_tokio_telemetry::telemetry::RecorderS3ClientExt;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::telemetry::{
     AttachedRuntime, Dial9HandleTokioExt, Dial9TokioHandle, JoinSetExt, RecorderPipelineExt,
     TaskDumpConfig, TokioAttachOptions, TokioHooks,
 };
+#[cfg(all(feature = "tokio", feature = "worker-s3"))]
+pub use dial9_tokio_telemetry::telemetry::{RecorderS3ClientExt, RecorderTryS3Ext};
 
 /// Offline trace reading and analysis.
 #[cfg(all(feature = "tokio", feature = "analysis"))]

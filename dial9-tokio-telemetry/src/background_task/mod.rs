@@ -137,6 +137,30 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
         ));
         self
     }
+
+    /// Construct the S3 client on the pipeline worker with an explicit failure
+    /// policy. `DisableS3` passes segments through unchanged; `DisableDial9`
+    /// stops the pipeline and permanently disables recording.
+    ///
+    /// Does not add gzip or disk write-back. Log the original construction
+    /// error before returning the policy.
+    #[cfg(feature = "worker-s3")]
+    pub fn try_s3_async<F>(
+        mut self,
+        config: dial9_destinations_s3::S3Config,
+        client_future: F,
+    ) -> Self
+    where
+        F: std::future::Future<
+                Output = Result<aws_sdk_s3::Client, dial9_destinations_s3::FailureBehavior>,
+            > + Send
+            + 'static,
+    {
+        self.processors.push(Box::new(
+            S3PipelineUploader::new(config, None).with_fallible_client_future(client_future),
+        ));
+        self
+    }
 }
 
 /// Disk-only methods on the pipeline builder.

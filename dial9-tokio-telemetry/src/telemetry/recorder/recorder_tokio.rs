@@ -59,11 +59,15 @@ use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
 use crate::telemetry::task_dump_config::TaskDumpConfig;
 use dial9_core::buffer::BufferMode;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
+#[cfg(feature = "worker-s3")]
+use dial9_core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
 use dial9_core::recorder::RecorderBuilder;
 use dial9_core::recording::Recorder;
 #[cfg(feature = "worker-s3")]
 use dial9_destinations_s3::S3Config;
 use std::io;
+#[cfg(feature = "worker-s3")]
+use std::{future::Future, pin::Pin};
 
 /// dial9 pipeline presets on the recorder builder.
 ///
@@ -154,30 +158,124 @@ impl<M: BufferMode> RecorderS3ClientExt<M> for RecorderBuilder<M> {
     }
 }
 
+/// Fallible asynchronous S3 client construction on the recorder's worker.
+#[cfg(feature = "worker-s3")]
+pub trait RecorderTryS3Ext<M: BufferMode>: sealed::Sealed + Sized {
+    /// Upload to S3 using a client future returning an explicit failure policy.
+    ///
+    /// Construction runs once on the pipeline worker, not the caller's runtime.
+    /// `build` does not wait for it. Put setup inside the future's async body.
+    /// `DisableS3` preserves source processors and compression; disk writers
+    /// write back locally. Memory writers discard processed data without
+    /// another consumer. Custom pipelines override this preset entirely.
+    ///
+    /// `DisableDial9` permanently disables recording, even across `enable`,
+    /// but does not delete existing files or replace normal shutdown.
+    /// Log the underlying error before returning the policy. Upload failures
+    /// after successful construction keep their existing retry behavior.
+    fn try_s3_async<F>(self, config: S3Config, client_future: F) -> Self
+    where
+        F: std::future::Future<
+                Output = Result<aws_sdk_s3::Client, dial9_destinations_s3::FailureBehavior>,
+            > + Send
+            + 'static;
+}
+
+#[cfg(feature = "worker-s3")]
+impl<M: BufferMode> RecorderTryS3Ext<M> for RecorderBuilder<M> {
+    fn try_s3_async<F>(self, config: S3Config, client_future: F) -> Self
+    where
+        F: std::future::Future<
+                Output = Result<aws_sdk_s3::Client, dial9_destinations_s3::FailureBehavior>,
+            > + Send
+            + 'static,
+    {
+        apply_s3_uploader(self, config, |uploader| S3RecorderTerminal {
+            uploader: uploader.with_fallible_client_future(client_future),
+            write_back: M::IS_DISK.then(crate::background_task::WriteBackProcessor::default),
+        })
+    }
+}
+
 /// Make S3 the pipeline's terminal stage and fold the S3 config (bucket,
 /// service, prefix, region) into the recorder's segment metadata, so consumers
 /// can see where a trace was uploaded.
 #[cfg(feature = "worker-s3")]
-fn apply_s3_uploader<M: BufferMode>(
+fn apply_s3_uploader<M: BufferMode, P: SegmentProcessor + 'static>(
     builder: RecorderBuilder<M>,
     config: S3Config,
-    configure: impl FnOnce(
-        crate::background_task::S3PipelineUploader,
-    ) -> crate::background_task::S3PipelineUploader,
+    configure: impl FnOnce(crate::background_task::S3PipelineUploader) -> P,
 ) -> RecorderBuilder<M> {
     let metadata: Vec<(String, String)> = config
         .as_metadata()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     let boot_id = builder.writer_boot_id().map(str::to_owned);
-    let uploader = crate::background_task::S3PipelineUploader::new(config, None);
-    let mut uploader = configure(uploader);
+    let mut uploader = crate::background_task::S3PipelineUploader::new(config, None);
     if let Some(boot_id) = boot_id {
         uploader.set_boot_id(boot_id);
     }
     builder
         .segment_metadata(metadata)
-        .terminal_processor(uploader)
+        .terminal_processor(configure(uploader))
+}
+
+#[cfg(feature = "worker-s3")]
+struct S3RecorderTerminal {
+    uploader: crate::background_task::S3PipelineUploader,
+    write_back: Option<crate::background_task::WriteBackProcessor>,
+}
+
+#[cfg(feature = "worker-s3")]
+impl S3RecorderTerminal {
+    fn active_processor(&mut self) -> &mut dyn SegmentProcessor {
+        if self.uploader.is_disabled()
+            && let Some(write_back) = &mut self.write_back
+        {
+            return write_back;
+        }
+        &mut self.uploader
+    }
+}
+
+#[cfg(feature = "worker-s3")]
+impl SegmentProcessor for S3RecorderTerminal {
+    fn name(&self) -> &'static str {
+        if self.uploader.is_disabled()
+            && let Some(write_back) = &self.write_back
+        {
+            return write_back.name();
+        }
+        self.uploader.name()
+    }
+
+    fn wait_until_live(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.active_processor().wait_until_live()
+    }
+
+    fn initialize(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            self.uploader.initialize().await?;
+            if self.uploader.is_disabled() {
+                self.active_processor().initialize().await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn process(
+        &mut self,
+        data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        self.active_processor().process(data)
+    }
+
+    fn finalize_dump(
+        &mut self,
+        completion: &dial9_core::dump::DumpCompletion,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        self.active_processor().finalize_dump(completion)
+    }
 }
 
 /// Per-runtime attach settings. All optional; runtime-scoped only (session-wide

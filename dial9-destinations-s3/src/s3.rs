@@ -482,14 +482,55 @@ pub struct S3PipelineUploader {
     pub(crate) dump_keys: HashMap<String, Vec<String>>,
 }
 
-type BoxedS3ClientFuture = Pin<Box<dyn Future<Output = aws_sdk_s3::Client> + Send + 'static>>;
+/// What to do when asynchronous S3 client construction fails.
+///
+/// Applies only to the constructor's result, not later upload failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FailureBehavior {
+    /// Stop the pipeline and permanently disable this recorder. Existing files
+    /// are not deleted; shutdown still releases the recorder's resources.
+    DisableDial9,
+    /// Disable S3 uploads and manifests, leaving recording and other processors
+    /// running. Custom pipelines pass data through this stage unchanged.
+    /// The recorder's disk preset writes processed segments back locally.
+    /// Memory pipelines need another consumer to retain processed data.
+    DisableS3,
+}
+
+impl std::fmt::Display for FailureBehavior {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::DisableDial9 => "S3 client construction failed; disabling dial9",
+            Self::DisableS3 => "S3 client construction failed; disabling S3 uploads",
+        })
+    }
+}
+
+impl std::error::Error for FailureBehavior {}
+
+impl FailureBehavior {
+    fn initialization_result(self) -> std::io::Result<()> {
+        match self {
+            Self::DisableDial9 => Err(std::io::Error::other(
+                dial9_core::pipeline::DisableRecording::new(self),
+            )),
+            Self::DisableS3 => Ok(()),
+        }
+    }
+}
+
+type BoxedS3ClientFuture =
+    Pin<Box<dyn Future<Output = Result<aws_sdk_s3::Client, FailureBehavior>> + Send + 'static>>;
 
 // The private mutex preserves `Sync`; initialization uses `get_mut`, so polling
 // still requires exclusive access and does not lock at runtime.
 struct S3ClientFuture(tokio::sync::Mutex<BoxedS3ClientFuture>);
 
 impl S3ClientFuture {
-    fn new(future: impl Future<Output = aws_sdk_s3::Client> + Send + 'static) -> Self {
+    fn new(
+        future: impl Future<Output = Result<aws_sdk_s3::Client, FailureBehavior>> + Send + 'static,
+    ) -> Self {
         Self(tokio::sync::Mutex::new(Box::pin(future)))
     }
 
@@ -512,6 +553,7 @@ enum S3UploaderState {
         uploader: S3Uploader,
         circuit_breaker: connection::CircuitBreaker,
     },
+    Failed(FailureBehavior),
 }
 
 impl std::fmt::Debug for S3PipelineUploader {
@@ -534,7 +576,7 @@ impl S3PipelineUploader {
                 .timeout_config(timeout_config)
                 .load()
                 .await;
-            aws_sdk_s3::Client::new(&sdk_config)
+            Ok(aws_sdk_s3::Client::new(&sdk_config))
         }))
     }
 
@@ -558,23 +600,48 @@ impl S3PipelineUploader {
 
     /// Construct the S3 client asynchronously when the pipeline worker starts.
     ///
-    /// The future is created by the caller and polled exactly once on the
-    /// worker's Tokio runtime. If initialization is cancelled while it is
-    /// pending, a later attempt resumes the same pinned future.
+    /// The future is created by the caller and driven to completion once on the
+    /// worker's Tokio runtime. If initialization is cancelled while pending,
+    /// a later attempt resumes the same pinned future.
     #[must_use]
-    pub fn with_client_future<F>(mut self, client_future: F) -> Self
+    pub fn with_client_future<F>(self, client_future: F) -> Self
     where
         F: Future<Output = aws_sdk_s3::Client> + Send + 'static,
+    {
+        self.with_fallible_client_future(async move { Ok(client_future.await) })
+    }
+
+    /// Construct a client on the pipeline worker, with an explicit failure
+    /// policy. The result is cached, including failures; initialization never
+    /// restarts the future. Cancellation resumes the same pinned future.
+    ///
+    /// Log the underlying construction error before returning a failure policy.
+    /// dial9 logs the policy, but does not receive the original error.
+    #[must_use]
+    pub fn with_fallible_client_future<F>(mut self, client_future: F) -> Self
+    where
+        F: Future<Output = Result<aws_sdk_s3::Client, FailureBehavior>> + Send + 'static,
     {
         match &mut self.state {
             S3UploaderState::Pending { client_source, .. } => {
                 *client_source = S3ClientSource::Future(S3ClientFuture::new(client_future));
             }
-            S3UploaderState::Ready { .. } => {
-                unreachable!("with_client_future called after uploader initialization")
+            S3UploaderState::Ready { .. } | S3UploaderState::Failed(_) => {
+                unreachable!("with_fallible_client_future called after uploader initialization")
             }
         }
         self
+    }
+
+    /// Whether client construction selected [`FailureBehavior::DisableS3`].
+    ///
+    /// False before initialization completes. Once true, processing passes
+    /// segments through unchanged and dump finalization produces no manifest.
+    pub fn is_disabled(&self) -> bool {
+        matches!(
+            self.state,
+            S3UploaderState::Failed(FailureBehavior::DisableS3)
+        )
     }
 
     /// Set (or override) the pre-built S3 client. Must be called before the
@@ -586,7 +653,7 @@ impl S3PipelineUploader {
             S3UploaderState::Pending { client_source, .. } => {
                 *client_source = S3ClientSource::Ready(client);
             }
-            S3UploaderState::Ready { .. } => {
+            S3UploaderState::Ready { .. } | S3UploaderState::Failed(_) => {
                 unreachable!("set_client called after uploader initialization")
             }
         }
@@ -663,7 +730,7 @@ impl S3PipelineUploader {
         )
     }
 
-    async fn ensure_initialized(&mut self) {
+    async fn ensure_initialized(&mut self) -> std::io::Result<()> {
         let (s3_config, bootstrap_client) = match &mut self.state {
             S3UploaderState::Pending {
                 s3_config,
@@ -672,7 +739,16 @@ impl S3PipelineUploader {
                 let s3_config = s3_config.clone();
                 let client = match client_source {
                     S3ClientSource::Future(client_future) => {
-                        let client = client_future.get_mut().as_mut().await;
+                        let client = match client_future.get_mut().as_mut().await {
+                            Ok(client) => client,
+                            Err(behavior) => {
+                                self.state = S3UploaderState::Failed(behavior);
+                                if behavior == FailureBehavior::DisableS3 {
+                                    tracing::warn!(target: "dial9_worker", %behavior);
+                                }
+                                return behavior.initialization_result();
+                            }
+                        };
                         *client_source = S3ClientSource::Ready(client.clone());
                         client
                     }
@@ -680,7 +756,8 @@ impl S3PipelineUploader {
                 };
                 (s3_config, client)
             }
-            S3UploaderState::Ready { .. } => return,
+            S3UploaderState::Ready { .. } => return Ok(()),
+            S3UploaderState::Failed(behavior) => return behavior.initialization_result(),
         };
 
         let (uploader, circuit_breaker) = Self::build_uploader(s3_config, bootstrap_client).await;
@@ -688,17 +765,22 @@ impl S3PipelineUploader {
             uploader,
             circuit_breaker,
         };
+        Ok(())
     }
 }
 
 impl SegmentProcessor for S3PipelineUploader {
     fn name(&self) -> &'static str {
-        "S3Upload"
+        if self.is_disabled() {
+            "S3Disabled"
+        } else {
+            "S3Upload"
+        }
     }
 
     fn wait_until_live(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         let delay = match &self.state {
-            S3UploaderState::Pending { .. } => Duration::ZERO,
+            S3UploaderState::Pending { .. } | S3UploaderState::Failed(_) => Duration::ZERO,
             S3UploaderState::Ready {
                 circuit_breaker, ..
             } => circuit_breaker.retry_delay(),
@@ -711,10 +793,7 @@ impl SegmentProcessor for S3PipelineUploader {
     }
 
     fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
-        Box::pin(async move {
-            self.ensure_initialized().await;
-            Ok(())
-        })
+        Box::pin(self.ensure_initialized())
     }
 
     fn process(
@@ -724,13 +803,18 @@ impl SegmentProcessor for S3PipelineUploader {
         Box::pin(async move {
             // Keep direct SegmentProcessor drivers compatible even if they do
             // not call the worker lifecycle hook.
-            self.ensure_initialized().await;
+            if let Err(error) = self.ensure_initialized().await {
+                return Err(ProcessError::io(data, error));
+            }
+            if self.is_disabled() {
+                return Ok(data);
+            }
             let S3UploaderState::Ready {
                 uploader,
                 circuit_breaker,
             } = &mut self.state
             else {
-                // Initialization currently always transitions to Ready. Return
+                // Successful initialization always transitions to Ready. Return
                 // an error so a future state change cannot silently lose data.
                 return Err(ProcessError::io(
                     data,
@@ -801,7 +885,12 @@ impl SegmentProcessor for S3PipelineUploader {
         Box::pin(async move {
             // Keep direct SegmentProcessor drivers compatible if they call
             // finalize without first invoking the lifecycle hook.
-            self.ensure_initialized().await;
+            if let Err(error) = self.ensure_initialized().await {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(target: "dial9_worker", %error, "cannot finalize S3 dump");
+                });
+                return None;
+            }
             let S3UploaderState::Ready {
                 uploader,
                 circuit_breaker,
