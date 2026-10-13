@@ -179,6 +179,7 @@ pub struct CpuProfilingConfig {
     backend: CpuBackend,
     event_source: EventSource,
     include_kernel: bool,
+    snapshot_kallsyms: bool,
 }
 
 impl Default for CpuProfilingConfig {
@@ -188,6 +189,7 @@ impl Default for CpuProfilingConfig {
             backend: CpuBackend::Auto,
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
+            snapshot_kallsyms: false,
         }
     }
 }
@@ -242,6 +244,26 @@ impl CpuProfilingConfig {
         self.include_kernel = yes;
         self
     }
+
+    /// Copy `/proc/kallsyms` into memory when the recorder is built and symbolize kernel frames
+    /// against the copy, so they still resolve after a privileged process drops to a user that
+    /// `kernel.kptr_restrict=1` masks addresses for. Build the recorder before dropping
+    /// privileges. Needs kernel frames to exist at all: `include_kernel(true)` here (perf
+    /// backend) or on `SchedEventConfig`. Kernel modules loaded after the snapshot are not
+    /// resolved; the copy stays in memory for the recorder's lifetime.
+    ///
+    /// The copy is as private as the process: a same-user process can read it through
+    /// `/proc/<pid>/fd/` only if this process is dumpable after the drop
+    /// (`prctl(PR_SET_DUMPABLE, 1)` or `fs.suid_dumpable=1`), so prefer `fs.suid_dumpable=2`
+    /// over re-enabling dumpability if you need core dumps.
+    ///
+    /// Does not help a process that is never privileged, or `kptr_restrict=2` (falls back to
+    /// live `/proc/kallsyms` with a warning). Only affects dial9's default pipeline.
+    /// Default: `false`.
+    pub fn snapshot_kallsyms(mut self, yes: bool) -> Self {
+        self.snapshot_kallsyms = yes;
+        self
+    }
 }
 
 /// Configuration for per-thread sched event capture (context switches).
@@ -293,6 +315,10 @@ pub struct CpuProfiler {
     effective_backend: &'static str,
     /// Whether segment metadata has been emitted yet (emit-once).
     metadata_emitted: bool,
+    /// Effective snapshot state, set when `segment_processor()` builds the processor; `None`
+    /// when not requested or when a custom pipeline bypassed it, so the key is never a false
+    /// claim.
+    kallsyms_snapshot: Option<bool>,
 }
 
 impl std::fmt::Debug for CpuProfiler {
@@ -349,6 +375,7 @@ impl CpuProfiler {
             config,
             effective_backend,
             metadata_emitted: false,
+            kallsyms_snapshot: None,
         })
     }
 
@@ -432,7 +459,20 @@ impl Source for CpuProfiler {
 
     #[cfg(feature = "symbolize-processor")]
     fn segment_processor(&mut self) -> Option<Box<dyn dial9_core::pipeline::SegmentProcessor>> {
-        Some(Box::new(crate::SymbolizeProcessor::new()))
+        if !self.config.snapshot_kallsyms {
+            return Some(Box::new(crate::SymbolizeProcessor::new()));
+        }
+        let snapshot = crate::SymbolizeProcessor::try_with_kallsyms_snapshot();
+        self.kallsyms_snapshot = Some(snapshot.is_ok());
+        let processor = snapshot.unwrap_or_else(|e| {
+            tracing::warn!(
+                target: "dial9_offline_symbolizer",
+                error = %e,
+                "kallsyms snapshot failed, kernel frames will use live /proc/kallsyms"
+            );
+            crate::SymbolizeProcessor::new()
+        });
+        Some(Box::new(processor))
     }
 
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
@@ -452,6 +492,13 @@ impl Source for CpuProfiler {
             "cpu.profile.backend".to_string(),
             self.effective_backend.to_string(),
         ));
+        // "false": requested, but fell back to live /proc/kallsyms.
+        if let Some(active) = self.kallsyms_snapshot {
+            out.push((
+                "cpu.profile.kallsyms_snapshot".to_string(),
+                active.to_string(),
+            ));
+        }
         out.extend(sys::system_metadata());
         // When ctimer is the effective backend, it always samples thread CPU time
         // (CLOCK_THREAD_CPUTIME_ID), regardless of what EventSource was
@@ -740,6 +787,54 @@ mod metadata_tests {
         let mut meta2 = Vec::new();
         profiler.segment_metadata(&mut meta2);
         assert!(meta2.is_empty(), "metadata should not re-emit");
+    }
+
+    #[cfg(all(
+        feature = "symbolize-processor",
+        any(
+            target_os = "linux",
+            all(target_os = "android", target_arch = "aarch64")
+        )
+    ))]
+    fn kallsyms_snapshot_metadata(profiler: &mut CpuProfiler) -> Option<String> {
+        let mut meta = Vec::new();
+        profiler.segment_metadata(&mut meta);
+        meta.into_iter()
+            .find(|(k, _)| k == "cpu.profile.kallsyms_snapshot")
+            .map(|(_, v)| v)
+    }
+
+    /// `cpu.profile.kallsyms_snapshot` reports whether the snapshot took effect,
+    /// not merely that it was requested; it is absent when not requested.
+    #[cfg(all(
+        feature = "symbolize-processor",
+        any(
+            target_os = "linux",
+            all(target_os = "android", target_arch = "aarch64")
+        )
+    ))]
+    #[test]
+    fn cpu_profiler_metadata_reports_effective_kallsyms_snapshot() {
+        let Ok(mut requested) =
+            CpuProfiler::start(CpuProfilingConfig::default().snapshot_kallsyms(true))
+        else {
+            eprintln!("skipping: CpuProfiler::start failed (likely no perf access)");
+            return;
+        };
+        assert!(requested.segment_processor().is_some());
+        let expected = crate::sys::KallsymsSnapshot::capture().is_ok();
+        assert_eq!(
+            kallsyms_snapshot_metadata(&mut requested),
+            Some(expected.to_string())
+        );
+        drop(requested);
+
+        let Ok(mut not_requested) = CpuProfiler::start(CpuProfilingConfig::default()) else {
+            eprintln!("skipping: CpuProfiler::start failed (likely no perf access)");
+            return;
+        };
+        assert!(not_requested.segment_processor().is_some());
+        assert_eq!(kallsyms_snapshot_metadata(&mut not_requested), None);
     }
 
     /// SchedProfiler::segment_metadata must always report the effective

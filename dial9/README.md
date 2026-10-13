@@ -389,6 +389,7 @@ depend on those hooks will not observe runtime context. Hooks you pass via
   ```bash
   sudo sysctl kernel.kptr_restrict=0
   ```
+  If the process starts privileged and drops root later, `CpuProfilingConfig::with_perf_backend().include_kernel(true).snapshot_kallsyms(true)` copies `/proc/kallsyms` when the recorder is built and symbolizes against the copy; build the recorder before dropping privileges. Modules loaded later are not resolved, and it does not help a never-privileged process or `kptr_restrict=2`. The copy is as private as the process; keep the process non-dumpable after the drop (the default), or use `fs.suid_dumpable=2` for core dumps.
 
 ### Memory profiling
 
