@@ -90,8 +90,7 @@ impl Check {
     }
 }
 
-/// Whether `handle` is connected to a recorder that hasn't shut down and isn't
-/// paused. Doesn't check that the recorder's threads are alive.
+/// The recording check behind `dial9`'s `SmokeTestReport::recording_status`.
 // Called only by `dial9`'s smoke tester: kept out of the semver promise.
 #[doc(hidden)]
 pub fn check_recording(handle: &Dial9Handle) -> CheckStatus {

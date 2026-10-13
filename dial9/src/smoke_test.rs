@@ -30,8 +30,12 @@ pub struct SmokeTestReport {
 }
 
 impl SmokeTestReport {
-    /// Whether the handle is connected to a recorder that hasn't shut down
-    /// and isn't paused. Doesn't check that the recorder's threads are alive.
+    /// Status of recording on the handle:
+    /// - `Ok`: connected to a running recorder that isn't paused.
+    /// - `Disabled`: recording is paused.
+    /// - `Failed`: not connected to a recorder, or the recorder has shut down.
+    ///
+    /// Doesn't check that the recorder's threads are alive.
     pub fn recording_status(&self) -> &CheckStatus {
         &self.recording
     }
