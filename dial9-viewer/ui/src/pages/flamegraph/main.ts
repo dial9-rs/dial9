@@ -7,6 +7,7 @@
 //     (exact-mode.ts).
 
 import { parseDiff } from "../../lib/canvas/index.js";
+import { mountBrowserLink } from "../../lib/url/index.js";
 import { pageEls } from "./dom.js";
 import { runApiMode } from "./api-mode.js";
 import { runDiffMode } from "./diff-mode.js";
@@ -14,6 +15,7 @@ import { runExactMode } from "./exact-mode.js";
 
 const params = new URLSearchParams(window.location.search);
 const els = pageEls();
+mountBrowserLink(els.headerEl, window.location.search);
 
 if (parseDiff(params) !== null) {
   runDiffMode(params, els);

@@ -26,6 +26,7 @@ import type {
   TraceSliceStore,
 } from "../../lib/trace/index.js";
 import type { ViewerStore } from "../../store/store.js";
+import { BROWSER_LINK_LABEL, BROWSER_LINK_TITLE } from "../../lib/url/index.js";
 import type { EscCascade } from "./esc-cascade.js";
 import type { LoadedTraceKind } from "./viewer-reconstruction.js";
 import {
@@ -43,6 +44,8 @@ export interface LoadChromeOptions {
   esc: EscCascade;
   /** Show a load failure to the user (wired to the toast channel). */
   onError(message: string): void;
+  /** Trace-browser URL for this page's scope; the chooser links back to it. */
+  browserHref: string;
   /** Boot `?trace=` components; when present the layer auto-loads them. */
   initialUrls?: readonly string[];
   /** Toolbar label for the boot source (shown once it loads). */
@@ -246,6 +249,13 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
             controller.loadDemo();
           }}
           >or load demo trace</a
+        >
+        <a
+          class="d9-load-back d9-load-browser-link"
+          href=${options.browserHref}
+          title=${BROWSER_LINK_TITLE}
+          @click=${(e: Event): void => e.stopPropagation()}
+          >${BROWSER_LINK_LABEL} Back</a
         >
         ${s.canDismiss
           ? html`<div class="d9-drop-sub">or press Esc to keep the current trace</div>`

@@ -13,7 +13,8 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e0e0e0; padding: 20px; }
-  h1 { margin-bottom: 12px; font-size: 1.4em; }
+  .page-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  h1 { font-size: 1.4em; }
   .periods { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
   .period-row { display: flex; gap: 8px; align-items: center; padding: 8px 10px; background: #161b22; border-radius: 6px; flex-wrap: wrap; }
   .period-row label { font-size: 0.85em; }
@@ -49,7 +50,7 @@
 </style>
 </head>
 <body>
-<h1>⚡ Tokio Stats</h1>
+<header id="page-header" class="page-header"><h1>⚡ Tokio Stats</h1></header>
 <div id="periods" class="periods"></div>
 <div class="toolbar">
   <button id="btn-add" class="secondary">+ Add period</button>

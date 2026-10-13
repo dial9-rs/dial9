@@ -30,6 +30,7 @@ import {
   type TrackManageActions,
 } from "./track-management.js";
 import type { KeyBinding } from "../../lib/interact/keyboard.js";
+import { BROWSER_LINK_LABEL, BROWSER_LINK_TITLE } from "../../lib/url/index.js";
 
 /** Callbacks the shell chrome needs from the page entry. */
 export interface ShellDeps extends ToolbarDeps {
@@ -41,6 +42,8 @@ export interface ShellDeps extends ToolbarDeps {
    * loads rather than freezing at the boot value.
    */
   sourceLabel(): string;
+  /** Trace-browser URL for this page's scope (the toolbar's back link). */
+  browserHref: string;
   /**
    * Toolbar "New File": open the load chrome. The load chrome runs the confirm
    * before discarding a loaded trace. Absent on mounts without load chrome (the
@@ -163,6 +166,13 @@ function shellTemplate(
 ): TemplateResult {
   return html`
     <header class="d9-toolbar" role="banner">
+      <a
+        class="d9-browser-link"
+        href=${deps.browserHref}
+        title=${BROWSER_LINK_TITLE}
+        aria-label=${BROWSER_LINK_TITLE}
+        >${BROWSER_LINK_LABEL}</a
+      >
       <h1 class="d9-app-title">
         dial9<br /><span class="d9-app-title-sub">Trace Viewer</span>
       </h1>

@@ -45,6 +45,7 @@ import type {
   SpanTypeStats,
   StreamMode,
 } from "../../lib/trace/index.js";
+import { mountBrowserLink } from "../../lib/url/index.js";
 import { pageEls } from "./dom.js";
 import {
   renderCatalog,
@@ -82,6 +83,7 @@ const els = pageEls();
 
 // URL params are read ONCE: the load scope is fixed for the page's lifetime.
 const params = new URLSearchParams(window.location.search);
+mountBrowserLink(els.header, window.location.search);
 const scope = readScope(params, sourceScopeFromStored("", Dial9Creds.get()));
 const aggregate = isAggregateMode(params, scope);
 const rawMode = scope.trace != null;
