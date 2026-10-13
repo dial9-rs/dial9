@@ -249,7 +249,7 @@ if !report.is_healthy() {
 # }
 ```
 
-If your app turns telemetry off on purpose (`recorder_disabled()`, or `DIAL9_ENABLED` off with `recorder_from_env`), the handle isn't connected to a recorder and `recording` fails, so skip the check in that case.
+If your app turns telemetry off on purpose (`recorder_disabled()`, or `DIAL9_ENABLED` off with `recorder_from_env`), the handle isn't connected to a recorder and the `recording` check fails, so skip the check in that case.
 
 ## Why dial9?
 

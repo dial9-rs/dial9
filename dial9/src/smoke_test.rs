@@ -65,8 +65,8 @@ impl fmt::Display for SmokeTestReport {
 /// Runs the smoke test against the recorder behind a handle.
 pub struct SmokeTester {
     handle: Dial9Handle,
-    // Gives the type now the auto traits the result cache will give it (not
-    // `RefUnwindSafe`), so adding the cache isn't a semver break.
+    // Matches the auto traits a later result cache will add (not
+    // `RefUnwindSafe`), so adding it isn't a semver break.
     _cache: PhantomData<tokio::sync::Mutex<()>>,
 }
 
@@ -104,7 +104,7 @@ impl SmokeTester {
 
 /// Adds [`smoke_tester`](Self::smoke_tester) to [`Dial9Handle`].
 pub trait SmokeTesterExt: smoke_tester_ext_sealed::Sealed {
-    /// Tester for the recorder behind this handle.
+    /// Starts building a [`SmokeTester`] for the recorder behind this handle.
     fn smoke_tester(&self) -> SmokeTesterBuilder;
 }
 

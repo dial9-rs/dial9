@@ -8,7 +8,7 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CheckStatus {
-    /// Working.
+    /// The check passed.
     Ok,
     /// The check doesn't apply. Not a failure.
     #[non_exhaustive]
@@ -18,7 +18,7 @@ pub enum CheckStatus {
         /// Human-readable explanation.
         detail: String,
     },
-    /// Should work, doesn't.
+    /// The check found a problem.
     #[non_exhaustive]
     Failed {
         /// Why the check failed.
@@ -76,8 +76,8 @@ impl fmt::Display for CheckStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Check {
-    /// Whether the handle is connected to a recorder that hasn't shut down
-    /// and isn't paused.
+    /// The recording check, reported by `dial9`'s
+    /// `SmokeTestReport::recording_status`.
     Recording,
 }
 
