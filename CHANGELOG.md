@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.5...dial9-v0.5.6) - 2026-10-16
+
+### Added
+
+- *(perf)* report the CPU backend, count samples, and register start failures ([#1001](https://github.com/dial9-rs/dial9/pull/1001))
+
+### Fixed
+
+- *(deps)* clear open RustSec advisories ([#1052](https://github.com/dial9-rs/dial9/pull/1052))
+
 ## [0.5.5](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.4...dial9-v0.5.5) - 2026-10-16
 
 ### Added
