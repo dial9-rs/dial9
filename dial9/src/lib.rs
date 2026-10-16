@@ -91,13 +91,13 @@ pub use dial9_tokio_telemetry::{
     TracedFuture, block_on, block_on_local, spawn, spawn_in, spawn_local, spawn_local_in,
 };
 
+#[cfg(all(feature = "tokio", feature = "worker-s3"))]
+pub use dial9_tokio_telemetry::telemetry::RecorderS3ClientExt;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::telemetry::{
     AttachedRuntime, Dial9HandleTokioExt, Dial9TokioHandle, JoinSetExt, RecorderPipelineExt,
     TaskDumpConfig, TokioAttachOptions, TokioHooks,
 };
-#[cfg(all(feature = "tokio", feature = "worker-s3"))]
-pub use dial9_tokio_telemetry::telemetry::{RecorderS3ClientExt, RecorderTryS3Ext};
 
 /// Offline trace reading and analysis.
 #[cfg(all(feature = "tokio", feature = "analysis"))]

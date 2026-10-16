@@ -155,10 +155,7 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
             + 'static,
     {
         self.processors.push(Box::new(
-            S3PipelineUploader::from_client_future()
-                .config(config)
-                .client_future(client_future)
-                .build(),
+            S3PipelineUploader::new(config, None).with_fallible_client_future(client_future),
         ));
         self
     }

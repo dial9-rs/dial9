@@ -502,15 +502,14 @@ The viewer reads both this and the historical layout, and custom `S3KeyFn` outpu
 
 For custom credentials or endpoints, defer client construction to the pipeline worker runtime with `with_s3_uploader_client_future(config, fut)`. The future is polled when the worker starts, and the client (including credential refresh) stays on that runtime.
 
-The infallible method uses `dial9::RecorderS3ClientExt`. For fallible
-construction, import `dial9::RecorderTryS3Ext` and use
-`try_s3_async(config, future)`. Its future returns
+Both asynchronous methods use `dial9::RecorderS3ClientExt`. For fallible
+construction, use `try_s3_async(config, future)`. Its future returns
 `Result<aws_sdk_s3::Client, dial9::s3::FailureBehavior>`. Both methods require
 `Send + 'static`, not `Sync`, and `build()` starts the worker without waiting
 for the future.
 
 ```rust
-use dial9::RecorderTryS3Ext;
+use dial9::RecorderS3ClientExt;
 use dial9::s3::{FailureBehavior, S3Config};
 
 let s3_config = S3Config::builder()
@@ -522,15 +521,14 @@ let s3_config = S3Config::builder()
 let recorder = dial9::recorder(writer)
     .try_s3_async(s3_config, async move {
         create_s3_client().await.map_err(|error| {
-            tracing::warn!(%error, "S3 client construction failed");
-            FailureBehavior::DisableDial9
+            FailureBehavior::DisableDial9(error.into())
         })
     })
     .build();
 ```
 
-Here `create_s3_client` is your fallible setup function. Log its original error
-before returning a policy; do not substitute a dummy client.
+Here `create_s3_client` is your fallible setup function. Preserve its original
+error in the policy so dial9 can report it; do not substitute a dummy client.
 
 Choose `DisableDial9` to permanently disable recording, or `DisableS3` to keep
 recording without uploads. See

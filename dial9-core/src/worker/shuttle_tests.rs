@@ -39,6 +39,102 @@ use std::pin::Pin;
 
 struct CountingProcessor(Arc<AtomicUsize>);
 
+struct PermanentlyFailingInitializer;
+
+impl SegmentProcessor for PermanentlyFailingInitializer {
+    fn name(&self) -> &'static str {
+        "PermanentlyFailingInitializer"
+    }
+
+    fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        Box::pin(async {
+            Err(std::io::Error::other(
+                crate::pipeline::DisableRecording::new(std::io::Error::other(
+                    "destination authorization failed",
+                )),
+            ))
+        })
+    }
+
+    fn process(
+        &mut self,
+        _data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        panic!("failed initialization must prevent processing")
+    }
+}
+
+struct NoopSource;
+
+impl crate::source::Source for NoopSource {
+    fn name(&self) -> &'static str {
+        "Noop"
+    }
+
+    fn flush(&mut self, _context: &crate::source::FlushContext<'_>) {}
+}
+
+crate::shuttle_test! {
+    num_iters = 2_000, depth = 3;
+    fn shuttle_initialization_failure_races_enable_and_shutdown() {
+        for shutdown in [false, true] {
+            let shared = Arc::new(crate::shared_state::SharedState::new(0));
+            let (control_tx, control_rx) = crate::primitives::sync::mpsc::sync_channel(1);
+            drop(control_rx);
+            let handle = crate::handle::Dial9Handle::enabled(shared.clone(), control_tx);
+            let recorder = Arc::new(crate::recording::Recorder::new(handle.clone(), None));
+            let starts = Arc::new(AtomicUsize::new(0));
+            let hook_starts = starts.clone();
+            recorder.set_recording_start_hooks(vec![Box::new(move |_| {
+                // A hook claimed by a successful enable may race the failure.
+                // It may run once even if the failure arrives before its body.
+                hook_starts.fetch_add(1, Ordering::Relaxed);
+            })]);
+            let config = BackgroundTaskConfig::builder()
+                .recording_state(shared.clone())
+                .processors(vec![Box::new(PermanentlyFailingInitializer) as Box<dyn SegmentProcessor>])
+                .build();
+            let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            let worker = crate::primitives::thread::spawn(move || {
+                shuttle::future::block_on(run_background_task_inner(config, shutdown_rx, fs));
+            });
+            let enabler_recorder = recorder.clone();
+            let enabler = crate::primitives::thread::spawn(move || {
+                enabler_recorder.enable();
+                enabler_recorder.disable();
+                enabler_recorder.enable();
+            });
+            let shutdown_state = shared.clone();
+            let stopper = crate::primitives::thread::spawn(move || {
+                if shutdown {
+                    // The terminal transition used after the flush thread stops.
+                    shutdown_state.mark_stopped();
+                    shutdown_state.clear_sources();
+                }
+            });
+            worker.join().unwrap();
+            enabler.join().unwrap();
+            stopper.join().unwrap();
+            drop(shutdown_tx);
+
+            assert!(!handle.is_enabled(), "failure must remain permanent");
+            handle.enable();
+            handle.disable();
+            handle.enable();
+            assert!(!handle.is_enabled(), "later enable must not revive a failure");
+            assert_eq!(handle.is_stopped(), shutdown, "late failure must preserve shutdown");
+            assert!(starts.load(Ordering::Relaxed) <= 1, "start hooks must remain one-shot");
+            if shutdown {
+                assert!(handle.with_source_or_insert::<NoopSource, ()>(
+                    || panic!("shutdown must refuse new sources"),
+                    |_| panic!("shutdown must refuse source access"),
+                ).is_none());
+            }
+        }
+    }
+}
+
 impl SegmentProcessor for CountingProcessor {
     fn name(&self) -> &'static str {
         "CountingProcessor"

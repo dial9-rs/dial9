@@ -784,7 +784,7 @@ If client construction can fail, use `try_s3_async` and choose the failure polic
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
 # fn example(writer: dial9::core::SegmentWriter) -> dial9::Recorder {
-use dial9::RecorderTryS3Ext;
+use dial9::RecorderS3ClientExt;
 use dial9::s3::{FailureBehavior, S3Config};
 
 # async fn create_s3_client() -> std::io::Result<aws_sdk_s3::Client> { todo!() }
@@ -795,8 +795,7 @@ let config = S3Config::builder()
 let recorder = dial9::recorder(writer)
     .try_s3_async(config, async move {
         create_s3_client().await.map_err(|error| {
-            tracing::warn!(%error, "S3 client construction failed");
-            FailureBehavior::DisableDial9
+            FailureBehavior::DisableDial9(error.into())
         })
     })
     .build();
@@ -816,8 +815,8 @@ let recorder = dial9::recorder(writer)
 
 `build()` does not await construction. The future must be `Send + 'static`, but
 need not be `Sync`. Its result is cached, without automatic reconstruction.
-Put setup inside the async body and log the original error before mapping it to
-a policy. These policies do not change retries for later upload failures or
+Put setup inside the async body and retain the original error in the selected
+policy. These policies do not change retries for later upload failures or
 provide a deadline for a pending constructor.
 
 Local retention uses the writer's existing settings. Rotating buffers evict old

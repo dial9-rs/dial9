@@ -121,6 +121,7 @@ __nonlinux_all_features = [
 ]
 
 [dev-dependencies]
+rstest = "0.26.1"
 dial9-tokio-telemetry = { path = ".", features = [
     "analysis",
     "memory-profiling",

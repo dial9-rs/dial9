@@ -47,12 +47,12 @@ pub use format::{
     PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerId, WorkerParkEvent,
     WorkerUnparkEvent,
 };
+#[cfg(feature = "worker-s3")]
+pub use recorder::RecorderS3ClientExt;
 pub use recorder::{
     AttachedRuntime, Dial9Handle, Dial9HandleTokioExt, Dial9TokioHandle, JoinSetExt,
     RecorderPipelineExt, TokioAttachOptions, TokioHooks, block_on, block_on_local,
     current_worker_id, spawn, spawn_in, spawn_local, spawn_local_in,
 };
-#[cfg(feature = "worker-s3")]
-pub use recorder::{RecorderS3ClientExt, RecorderTryS3Ext};
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};

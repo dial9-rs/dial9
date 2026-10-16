@@ -144,25 +144,11 @@ pub trait RecorderS3ClientExt<M: BufferMode>: sealed::Sealed + Sized {
     /// client asynchronously on the pipeline worker's Tokio runtime.
     fn with_s3_uploader_client_future<F>(self, config: S3Config, client_future: F) -> Self
     where
-        F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static;
-}
-
-#[cfg(feature = "worker-s3")]
-impl<M: BufferMode> RecorderS3ClientExt<M> for RecorderBuilder<M> {
-    fn with_s3_uploader_client_future<F>(self, config: S3Config, client_future: F) -> Self
-    where
         F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static,
     {
-        apply_s3_uploader(self, config, |config| {
-            crate::background_task::S3PipelineUploader::new(config, None)
-                .with_client_future(client_future)
-        })
+        self.try_s3_async(config, async move { Ok(client_future.await) })
     }
-}
 
-/// Fallible asynchronous S3 client construction on the recorder's worker.
-#[cfg(feature = "worker-s3")]
-pub trait RecorderTryS3Ext<M: BufferMode>: sealed::Sealed + Sized {
     /// Upload to S3 using a
     /// [`FailureBehavior`](dial9_destinations_s3::FailureBehavior) policy.
     ///
@@ -178,7 +164,7 @@ pub trait RecorderTryS3Ext<M: BufferMode>: sealed::Sealed + Sized {
 }
 
 #[cfg(feature = "worker-s3")]
-impl<M: BufferMode> RecorderTryS3Ext<M> for RecorderBuilder<M> {
+impl<M: BufferMode> RecorderS3ClientExt<M> for RecorderBuilder<M> {
     fn try_s3_async<F>(self, config: S3Config, client_future: F) -> Self
     where
         F: std::future::Future<
@@ -187,10 +173,8 @@ impl<M: BufferMode> RecorderTryS3Ext<M> for RecorderBuilder<M> {
             + 'static,
     {
         apply_s3_uploader(self, config, |config| S3FallbackProcessor {
-            uploader: crate::background_task::S3PipelineUploader::from_client_future()
-                .config(config)
-                .client_future(client_future)
-                .build(),
+            uploader: crate::background_task::S3PipelineUploader::new(config, None)
+                .with_fallible_client_future(client_future),
             write_back: M::IS_DISK.then(crate::background_task::WriteBackProcessor::default),
         })
     }
@@ -677,3 +661,7 @@ pub(crate) fn tokio_attach_state(handle: &Dial9Handle) -> Option<TokioAttachStat
         },
     )
 }
+
+#[cfg(all(test, feature = "worker-s3", not(shuttle)))]
+#[path = "recorder_s3_tests.rs"]
+mod s3_tests;

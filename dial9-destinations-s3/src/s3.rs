@@ -485,39 +485,51 @@ pub struct S3PipelineUploader {
 /// What to do when asynchronous S3 client construction fails.
 ///
 /// Applies only to the constructor's result, not later upload failures.
-/// Log the original error before returning a policy; dial9 receives only the
-/// policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Carries the original construction error so dial9 can report its cause.
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum FailureBehavior {
-    /// Stop the pipeline and permanently disable this recorder. Existing files
-    /// are not deleted; shutdown still releases the recorder's resources.
-    DisableDial9,
+    /// Stop the pipeline and permanently disable this recorder.
+    ///
+    /// Recording starts independently of asynchronous pipeline initialization,
+    /// so trace files may already exist when construction fails. Those files
+    /// are preserved; normal shutdown still releases the recorder's resources.
+    DisableDial9(Box<dyn std::error::Error + Send + Sync>),
     /// Disable S3 uploads and manifests, leaving recording and other processors
     /// running. Custom pipelines pass data through this stage unchanged.
     /// The recorder's disk preset writes processed segments back locally.
     /// Memory pipelines need another consumer to retain processed data.
-    DisableS3,
+    DisableS3(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl std::fmt::Display for FailureBehavior {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DisableDial9 => f.write_str("S3 client construction failed (DisableDial9)"),
-            Self::DisableS3 => f.write_str("S3 client construction failed (DisableS3)"),
+            Self::DisableDial9(source) => {
+                write!(f, "S3 client construction failed (DisableDial9): {source}")
+            }
+            Self::DisableS3(source) => {
+                write!(f, "S3 client construction failed (DisableS3): {source}")
+            }
         }
     }
 }
 
-impl std::error::Error for FailureBehavior {}
+impl std::error::Error for FailureBehavior {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::DisableDial9(source) | Self::DisableS3(source) => Some(source.as_ref()),
+        }
+    }
+}
 
 impl FailureBehavior {
-    fn initialization_result(self) -> std::io::Result<()> {
-        match self {
-            Self::DisableDial9 => Err(std::io::Error::other(
-                dial9_core::pipeline::DisableRecording::new(self),
+    fn initialization_result(self: &Arc<Self>) -> std::io::Result<()> {
+        match self.as_ref() {
+            Self::DisableDial9(_) => Err(std::io::Error::other(
+                dial9_core::pipeline::DisableRecording::new(self.clone()),
             )),
-            Self::DisableS3 => Ok(()),
+            Self::DisableS3(_) => Ok(()),
         }
     }
 }
@@ -555,7 +567,7 @@ enum S3UploaderState {
         uploader: S3Uploader,
         circuit_breaker: connection::CircuitBreaker,
     },
-    Failed(FailureBehavior),
+    Failed(Arc<FailureBehavior>),
 }
 
 impl std::fmt::Debug for S3PipelineUploader {
@@ -564,7 +576,6 @@ impl std::fmt::Debug for S3PipelineUploader {
     }
 }
 
-#[bon::bon]
 impl S3PipelineUploader {
     fn default_client_source(s3_config: &S3Config) -> S3ClientSource {
         let operation_attempt_timeout = s3_config.operation_attempt_timeout();
@@ -611,40 +622,36 @@ impl S3PipelineUploader {
     ///
     /// Panics if client initialization has already completed.
     #[must_use]
-    pub fn with_client_future<F>(mut self, client_future: F) -> Self
+    pub fn with_client_future<F>(self, client_future: F) -> Self
     where
         F: Future<Output = aws_sdk_s3::Client> + Send + 'static,
     {
-        match &mut self.state {
-            S3UploaderState::Pending { client_source, .. } => {
-                *client_source =
-                    S3ClientSource::Future(S3ClientFuture::new(
-                        async move { Ok(client_future.await) },
-                    ));
-            }
-            S3UploaderState::Ready { .. } | S3UploaderState::Failed(_) => {
-                unreachable!("with_client_future called after uploader initialization")
-            }
-        }
-        self
+        self.with_fallible_client_future(async move { Ok(client_future.await) })
     }
 
-    /// Build a fresh uploader with a fallible client future.
+    /// Set a fallible client future before pipeline initialization.
     ///
-    /// The worker caches the result, including [`FailureBehavior`]. Cancelled
-    /// initialization resumes the same pinned future.
-    #[builder(finish_fn = build)]
-    pub fn from_client_future<F>(config: S3Config, client_future: F) -> Self
+    /// Like [`with_client_future`](Self::with_client_future), with an explicit
+    /// failure policy and the original error. The worker caches the result;
+    /// cancelled initialization resumes the same pinned future.
+    ///
+    /// # Panics
+    ///
+    /// Panics if client initialization has already completed.
+    #[must_use]
+    pub fn with_fallible_client_future<F>(mut self, client_future: F) -> Self
     where
         F: Future<Output = Result<aws_sdk_s3::Client, FailureBehavior>> + Send + 'static,
     {
-        Self {
-            state: S3UploaderState::Pending {
-                s3_config: config,
-                client_source: S3ClientSource::Future(S3ClientFuture::new(client_future)),
-            },
-            dump_keys: HashMap::new(),
+        match &mut self.state {
+            S3UploaderState::Pending { client_source, .. } => {
+                *client_source = S3ClientSource::Future(S3ClientFuture::new(client_future));
+            }
+            S3UploaderState::Ready { .. } | S3UploaderState::Failed(_) => {
+                unreachable!("client future set after uploader initialization")
+            }
         }
+        self
     }
 
     /// Whether client construction selected [`FailureBehavior::DisableS3`].
@@ -652,10 +659,8 @@ impl S3PipelineUploader {
     /// False before initialization completes. Once true, processing passes
     /// segments through unchanged and dump finalization produces no manifest.
     pub fn is_disabled(&self) -> bool {
-        matches!(
-            self.state,
-            S3UploaderState::Failed(FailureBehavior::DisableS3)
-        )
+        matches!(&self.state, S3UploaderState::Failed(behavior)
+            if matches!(behavior.as_ref(), FailureBehavior::DisableS3(_)))
     }
 
     /// Set (or override) the pre-built S3 client. Must be called before the
@@ -757,15 +762,17 @@ impl S3PipelineUploader {
                         let client = match client_future.get_mut().as_mut().await {
                             Ok(client) => client,
                             Err(behavior) => {
-                                self.state = S3UploaderState::Failed(behavior);
-                                if behavior == FailureBehavior::DisableS3 {
+                                let behavior = Arc::new(behavior);
+                                if matches!(behavior.as_ref(), FailureBehavior::DisableS3(_)) {
                                     tracing::warn!(
                                         target: "dial9_worker",
-                                        ?behavior,
+                                        error = %behavior,
                                         "S3 client construction failed; disabling S3 uploads"
                                     );
                                 }
-                                return behavior.initialization_result();
+                                let result = behavior.initialization_result();
+                                self.state = S3UploaderState::Failed(behavior);
+                                return result;
                             }
                         };
                         *client_source = S3ClientSource::Ready(client.clone());

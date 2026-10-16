@@ -34,6 +34,7 @@ serde_json = "1"
 
 [dev-dependencies]
 dial9-core = { workspace = true, features = ["pipeline", "test-util"] }
+dial9-trace-format = { workspace = true }
 assert2 = { workspace = true }
 async-trait = "0.1.89"
 flate2 = "1"
