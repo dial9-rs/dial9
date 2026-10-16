@@ -22,7 +22,9 @@ use std::marker::PhantomData;
 
 pub use dial9_core::smoke_test::{Check, CheckStatus, DisabledReason, FailedReason};
 
-/// Result of [`SmokeTest::validate`].
+/// Result of one [`SmokeTest::validate`] call. It doesn't update afterwards,
+/// even if the recorder pauses or shuts down; call `validate` again for current
+/// statuses.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SmokeTestReport {
