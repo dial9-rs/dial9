@@ -521,14 +521,16 @@ let s3_config = S3Config::builder()
 let recorder = dial9::recorder(writer)
     .try_s3_async(s3_config, async move {
         create_s3_client().await.map_err(|error| {
-            FailureBehavior::DisableDial9(error.into())
+            FailureBehavior::disable_dial9().with_source(error)
         })
     })
     .build();
 ```
 
-Here `create_s3_client` is your fallible setup function. Preserve its original
-error in the policy so dial9 can report it; do not substitute a dummy client.
+Here `create_s3_client` is your fallible setup function. The policy constructors
+`FailureBehavior::disable_dial9()` and `FailureBehavior::disable_s3()` do not
+require a source. Retain an available original error with `.with_source(error)`
+so dial9 can report it; do not substitute a dummy client.
 
 Choose `DisableDial9` to permanently disable recording, or `DisableS3` to keep
 recording without uploads. See

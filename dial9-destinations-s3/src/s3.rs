@@ -485,7 +485,9 @@ pub struct S3PipelineUploader {
 /// What to do when asynchronous S3 client construction fails.
 ///
 /// Applies only to the constructor's result, not later upload failures.
-/// Carries the original construction error so dial9 can report its cause.
+/// Optionally carries the original construction error so dial9 can report its
+/// cause. Select a policy with [`Self::disable_dial9`] or [`Self::disable_s3`],
+/// then retain an available error with [`Self::with_source`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum FailureBehavior {
@@ -494,42 +496,89 @@ pub enum FailureBehavior {
     /// Recording starts independently of asynchronous pipeline initialization,
     /// so trace files may already exist when construction fails. Those files
     /// are preserved; normal shutdown still releases the recorder's resources.
-    DisableDial9(Box<dyn std::error::Error + Send + Sync>),
+    #[non_exhaustive]
+    DisableDial9 {
+        /// The original client construction error, when available.
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     /// Disable S3 uploads and manifests, leaving recording and other processors
     /// running. Custom pipelines pass data through this stage unchanged.
     /// The recorder's disk preset writes processed segments back locally.
     /// Memory pipelines need another consumer to retain processed data.
-    DisableS3(Box<dyn std::error::Error + Send + Sync>),
+    #[non_exhaustive]
+    DisableS3 {
+        /// The original client construction error, when available.
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 }
 
 impl std::fmt::Display for FailureBehavior {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DisableDial9(source) => {
-                write!(f, "S3 client construction failed (DisableDial9): {source}")
-            }
-            Self::DisableS3(source) => {
-                write!(f, "S3 client construction failed (DisableS3): {source}")
-            }
+        let policy = match self {
+            Self::DisableDial9 { .. } => "DisableDial9",
+            Self::DisableS3 { .. } => "DisableS3",
+        };
+        write!(f, "S3 client construction failed ({policy})")?;
+        if let Some(source) = std::error::Error::source(self) {
+            write!(f, ": {source}")?;
         }
+        Ok(())
     }
 }
 
 impl std::error::Error for FailureBehavior {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::DisableDial9(source) | Self::DisableS3(source) => Some(source.as_ref()),
+            Self::DisableDial9 { source, .. } | Self::DisableS3 { source, .. } => source
+                .as_deref()
+                .map(|source| source as &(dyn std::error::Error + 'static)),
         }
     }
 }
 
 impl FailureBehavior {
+    /// Permanently disable this recorder after S3 client construction fails.
+    ///
+    /// No error source is stored unless supplied with [`Self::with_source`].
+    #[must_use]
+    pub fn disable_dial9() -> Self {
+        Self::DisableDial9 { source: None }
+    }
+
+    /// Keep recording and other processors running without S3 uploads.
+    ///
+    /// No error source is stored unless supplied with [`Self::with_source`].
+    #[must_use]
+    pub fn disable_s3() -> Self {
+        Self::DisableS3 { source: None }
+    }
+
+    /// Retain the original client construction error for diagnostics and
+    /// [`std::error::Error::source`].
+    #[must_use]
+    pub fn with_source(
+        mut self,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        match &mut self {
+            Self::DisableDial9 {
+                source: stored_source,
+                ..
+            }
+            | Self::DisableS3 {
+                source: stored_source,
+                ..
+            } => *stored_source = Some(source.into()),
+        }
+        self
+    }
+
     fn initialization_result(self: &Arc<Self>) -> std::io::Result<()> {
         match self.as_ref() {
-            Self::DisableDial9(_) => Err(std::io::Error::other(
+            Self::DisableDial9 { .. } => Err(std::io::Error::other(
                 dial9_core::pipeline::DisableRecording::new(self.clone()),
             )),
-            Self::DisableS3(_) => Ok(()),
+            Self::DisableS3 { .. } => Ok(()),
         }
     }
 }
@@ -660,7 +709,7 @@ impl S3PipelineUploader {
     /// segments through unchanged and dump finalization produces no manifest.
     pub fn is_disabled(&self) -> bool {
         matches!(&self.state, S3UploaderState::Failed(behavior)
-            if matches!(behavior.as_ref(), FailureBehavior::DisableS3(_)))
+            if matches!(behavior.as_ref(), FailureBehavior::DisableS3 { .. }))
     }
 
     /// Set (or override) the pre-built S3 client. Must be called before the
@@ -763,7 +812,7 @@ impl S3PipelineUploader {
                             Ok(client) => client,
                             Err(behavior) => {
                                 let behavior = Arc::new(behavior);
-                                if matches!(behavior.as_ref(), FailureBehavior::DisableS3(_)) {
+                                if matches!(behavior.as_ref(), FailureBehavior::DisableS3 { .. }) {
                                     tracing::warn!(
                                         target: "dial9_worker",
                                         error = %behavior,

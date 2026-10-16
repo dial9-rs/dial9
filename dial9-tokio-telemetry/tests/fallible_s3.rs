@@ -378,9 +378,8 @@ fn disable_s3_disk_preset_preserves_source_stage_and_gzip_writeback() {
         .try_s3_async(
             config(),
             client_future(
-                Err(FailureBehavior::DisableS3(
-                    std::io::Error::other("client setup failed").into(),
-                )),
+                Err(FailureBehavior::disable_s3()
+                    .with_source(std::io::Error::other("client setup failed"))),
                 calls.clone(),
             ),
         )
@@ -430,9 +429,8 @@ fn assert_custom_disable_s3<M: BufferMode>(writer: SegmentWriter<M>) {
                 .try_s3_async(
                     config(),
                     client_future(
-                        Err(FailureBehavior::DisableS3(
-                            std::io::Error::other("client setup failed").into(),
-                        )),
+                        Err(FailureBehavior::disable_s3()
+                            .with_source(std::io::Error::other("client setup failed"))),
                         calls.clone(),
                     ),
                 )
@@ -534,9 +532,8 @@ fn disable_s3_memory_preset_discards_processed_data_but_keeps_recording() -> std
         .try_s3_async(
             config(),
             client_future(
-                Err(FailureBehavior::DisableS3(
-                    std::io::Error::other("client setup failed").into(),
-                )),
+                Err(FailureBehavior::disable_s3()
+                    .with_source(std::io::Error::other("client setup failed"))),
                 calls.clone(),
             ),
         )
@@ -623,9 +620,8 @@ fn disable_dial9_refuses_enable_stops_dumps_and_retains_existing_files() {
         .try_s3_async(config(), async move {
             gate.await.unwrap();
             client_future(
-                Err(FailureBehavior::DisableDial9(
-                    std::io::Error::other("client setup failed").into(),
-                )),
+                Err(FailureBehavior::disable_dial9()
+                    .with_source(std::io::Error::other("client setup failed"))),
                 future_calls,
             )
             .await

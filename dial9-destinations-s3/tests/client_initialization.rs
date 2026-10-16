@@ -18,15 +18,23 @@ async fn cancelled_initialization_resumes_and_caches_each_outcome() {
     );
     for outcome in [
         Ok(client),
-        Err(FailureBehavior::DisableS3(
-            io::Error::new(io::ErrorKind::PermissionDenied, "credentials denied").into(),
-        )),
-        Err(FailureBehavior::DisableDial9(
-            io::Error::new(io::ErrorKind::PermissionDenied, "credentials denied").into(),
-        )),
+        Err(FailureBehavior::disable_s3().with_source(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "credentials denied",
+        ))),
+        Err(FailureBehavior::disable_dial9().with_source(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "credentials denied",
+        ))),
+        Err(FailureBehavior::disable_s3()),
+        Err(FailureBehavior::disable_dial9()),
     ] {
-        let disable_dial9 = matches!(outcome, Err(FailureBehavior::DisableDial9(_)));
-        let disable_s3 = matches!(outcome, Err(FailureBehavior::DisableS3(_)));
+        let disable_dial9 = matches!(outcome, Err(FailureBehavior::DisableDial9 { .. }));
+        let disable_s3 = matches!(outcome, Err(FailureBehavior::DisableS3 { .. }));
+        let has_source = outcome
+            .as_ref()
+            .err()
+            .is_some_and(|failure| failure.source().is_some());
         let (started_tx, started_rx) = oneshot::channel();
         let (complete_tx, complete_rx) = oneshot::channel();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -69,16 +77,15 @@ async fn cancelled_initialization_resumes_and_caches_each_outcome() {
                     .unwrap()
                     .downcast_ref::<DisableRecording>()
                     .unwrap();
-                let original = marker
-                    .source()
-                    .unwrap()
-                    .source()
-                    .unwrap()
-                    .downcast_ref::<io::Error>()
-                    .unwrap();
-                assert_eq!(original.kind(), io::ErrorKind::PermissionDenied);
-                assert_eq!(original.to_string(), "credentials denied");
-                assert!(error.to_string().contains("credentials denied"));
+                let original = marker.source().unwrap().source();
+                if has_source {
+                    let original = original.unwrap().downcast_ref::<io::Error>().unwrap();
+                    assert_eq!(original.kind(), io::ErrorKind::PermissionDenied);
+                    assert_eq!(original.to_string(), "credentials denied");
+                    assert!(error.to_string().contains("credentials denied"));
+                } else {
+                    assert!(original.is_none());
+                }
             } else {
                 result.unwrap();
             }
@@ -105,8 +112,10 @@ async fn cancelled_initialization_resumes_and_caches_each_outcome() {
 #[test]
 fn both_failure_policies_preserve_the_original_error() {
     for failure in [
-        FailureBehavior::DisableDial9(io::Error::other("credential refresh unavailable").into()),
-        FailureBehavior::DisableS3(io::Error::other("credential refresh unavailable").into()),
+        FailureBehavior::disable_dial9()
+            .with_source(io::Error::other("credential refresh unavailable")),
+        FailureBehavior::disable_s3()
+            .with_source(io::Error::other("credential refresh unavailable")),
     ] {
         assert!(
             failure

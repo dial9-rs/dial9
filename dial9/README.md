@@ -795,7 +795,7 @@ let config = S3Config::builder()
 let recorder = dial9::recorder(writer)
     .try_s3_async(config, async move {
         create_s3_client().await.map_err(|error| {
-            FailureBehavior::DisableDial9(error.into())
+            FailureBehavior::disable_dial9().with_source(error)
         })
     })
     .build();
@@ -815,9 +815,10 @@ let recorder = dial9::recorder(writer)
 
 `build()` does not await construction. The future must be `Send + 'static`, but
 need not be `Sync`. Its result is cached, without automatic reconstruction.
-Put setup inside the async body and retain the original error in the selected
-policy. These policies do not change retries for later upload failures or
-provide a deadline for a pending constructor.
+Put setup inside the async body. Select a policy with
+`FailureBehavior::disable_dial9()` or `FailureBehavior::disable_s3()`, and retain
+an available error with `.with_source(error)`. These policies do not change
+retries for later upload failures or provide a deadline for a pending constructor.
 
 Local retention uses the writer's existing settings. Rotating buffers evict old
 segments, but `max_total_size` is a soft retention budget, not a hard filesystem
