@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1.52.0", default-features = false, features = ["time"] }
+tokio = { version = "1.51.0", default-features = false, features = ["time"] }
 dial9 = { path = "../../dial9", default-features = false, features = ["tokio"] }
 dial9-utils = { path = "../../dial9-utils", features = ["span"] }
 

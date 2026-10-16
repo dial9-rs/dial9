@@ -16,7 +16,7 @@ dial9-trace-format = { workspace = true }
 metrique = "0.1.29"
 metrique-writer = "0.1.25"
 tracing = "0.1.44"
-tokio = { version = "1.52.0", optional = true, default-features = false, features = [
+tokio = { version = "1.51.0", optional = true, default-features = false, features = [
     "rt",
 ] }
 
@@ -35,7 +35,7 @@ criterion = { version = "0.7", default-features = false }
 metrique-writer = { version = "0.1.25", features = ["test-util"] }
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
-tokio = { version = "1.52.0", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.51.0", features = ["rt", "rt-multi-thread", "macros"] }
 
 [[bench]]
 name = "metrique_sink_bench"
