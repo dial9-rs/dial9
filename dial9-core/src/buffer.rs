@@ -1,3 +1,5 @@
+#![deny(clippy::arithmetic_side_effects)]
+
 use dial9_trace_format::encoder::{Encoder, RawEncoder};
 
 use crate::clock::clock_pair;
@@ -10,6 +12,7 @@ use crate::sealed::SegmentRef;
 use std::collections::VecDeque;
 use std::io::BufWriter;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -145,8 +148,23 @@ impl SegmentMetadata {
 /// Default rotation period: 1 minute.
 const DEFAULT_ROTATION_PERIOD: Duration = Duration::from_secs(60);
 
-/// Default maximum interval between thread-local buffer drains.
-const DEFAULT_DRAIN_INTERVAL: Duration = Duration::from_secs(30);
+/// Thread-local drain cadence, capped at 30 seconds and never slower than rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrainInterval(Duration);
+
+impl DrainInterval {
+    /// Default maximum interval between thread-local buffer drains.
+    const MAX: Self = Self(Duration::from_secs(30));
+
+    fn new(rotation_period: Duration) -> Self {
+        Self(rotation_period.min(Self::MAX.0))
+    }
+
+    fn next(self, now: Instant) -> Instant {
+        now.checked_add(self.0)
+            .expect("a drain deadline at most 30 seconds away must be representable")
+    }
+}
 
 /// Default lower bound on the adapted rotation period.
 const DEFAULT_MIN_ROTATION_PERIOD: Duration = Duration::from_secs(5);
@@ -154,6 +172,7 @@ const DEFAULT_MIN_ROTATION_PERIOD: Duration = Duration::from_secs(5);
 /// Percentage of `max_file_size` a segment aims for when the config leaves
 /// [`AdaptiveRotationConfig::target_bytes`] unset.
 const ROTATION_TARGET_PERCENT: u64 = 80;
+const _: () = assert!(ROTATION_TARGET_PERCENT <= 100);
 
 /// Maximum factor the rotation period may grow by in one rotation.
 const ROTATION_GROWTH_FACTOR: u32 = 2;
@@ -258,7 +277,8 @@ pub struct SegmentWriter<Mode: BufferMode = Disk> {
     max_file_size: u64,
     max_total_size: u64,
     /// How often to rotate based on monotonic time. `Duration::MAX` disables
-    /// time-based rotation (used by `single_file()`).
+    /// time-based rotation (used by `single_file()`), as does a period whose
+    /// deadline is unrepresentable.
     rotation_period: Duration,
     /// The next monotonic instant at which time-based rotation should fire,
     /// or `None` if time-based rotation is disabled.
@@ -270,12 +290,13 @@ pub struct SegmentWriter<Mode: BufferMode = Disk> {
     /// Used as a HashMap key in memory mode; a real path in disk mode.
     active_path: PathBuf,
     state: WriterState,
-    next_index: u32,
+    /// Nonzero successor of the active segment's index.
+    next_index: NonZeroU32,
     /// Metadata written at the start of each segment. Updated by the flush
     /// thread to include runtime names alongside any user-provided entries.
     segment_metadata: SegmentMetadata,
     /// Events silently dropped because the writer was finished/stopped.
-    dropped_events: usize,
+    dropped_events: u64,
     /// How segments have been sealed so far, reported on the flush metrics.
     seals: crate::metrics::SealCounts,
     /// Whether any real (non-metadata) events have been written to the current segment.
@@ -340,7 +361,7 @@ impl SegmentWriter<Disk> {
         max_total_size: u64,
         /// How often to rotate, measured in monotonic time since the writer
         /// (or the previous rotation) started. Defaults to 60 seconds.
-        /// `Duration::MAX` disables time-based rotation.
+        /// `Duration::MAX` or an unrepresentable deadline disables time-based rotation.
         rotation_period: Option<Duration>,
         /// Set the rotation period from the observed byte rate. Off by
         /// default; see [`AdaptiveRotationConfig`].
@@ -379,8 +400,8 @@ impl SegmentWriter<Disk> {
         let fs = Fs::new_disk(&dir, stem.as_str());
         let discovered = fs.discover_existing()?;
         let first_index = discovered.next_active_index;
-        let next_index = first_index
-            .checked_add(1)
+        let next_index = NonZeroU32::MIN
+            .checked_add(first_index)
             .ok_or_else(|| std::io::Error::other("trace segment index overflow"))?;
         let first_path = Self::active_path(&dir, &stem, first_index);
         let handle = fs.create_segment(&first_path)?;
@@ -389,7 +410,7 @@ impl SegmentWriter<Disk> {
         // Adaptation starts short and grows, so the first deadline and the
         // drain that gates it both follow the adapted period, not the ceiling.
         let first_period = adaptive_rotation.map_or(rotation_period, |c| c.min_period);
-        let drain_interval = first_period.min(DEFAULT_DRAIN_INTERVAL);
+        let drain_interval = DrainInterval::new(first_period);
 
         let mut writer = Self {
             dir,
@@ -410,7 +431,7 @@ impl SegmentWriter<Disk> {
             current_period: first_period,
             segment_started_at: now,
             prior_seal_kind: SealKind::Drained,
-            next_drain_time: now + drain_interval,
+            next_drain_time: drain_interval.next(now),
             fs,
             boot_id: None,
             _namespace_lock: None,
@@ -467,7 +488,7 @@ impl SegmentWriter<Disk> {
             closed_files: VecDeque::new(),
             active_path,
             state,
-            next_index: 1,
+            next_index: NonZeroU32::MIN,
             segment_metadata: SegmentMetadata::default(),
             dropped_events: 0,
             seals: Default::default(),
@@ -476,7 +497,7 @@ impl SegmentWriter<Disk> {
             current_period: Duration::MAX,
             segment_started_at: now,
             prior_seal_kind: SealKind::Drained,
-            next_drain_time: now + DEFAULT_DRAIN_INTERVAL,
+            next_drain_time: DrainInterval::MAX.next(now),
             fs,
             boot_id: None,
             _namespace_lock: None,
@@ -517,6 +538,7 @@ impl SegmentWriter<Memory> {
         /// Override the default segment size.
         max_segment_size: Option<u64>,
         /// Wall-clock rotation period.
+        /// `Duration::MAX` or an unrepresentable deadline disables time-based rotation.
         rotation_period: Option<Duration>,
         /// Set the rotation period from the observed byte rate. Off by
         /// default.
@@ -583,7 +605,7 @@ impl SegmentWriter<Memory> {
         // Adaptation starts short and grows, so the first deadline and the
         // drain that gates it both follow the adapted period, not the ceiling.
         let first_period = adaptive_rotation.map_or(rotation_period, |c| c.min_period);
-        let drain_interval = first_period.min(DEFAULT_DRAIN_INTERVAL);
+        let drain_interval = DrainInterval::new(first_period);
 
         Ok(Self {
             dir,
@@ -595,7 +617,7 @@ impl SegmentWriter<Memory> {
             closed_files: VecDeque::new(),
             active_path,
             state,
-            next_index: 1,
+            next_index: NonZeroU32::MIN,
             segment_metadata,
             dropped_events: 0,
             seals: Default::default(),
@@ -604,7 +626,7 @@ impl SegmentWriter<Memory> {
             current_period: first_period,
             segment_started_at: now,
             prior_seal_kind: SealKind::Drained,
-            next_drain_time: now + drain_interval,
+            next_drain_time: drain_interval.next(now),
             fs,
             boot_id: None,
             _namespace_lock: None,
@@ -715,10 +737,20 @@ impl<M: BufferMode> SegmentWriter<M> {
         dir.join(format!("{stem}.{index}.bin.active"))
     }
 
+    fn current_index(&self) -> u32 {
+        // NonZeroU32 guarantees this subtraction never saturates.
+        self.next_index.get().saturating_sub(1)
+    }
+
     /// Compute the next rotation deadline as `now + period`, or `None` when
-    /// `period == Duration::MAX` (time-based rotation disabled).
+    /// `period == Duration::MAX` or the deadline is unrepresentable
+    /// (time-based rotation disabled).
     fn next_rotation_from(now: Instant, period: Duration) -> Option<Instant> {
-        (period != Duration::MAX).then(|| now + period)
+        if period == Duration::MAX {
+            None
+        } else {
+            now.checked_add(period)
+        }
     }
 
     fn rotate(&mut self, kind: SealKind) -> std::io::Result<()> {
@@ -742,7 +774,7 @@ impl<M: BufferMode> SegmentWriter<M> {
         );
         self.segment_started_at = now;
         self.next_rotation_time = Self::next_rotation_from(now, self.current_period);
-        self.next_drain_time = now + self.drain_interval();
+        self.next_drain_time = self.drain_interval().next(now);
 
         // Take ownership of the encoder (state is Finished until new segment opens).
         let WriterState::Active {
@@ -756,7 +788,7 @@ impl<M: BufferMode> SegmentWriter<M> {
         // are already lost; proceed to rotate rather than erroring.
         let _ = raw.flush();
         let closed_size = raw.bytes_written();
-        let current_index = self.next_index - 1;
+        let current_index = self.current_index();
 
         // Extract the ActiveHandle for sealing.
         let bw: BufWriter<ActiveHandle> = raw.into_inner();
@@ -788,8 +820,14 @@ impl<M: BufferMode> SegmentWriter<M> {
             }
         }
 
-        let new_path = Self::active_path(&self.dir, &self.stem, self.next_index);
-        self.next_index += 1;
+        let new_index = self.next_index.get();
+        let Some(next_index) = self.next_index.checked_add(1) else {
+            // The final sealed segment still counts toward the retention budget.
+            self.evict_oldest()?;
+            return Err(std::io::Error::other("trace segment index overflow"));
+        };
+        self.next_index = next_index;
+        let new_path = Self::active_path(&self.dir, &self.stem, new_index);
 
         // Open the new active segment. The backend self-heals if a disk
         // parent directory was removed underneath us, any other failure
@@ -807,10 +845,7 @@ impl<M: BufferMode> SegmentWriter<M> {
         self.active_path = new_path;
         self.has_real_events = false;
 
-        tracing::debug!(
-            segment_index = self.next_index - 1,
-            "rotated to new trace segment"
-        );
+        tracing::debug!(segment_index = new_index, "rotated to new trace segment");
         self.evict_oldest()?;
         Ok(())
     }
@@ -830,12 +865,13 @@ impl<M: BufferMode> SegmentWriter<M> {
             return bytes;
         }
         // Divide first: max_file_size is u64::MAX when rotation is disabled.
-        self.max_file_size / 100 * ROTATION_TARGET_PERCENT
+        // The percentage is bounded at compile time, so multiplication cannot saturate.
+        (self.max_file_size / 100).saturating_mul(ROTATION_TARGET_PERCENT)
     }
 
     /// How often thread-local buffers are drained.
-    fn drain_interval(&self) -> Duration {
-        self.current_period.min(DEFAULT_DRAIN_INTERVAL)
+    fn drain_interval(&self) -> DrainInterval {
+        DrainInterval::new(self.current_period)
     }
 
     /// Re-estimate the rotation period from the byte rate of the segment just
@@ -859,18 +895,22 @@ impl<M: BufferMode> SegmentWriter<M> {
         };
         let ceiling = config.max_period.unwrap_or(self.rotation_period);
         let floor = config.min_period.min(ceiling);
-        let capped = estimate.min(self.current_period * ROTATION_GROWTH_FACTOR);
+        let capped = estimate.min(self.current_period.saturating_mul(ROTATION_GROWTH_FACTOR));
         self.current_period = capped.clamp(floor, ceiling);
     }
 
     /// Total size across all closed + active segments (disk mode only).
     /// Always returns 0 in memory mode, eviction is handled by the memory backend.
-    fn total_size(&self) -> u64 {
+    fn total_size(&self) -> u128 {
         if !M::IS_DISK {
             return 0;
         }
-        let closed: u64 = self.closed_files.iter().map(|(_, s)| s).sum();
-        closed + self.active_bytes()
+        // Widen so even a u64::MAX budget can detect and evict an overshoot.
+        self.closed_files
+            .iter()
+            .fold(u128::from(self.active_bytes()), |total, (_, size)| {
+                total.saturating_add(u128::from(*size))
+            })
     }
 
     fn evict_oldest(&mut self) -> std::io::Result<()> {
@@ -878,13 +918,13 @@ impl<M: BufferMode> SegmentWriter<M> {
             return Ok(());
         }
         // Always keep at least the current file.
-        while self.total_size() > self.max_total_size && !self.closed_files.is_empty() {
+        while self.total_size() > u128::from(self.max_total_size) && !self.closed_files.is_empty() {
             if let Some((seg_ref, _size)) = self.closed_files.pop_front() {
                 self.fs.remove_sealed(&seg_ref, RemoveReason::Eviction);
             }
         }
         // If even the current file alone exceeds total budget, stop writing.
-        if self.total_size() > self.max_total_size {
+        if self.total_size() > u128::from(self.max_total_size) {
             self.state = WriterState::Finished;
         }
         Ok(())
@@ -947,7 +987,7 @@ impl<M: BufferMode> SegmentWriter<M> {
         } else {
             &mut self.seals.segments_sealed_undrained
         };
-        *counter += 1;
+        *counter = counter.saturating_add(1);
     }
 
     pub(crate) fn seal_counts(&self) -> crate::metrics::SealCounts {
@@ -955,11 +995,13 @@ impl<M: BufferMode> SegmentWriter<M> {
     }
 
     pub(crate) fn should_drain(&self) -> bool {
-        self.has_real_events && time_source().instant().as_std() >= self.next_drain_time
+        matches!(self.state, WriterState::Active { .. })
+            && self.has_real_events
+            && time_source().instant().as_std() >= self.next_drain_time
     }
 
     pub(crate) fn drained(&mut self) -> std::io::Result<bool> {
-        if !self.has_real_events {
+        if matches!(self.state, WriterState::Finished) || !self.has_real_events {
             return Ok(false);
         }
         let now = time_source().instant().as_std();
@@ -971,7 +1013,7 @@ impl<M: BufferMode> SegmentWriter<M> {
             return Ok(true);
         }
         // Periodic drain without rotation; advance the drain timer.
-        self.next_drain_time = now + self.drain_interval();
+        self.next_drain_time = self.drain_interval().next(now);
         Ok(false)
     }
 
@@ -1004,7 +1046,7 @@ impl<M: BufferMode> SegmentWriter<M> {
             .into_inner()
             .unwrap_or_else(|e| e.into_inner().into_parts().0);
 
-        let current_index = self.next_index - 1;
+        let current_index = self.current_index();
 
         if self.has_real_events {
             match self.fs.seal(handle, &self.active_path, current_index) {
@@ -1060,7 +1102,7 @@ impl<M: BufferMode> SegmentWriter<M> {
     fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
         self.write_metadata_if_needed()?;
         let WriterState::Active { writer: raw, .. } = &mut self.state else {
-            self.dropped_events += batch.event_count() as usize;
+            self.dropped_events = self.dropped_events.saturating_add(batch.event_count());
             return Ok(());
         };
         if batch.event_count() > 0 {
@@ -1239,6 +1281,21 @@ mod tests {
     }
 
     #[test]
+    fn test_drain_interval_caps_deadlines_at_30_seconds() {
+        let now = Instant::now();
+        for (period, expected) in [
+            (Duration::ZERO, Duration::ZERO),
+            (Duration::from_secs(5), Duration::from_secs(5)),
+            (Duration::from_secs(30), Duration::from_secs(30)),
+            (Duration::from_secs(31), Duration::from_secs(30)),
+            (Duration::MAX, Duration::from_secs(30)),
+        ] {
+            let deadline = DrainInterval::new(period).next(now);
+            assert_eq!(deadline.duration_since(now), expected);
+        }
+    }
+
+    #[test]
     fn derive_max_file_size_caps_large_budgets_at_100_mib() {
         assert_eq!(
             derive_max_file_size(1024 * BYTES_PER_MIB),
@@ -1378,6 +1435,126 @@ mod tests {
     }
 
     #[test]
+    fn test_rotation_stops_on_segment_index_overflow() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let retained_index = u32::MAX.checked_sub(2).unwrap();
+        std::fs::write(rotating_file(&base, retained_index), []).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(u64::MAX)
+            .build()
+            .unwrap();
+        assert_eq!(writer.next_index.get(), u32::MAX);
+        writer.write_encoded_batch(&test_batch()).unwrap();
+
+        let err = writer.rotate(SealKind::Drained).unwrap_err();
+
+        assert_eq!(err.to_string(), "trace segment index overflow");
+        assert!(matches!(writer.state, WriterState::Finished));
+        assert_eq!(writer.next_index.get(), u32::MAX);
+        let sealed_index = u32::MAX.checked_sub(1).unwrap();
+        assert_eq!(
+            read_trace_events(&rotating_file(&base, sealed_index)).len(),
+            1
+        );
+        assert!(!DiskBuffer::active_path(dir.path(), SEGMENT_STEM, u32::MAX).exists());
+        assert!(!DiskBuffer::active_path(dir.path(), SEGMENT_STEM, 0).exists());
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn test_rotation_index_overflow_evicts_to_budget() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let retained_index = u32::MAX.checked_sub(2).unwrap();
+        let retained = rotating_file(&base, retained_index);
+        std::fs::write(&retained, vec![0u8; 9_000]).unwrap();
+        let budget = 10_000;
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(budget)
+            .build()
+            .unwrap();
+        assert!(Path::new(&retained).exists());
+        while writer.total_size() <= u128::from(budget) {
+            writer.write_encoded_batch(&test_batch()).unwrap();
+        }
+        assert!(writer.active_bytes() < budget);
+
+        assert_eq!(
+            writer.rotate(SealKind::Drained).unwrap_err().to_string(),
+            "trace segment index overflow"
+        );
+        assert!(
+            total_disk_usage(dir.path()) <= budget,
+            "index exhaustion must enforce the retention budget"
+        );
+        assert!(!Path::new(&retained).exists());
+        let sealed_index = u32::MAX.checked_sub(1).unwrap();
+        assert!(!read_trace_events(&rotating_file(&base, sealed_index)).is_empty());
+
+        writer.finalize().unwrap();
+        assert!(total_disk_usage(dir.path()) <= budget);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timed_rotation_index_overflow_stops_drains() {
+        use metrique_timesource::{TimeSource, tokio::set_time_source_for_current_runtime};
+        let _guard = set_time_source_for_current_runtime(TimeSource::tokio(std::time::UNIX_EPOCH));
+        let dir = TempDir::new().unwrap();
+        let retained_index = u32::MAX.checked_sub(2).unwrap();
+        std::fs::write(dir.path().join(format!("trace.{retained_index}.bin")), []).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(100_000)
+            .rotation_period(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(writer.should_drain());
+        assert_eq!(
+            writer.drained().unwrap_err().to_string(),
+            "trace segment index overflow"
+        );
+        assert!(!writer.should_drain());
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(
+            !writer.should_drain(),
+            "a finished writer must not request drains after its deadlines expire"
+        );
+        assert!(
+            !writer.drained().unwrap(),
+            "a finished writer must not report a rotation"
+        );
+    }
+
+    #[test]
+    fn test_restart_rejects_exhausted_segment_indices_before_creating_active_file() {
+        let dir = TempDir::new().unwrap();
+        let last_index = u32::MAX.checked_sub(1).unwrap();
+        let retained = dir.path().join(format!("trace.{last_index}.bin"));
+        std::fs::write(&retained, []).unwrap();
+
+        let err = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_total_size(u64::MAX)
+            .build()
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "trace segment index overflow");
+        assert!(retained.exists());
+        assert!(!DiskBuffer::active_path(dir.path(), SEGMENT_STEM, u32::MAX).exists());
+    }
+
+    #[test]
     fn test_rotating_writer_eviction() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
@@ -1401,6 +1578,34 @@ mod tests {
 
         // Oldest files should be evicted
         assert!(!std::path::Path::new(&rotating_file(&base, 0)).exists());
+    }
+
+    #[test]
+    fn test_eviction_handles_total_size_above_u64_max() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(u64::MAX)
+            .build()
+            .unwrap();
+        for (index, size) in [(10, u64::MAX), (11, 1)] {
+            let path = dir.path().join(format!("trace.{index}.bin"));
+            std::fs::write(&path, []).unwrap();
+            writer.closed_files.push_back((
+                SegmentRef::Disk(crate::sealed::SealedSegment { path, index }),
+                size,
+            ));
+        }
+        assert!(writer.total_size() > u128::from(u64::MAX));
+
+        writer.evict_oldest().unwrap();
+
+        assert!(!dir.path().join("trace.10.bin").exists());
+        assert!(dir.path().join("trace.11.bin").exists());
+        assert_eq!(writer.closed_files.len(), 1);
+        assert!(writer.total_size() <= u128::from(writer.max_total_size));
+        assert!(matches!(writer.state, WriterState::Active { .. }));
     }
 
     #[test]
@@ -2050,7 +2255,7 @@ mod tests {
         writer.write_encoded_batch(&test_batch()).unwrap();
         // The lone active segment already exceeds the total budget.
         assert!(
-            writer.total_size() > max_total_size,
+            writer.total_size() > u128::from(max_total_size),
             "single segment ({}) should exceed budget ({max_total_size})",
             writer.total_size()
         );
@@ -2077,6 +2282,58 @@ mod tests {
 
     // ---- Time-based rotation tests ----
 
+    #[test]
+    fn test_rotation_deadline_handles_unrepresentable_period() {
+        let now = Instant::now();
+        let period = Duration::from_secs(60);
+        assert_eq!(
+            DiskBuffer::next_rotation_from(now, period),
+            Some(now.checked_add(period).unwrap())
+        );
+        assert_eq!(DiskBuffer::next_rotation_from(now, Duration::MAX), None);
+        assert_eq!(
+            DiskBuffer::next_rotation_from(now, Duration::from_secs(u64::MAX)),
+            None
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_unrepresentable_rotation_period_keeps_periodic_drains() {
+        use metrique_timesource::{TimeSource, tokio::set_time_source_for_current_runtime};
+        let _guard = set_time_source_for_current_runtime(TimeSource::tokio(std::time::UNIX_EPOCH));
+
+        let dir = TempDir::new().unwrap();
+        let period = Duration::from_secs(u64::MAX);
+        let mut disk = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(1_000_000)
+            .rotation_period(period)
+            .build()
+            .unwrap();
+        let mut memory = MemoryBuffer::builder()
+            .max_total_size(1_000_000)
+            .rotation_period(period)
+            .build()
+            .unwrap();
+        assert_eq!(disk.next_rotation_time, None);
+        assert_eq!(memory.next_rotation_time, None);
+        disk.write_encoded_batch(&test_batch()).unwrap();
+        memory.write_encoded_batch(&test_batch()).unwrap();
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        fn check_drain<M: BufferMode>(writer: &mut SegmentWriter<M>) {
+            assert!(writer.should_drain());
+            assert!(!writer.drained().unwrap());
+            assert!(!writer.should_drain());
+            assert_eq!(writer.next_index.get(), 1);
+            writer.finalize().unwrap();
+        }
+        check_drain(&mut disk);
+        check_drain(&mut memory);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_time_rotation_triggers_on_expired_boundary() {
         use metrique_timesource::{TimeSource, tokio::set_time_source_for_current_runtime};
@@ -2094,7 +2351,7 @@ mod tests {
 
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
-        let initial_index = writer.next_index;
+        let initial_index = writer.next_index.get();
 
         // Advance past the 60s boundary
         tokio::time::advance(Duration::from_secs(61)).await;
@@ -2105,7 +2362,7 @@ mod tests {
         writer.drained().unwrap();
 
         assert!(
-            writer.next_index > initial_index,
+            writer.next_index.get() > initial_index,
             "expected time-based rotation to trigger"
         );
         writer.finalize().unwrap();
@@ -2144,7 +2401,7 @@ mod tests {
 
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
-        let initial_index = writer.next_index;
+        let initial_index = writer.next_index.get();
 
         // 50s of monotonic time have elapsed under the 60s period, so no rotation.
         // On the old wall-clock-aligned implementation this would advance past the
@@ -2156,7 +2413,8 @@ mod tests {
         writer.drained().unwrap();
 
         assert_eq!(
-            writer.next_index, initial_index,
+            writer.next_index.get(),
+            initial_index,
             "rotation must not fire before one full rotation_period of monotonic time has elapsed",
         );
 
@@ -2166,7 +2424,7 @@ mod tests {
         writer.flush().unwrap();
         writer.drained().unwrap();
         assert!(
-            writer.next_index > initial_index,
+            writer.next_index.get() > initial_index,
             "rotation should fire once a full rotation_period of monotonic time has elapsed",
         );
 
@@ -2194,7 +2452,8 @@ mod tests {
         writer.write_encoded_batch(&empty_batch).unwrap();
 
         assert_eq!(
-            writer.next_index, 1,
+            writer.next_index.get(),
+            1,
             "should not rotate when no real events exist"
         );
         writer.finalize().unwrap();
@@ -2339,14 +2598,16 @@ mod tests {
         // First event after the gap — should NOT trigger rotation
         writer.write_encoded_batch(&test_batch()).unwrap();
         assert_eq!(
-            writer.next_index, 1,
+            writer.next_index.get(),
+            1,
             "first event after idle gap should not trigger immediate rotation"
         );
 
         // Second event shortly after — still within the new boundary
         writer.write_encoded_batch(&test_batch()).unwrap();
         assert_eq!(
-            writer.next_index, 1,
+            writer.next_index.get(),
+            1,
             "second event should still be in the same segment"
         );
 
@@ -2386,12 +2647,12 @@ mod tests {
 
         // Nothing drives should_drain here, so only maybe_rotate can rotate.
         for _ in 0..10_000 {
-            if writer.next_index > 1 {
+            if writer.next_index.get() > 1 {
                 break;
             }
             writer.write_encoded_batch(&test_batch()).unwrap();
         }
-        assert_eq!(writer.next_index, 2, "expected an overflow rotation");
+        assert_eq!(writer.next_index.get(), 2, "expected an overflow rotation");
 
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.rotate(SealKind::Drained).unwrap();
@@ -2502,7 +2763,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(writer.current_period, Duration::from_secs(60));
-        assert_eq!(writer.drain_interval(), DEFAULT_DRAIN_INTERVAL);
+        assert_eq!(writer.drain_interval(), DrainInterval::MAX);
 
         writer.adapt_rotation_period(8_000_000, Duration::from_secs(1));
 
@@ -2514,7 +2775,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let writer = test_writer(&dir);
         assert_eq!(writer.current_period, DEFAULT_MIN_ROTATION_PERIOD);
-        assert_eq!(writer.drain_interval(), DEFAULT_MIN_ROTATION_PERIOD);
+        assert_eq!(
+            writer.drain_interval(),
+            DrainInterval::new(DEFAULT_MIN_ROTATION_PERIOD)
+        );
     }
 
     /// A quiet segment earns a longer period, but only one step at a time, and
@@ -2526,7 +2790,10 @@ mod tests {
 
         writer.adapt_rotation_period(100, Duration::from_secs(60));
         assert_eq!(writer.current_period, DEFAULT_MIN_ROTATION_PERIOD * 2);
-        assert_eq!(writer.drain_interval(), DEFAULT_MIN_ROTATION_PERIOD * 2);
+        assert_eq!(
+            writer.drain_interval(),
+            DrainInterval::new(DEFAULT_MIN_ROTATION_PERIOD * 2)
+        );
 
         writer.adapt_rotation_period(100, Duration::from_secs(60));
         assert_eq!(writer.current_period, DEFAULT_MIN_ROTATION_PERIOD * 4);
@@ -2543,6 +2810,45 @@ mod tests {
         assert_eq!(writer.current_period, Duration::from_secs(60));
     }
 
+    #[test]
+    fn test_rotation_period_growth_saturates_on_overflow() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = test_writer(&dir);
+        writer.current_period = Duration::MAX;
+        writer.adaptive_rotation =
+            Some(AdaptiveRotationConfig::default().max_period(Duration::MAX));
+
+        writer.adapt_rotation_period(80_000, Duration::from_secs(10));
+
+        assert_eq!(writer.current_period, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_seal_counters_saturate_on_overflow() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = test_writer(&dir);
+        writer.seals.segments_sealed_clean = u64::MAX;
+        writer.seals.segments_sealed_undrained = u64::MAX;
+
+        writer.count_seal(SealKind::Drained);
+        writer.count_seal(SealKind::Overflow);
+
+        assert_eq!(writer.seals.segments_sealed_clean, u64::MAX);
+        assert_eq!(writer.seals.segments_sealed_undrained, u64::MAX);
+    }
+
+    #[test]
+    fn test_dropped_event_counter_saturates_on_overflow() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = test_writer(&dir);
+        writer.finalize().unwrap();
+        writer.dropped_events = u64::MAX;
+
+        writer.write_encoded_batch(&test_batch()).unwrap();
+
+        assert_eq!(writer.dropped_events, u64::MAX);
+    }
+
     /// A shorter period applies in full at the next rotation.
     #[test]
     fn test_rotation_period_shrinks_in_one_step() {
@@ -2555,7 +2861,10 @@ mod tests {
         writer.adapt_rotation_period(80_000, Duration::from_secs(10));
 
         assert_eq!(writer.current_period, Duration::from_secs(10));
-        assert_eq!(writer.drain_interval(), Duration::from_secs(10));
+        assert_eq!(
+            writer.drain_interval(),
+            DrainInterval::new(Duration::from_secs(10))
+        );
     }
 
     #[test]
@@ -2637,11 +2946,11 @@ mod tests {
         writer.finalize().unwrap();
 
         assert!(
-            writer.next_index > 2,
+            writer.next_index.get() > 2,
             "expected several rotations, got {}",
-            writer.next_index
+            writer.next_index.get()
         );
-        for i in 0..writer.next_index {
+        for i in 0..writer.next_index.get() {
             let Ok(meta) = std::fs::metadata(rotating_file(&base, i)) else {
                 continue;
             };
