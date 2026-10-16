@@ -9,7 +9,7 @@ use dial9_core::recording::Recorder;
 use dial9_core::source::{FlushContext, Source};
 use dial9_destinations_s3::{FailureBehavior, S3Config};
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9_tokio_telemetry::dump::{DumpCompletion, DumpError, DumpReceipt};
+use dial9_tokio_telemetry::dump::{DumpCompletion, DumpError, DumpReceipt, DumpTrigger};
 use dial9_tokio_telemetry::telemetry::{
     DiskBuffer, MemoryBuffer, RecorderPipelineExt, RecorderTryS3Ext, recorder,
 };
@@ -284,9 +284,9 @@ impl SegmentProcessor for Observe {
     }
 }
 
-struct StagedSource(Option<common::CapturingProcessor>);
+struct StagedSource<P>(Option<P>);
 
-impl Source for StagedSource {
+impl<P: SegmentProcessor + 'static> Source for StagedSource<P> {
     fn name(&self) -> &'static str {
         "staged"
     }
@@ -297,6 +297,45 @@ impl Source for StagedSource {
         self.0
             .take()
             .map(|processor| Box::new(processor) as Box<dyn SegmentProcessor>)
+    }
+}
+
+#[derive(Debug)]
+struct PausedTimeDump {
+    trigger: Option<tokio::sync::oneshot::Receiver<DumpTrigger>>,
+    completed: mpsc::Sender<(Result<DumpReceipt, DumpError>, Duration)>,
+    lookforward: Duration,
+}
+
+impl SegmentProcessor for PausedTimeDump {
+    fn name(&self) -> &'static str {
+        "PausedTimeDump"
+    }
+
+    fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        let trigger = self.trigger.take().unwrap();
+        let completed = self.completed.clone();
+        let lookforward = self.lookforward;
+        Box::pin(async move {
+            // The dedicated worker does not share the caller's Tokio clock.
+            tokio::time::pause();
+            tokio::spawn(async move {
+                let trigger = trigger.await.unwrap();
+                let started = tokio::time::Instant::now();
+                let result = trigger
+                    .dump_time_range(Duration::from_secs(3600), lookforward)
+                    .await;
+                completed.send((result, started.elapsed())).unwrap();
+            });
+            Ok(())
+        })
+    }
+
+    fn process(
+        &mut self,
+        data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(std::future::ready(Ok(data)))
     }
 }
 
@@ -380,26 +419,36 @@ fn assert_unavailable_s3_preserves_dump_deadline(fallible: bool) {
             .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1))
             .build(),
     );
-    let builder = recorder(disk_writer(&directory.path().join("local")));
+    // The dump deadline precedes the circuit breaker's first retry.
+    let lookforward = Duration::from_millis(500);
+    let (trigger_tx, trigger_rx) = tokio::sync::oneshot::channel();
+    let (completed, result_rx) = mpsc::channel();
+    let builder = recorder(memory_writer())
+        .worker_poll_interval(Duration::from_millis(10))
+        .source(StagedSource(Some(PausedTimeDump {
+            trigger: Some(trigger_rx),
+            completed,
+            lookforward,
+        })));
     let builder = if fallible {
         builder.try_s3_async(config(), async move { Ok(client) })
     } else {
         builder.with_s3_uploader_client(config(), client)
     };
     let recorder = builder.with_dump_trigger(|_| {}).build();
-    let runtime = runtime();
     let trigger = recorder.handle().dump_trigger().unwrap();
-    let result = runtime.block_on(async {
-        tokio::time::timeout(
-            DEADLINE,
-            trigger.dump_time_range(Duration::from_secs(3600), Duration::from_millis(50)),
-        )
-        .await
-    });
+    trigger_tx.send(trigger.clone()).unwrap();
+    let (result, elapsed) = result_rx
+        .recv_timeout(DEADLINE)
+        .expect("paused-time dump completes");
     recorder.graceful_shutdown(DEADLINE);
     assert!(
-        matches!(result, Ok(Err(DumpError::PipelineUnavailable))),
+        matches!(result, Err(DumpError::PipelineUnavailable)),
         "an unavailable S3 stage must respect the dump deadline: {result:?}"
+    );
+    assert!(
+        elapsed <= lookforward + Duration::from_millis(1),
+        "dump exceeded its paused-time deadline: {elapsed:?}"
     );
 }
 
@@ -678,12 +727,29 @@ fn disable_dial9_refuses_enable_stops_dumps_and_retains_existing_files() {
 
 #[test]
 fn pending_constructor_does_not_block_graceful_shutdown() {
+    struct ConstructorLifetime {
+        started: tokio::time::Instant,
+        cancelled: mpsc::Sender<Duration>,
+    }
+
+    impl Drop for ConstructorLifetime {
+        fn drop(&mut self) {
+            self.cancelled.send(self.started.elapsed()).unwrap();
+        }
+    }
+
     let (started, constructor_started) = mpsc::channel();
     let (stopped, worker_stopped) = mpsc::channel();
+    let (cancelled, constructor_cancelled) = mpsc::channel();
     let recorder = recorder(memory_writer())
         .on_recording_thread_start(worker_teardown_signal(stopped))
         .try_s3_async(config(), async move {
             assert_eq!(std::thread::current().name(), Some("dial9-worker"));
+            tokio::time::pause();
+            let _lifetime = ConstructorLifetime {
+                started: tokio::time::Instant::now(),
+                cancelled,
+            };
             started.send(()).unwrap();
             std::future::pending().await
         })
@@ -695,8 +761,9 @@ fn pending_constructor_does_not_block_graceful_shutdown() {
     let handle = recorder.handle().clone();
     assert!(handle.is_enabled());
     let (finished, shutdown_finished) = mpsc::channel();
+    let drain_timeout = Duration::from_secs(1);
     let thread = std::thread::spawn(move || {
-        recorder.graceful_shutdown(Duration::from_millis(50));
+        recorder.graceful_shutdown(drain_timeout);
         finished.send(()).unwrap();
     });
     shutdown_finished
@@ -704,6 +771,11 @@ fn pending_constructor_does_not_block_graceful_shutdown() {
         .expect("graceful shutdown cancels the pending constructor");
     thread.join().unwrap();
     worker_stopped.recv_timeout(DEADLINE).unwrap();
+    let elapsed = constructor_cancelled.recv_timeout(DEADLINE).unwrap();
+    assert!(
+        elapsed <= drain_timeout + Duration::from_millis(1),
+        "constructor outlived the paused-time shutdown deadline: {elapsed:?}"
+    );
     assert!(!handle.is_enabled());
     assert_worker_stopped(&handle);
 }
