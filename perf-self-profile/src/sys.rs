@@ -7,6 +7,11 @@ mod linux;
     target_os = "linux",
     all(target_os = "android", target_arch = "aarch64")
 ))]
+pub(crate) use linux::KallsymsSnapshot;
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "android", target_arch = "aarch64")
+))]
 pub(crate) use linux::fp_profiler;
 #[cfg(any(
     target_os = "linux",

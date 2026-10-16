@@ -2,6 +2,7 @@
 
 /** The page's static elements, resolved once at boot. */
 export interface PageEls {
+  header: HTMLElement;
   periods: HTMLElement;
   btnAdd: HTMLButtonElement;
   btnLoad: HTMLButtonElement;
@@ -23,6 +24,7 @@ const byId = <T extends HTMLElement>(id: string): T =>
 /** Resolve the static shell elements; throws if the markup is incomplete. */
 export function pageEls(): PageEls {
   return {
+    header: byId("page-header"),
     periods: byId("periods"),
     btnAdd: byId("btn-add"),
     btnLoad: byId("btn-load"),

@@ -30,3 +30,10 @@ export type {
 
 export { copyText, mountCopyLink } from "./copy-link.js";
 export type { CopyLinkOptions, CopyLinkHandle } from "./copy-link.js";
+
+export {
+  browserHref,
+  mountBrowserLink,
+  BROWSER_LINK_LABEL,
+  BROWSER_LINK_TITLE,
+} from "./browser-link.js";

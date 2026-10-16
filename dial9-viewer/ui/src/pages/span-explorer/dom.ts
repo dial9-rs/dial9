@@ -8,6 +8,7 @@ const byId = <T extends HTMLElement>(id: string): T =>
 
 /** The page's static elements, resolved once at boot. */
 export interface PageEls {
+  header: HTMLElement;
   stats: HTMLElement;
   toolbar: HTMLElement;
   filterBar: HTMLElement;
@@ -28,6 +29,7 @@ export interface PageEls {
 /** Resolve the static shell elements; throws if the markup is incomplete. */
 export function pageEls(): PageEls {
   return {
+    header: byId("page-header"),
     stats: byId("stats"),
     toolbar: byId("toolbar"),
     filterBar: byId("filter-bar"),

@@ -142,10 +142,24 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
 .host-card .meta { font-size: 0.8em; color: #888; margin-top: 6px; }
 
 /* Density heatmap timeline */
+#browse-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #heatmap-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#heatmap-host-controls {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+    padding: 8px 20px; flex-shrink: 0; border-bottom: 1px solid #222;
+    font-size: 0.8em;
+}
+#heatmap-host-filter {
+    width: 300px; max-width: 100%; padding: 5px 8px;
+    background: #2a2a4a; color: #e0e0e0; border: 1px solid #444;
+    border-radius: 4px; font: inherit;
+}
+#heatmap-host-count, #heatmap-sort-order { color: #aaaac0; }
+#heatmap-host-clear { padding: 4px 10px; }
 #heatmap-hint {
     padding: 8px 20px; font-size: 0.8em; color: #888;
     border-bottom: 1px solid #222; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+    flex-shrink: 0;
 }
 #heatmap-hint .legend { display: inline-flex; align-items: center; gap: 6px; }
 #heatmap-reset-zoom, #heatmap-show-all-hosts { padding: 2px 10px; font-size: 0.95em; }
@@ -160,10 +174,13 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
     background-image: repeating-linear-gradient(-45deg,
         rgba(120,120,160,0.35) 0 1px, transparent 1px 6px);
 }
-#heatmap-body { flex: 1; overflow: auto; display: flex; min-height: 0; position: relative; }
+#heatmap-body {
+    flex: 1; overflow-x: hidden; overflow-y: scroll; scrollbar-gutter: stable;
+    display: flex; min-height: 0; position: relative;
+}
 #heatmap-labels { flex-shrink: 0; width: var(--heatmap-label-w); border-right: 2px solid #3a3a5e; }
 #heatmap-label-resizer {
-    position: absolute; top: 0; bottom: 0;
+    position: absolute; top: 0;
     left: calc(var(--heatmap-label-w) - 4px); width: 8px;
     cursor: col-resize; z-index: 1;
 }
@@ -182,7 +199,7 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
 #heatmap-labels .row .svc { color: #7ec8e3; }
 #heatmap-labels .row .boot { color: #00e5ff; font-size: 0.85em; }
 #heatmap-plot { flex: 1; position: relative; min-width: 0; }
-#heatmap-canvas { display: block; width: 100%; cursor: crosshair; }
+#heatmap-canvas { display: block; position: absolute; top: 0; width: 100%; cursor: crosshair; }
 #heatmap-sel {
     position: absolute; top: 0; pointer-events: none; display: none;
     background: rgba(108,99,255,0.22); border: 1px solid #6c63ff;

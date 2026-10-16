@@ -26,6 +26,18 @@ impl SymbolizeProcessor {
             symbolizer: std::sync::Arc::new(crate::offline_symbolize::OfflineSymbolizer::new()),
         }
     }
+
+    /// Like [`new`](Self::new), but kernel frames use a `/proc/kallsyms` snapshot taken now; see
+    /// [`OfflineSymbolizer::try_with_kallsyms_snapshot`](crate::offline_symbolize::OfflineSymbolizer::try_with_kallsyms_snapshot).
+    /// `CpuProfilingConfig::snapshot_kallsyms` only affects dial9's default pipeline; with a
+    /// custom `PipelineBuilder`, `.pipe()` this yourself.
+    pub fn try_with_kallsyms_snapshot() -> std::io::Result<Self> {
+        Ok(Self {
+            symbolizer: std::sync::Arc::new(
+                crate::offline_symbolize::OfflineSymbolizer::try_with_kallsyms_snapshot()?,
+            ),
+        })
+    }
 }
 
 impl Default for SymbolizeProcessor {

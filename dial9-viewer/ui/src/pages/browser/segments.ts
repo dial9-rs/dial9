@@ -73,17 +73,28 @@ export function toSegments(objects: readonly BrowseObject[]): HeatmapSegment[] {
 }
 
 /**
- * Group segments into host rows, precomputing the per-row density inputs
- * once (they are reused across zoom/resize redraws): segments tiled so
+ * Group segments into host rows ordered by total trace bytes, largest first.
+ * Precompute the per-row density inputs once (reused across zoom/resize
+ * redraws): segments tiled so
  * upload-lag overlaps don't double-count, plus the genuine coverage gaps
  * between them.
  */
 export function toRows(segments: readonly HeatmapSegment[]): HeatmapRow[] {
-  return groupByHost(segments).map((row) => ({
-    ...row,
-    tiled: tileSegments(row.segments),
-    gaps: segmentGaps(row.segments),
-  }));
+  return groupByHost(segments)
+    .sort((a, b) => b.totalBytes - a.totalBytes || a.label.localeCompare(b.label))
+    .map((row) => ({
+      ...row,
+      tiled: tileSegments(row.segments),
+      gaps: segmentGaps(row.segments),
+    }));
+}
+
+export function filterHostRows(
+  rows: readonly HeatmapRow[],
+  query: string,
+): readonly HeatmapRow[] {
+  const needle = query.trim().toLowerCase();
+  return needle ? rows.filter((row) => row.host.toLowerCase().includes(needle)) : rows;
 }
 
 /** Full data extent across segments. */

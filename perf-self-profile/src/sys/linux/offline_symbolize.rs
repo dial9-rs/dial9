@@ -6,6 +6,7 @@ use dial9_trace_format::decoder::Decoder;
 use dial9_trace_format::encoder::{Encoder, FxBuildHasher, FxHashMap};
 use std::collections::HashSet;
 use std::io::{self, Write};
+use std::path::Path;
 use std::time::Duration;
 
 type FxHashSet<T> = HashSet<T, FxBuildHasher>;
@@ -75,9 +76,11 @@ pub(crate) fn symbolize_one_shot(
         &symbolizer,
         &mut containers,
         output,
+        None,
     )
 }
 
+/// `kallsyms` overrides `/proc/kallsyms` for kernel addresses (e.g. a snapshot).
 pub(crate) fn write_symbol_data(
     decoder: Decoder<'_>,
     addresses: &FxHashSet<u64>,
@@ -85,6 +88,7 @@ pub(crate) fn write_symbol_data(
     symbolizer: &Symbolizer,
     containers: &mut SymbolizeContainers,
     output: &mut impl Write,
+    kallsyms: Option<&Path>,
 ) -> io::Result<()> {
     let mut encoder = decoder.into_encoder(output);
 
@@ -134,29 +138,42 @@ pub(crate) fn write_symbol_data(
     // Batch-resolve kernel addresses.
     if !containers.kernel_addrs.is_empty() {
         let src = source::Source::Kernel(source::Kernel {
-            kallsyms: blazesym::MaybeDefault::Default,
+            kallsyms: match kallsyms {
+                Some(path) => blazesym::MaybeDefault::Some(path.to_path_buf()),
+                None => blazesym::MaybeDefault::Default,
+            },
             vmlinux: blazesym::MaybeDefault::None,
             kaslr_offset: Some(0),
             debug_syms: false,
             _non_exhaustive: (),
         });
-        if let Ok(results) = symbolizer.symbolize(&src, Input::AbsAddr(&containers.kernel_addrs)) {
-            write_symbolized_batch(&results, &containers.kernel_addrs, &mut encoder)?;
-        } else {
-            // Fallback: emit unresolved kernel placeholders.
-            for &addr in &containers.kernel_addrs {
-                let name = format!("[kernel] {:#x}", addr);
-                let symbol_name = encoder.intern_string(&name)?;
-                let source_file = encoder.intern_string("kernel")?;
-                encoder.write(&SymbolTableEntry {
-                    timestamp_ns: 0,
-                    addr,
-                    size: 0,
-                    symbol_name,
-                    inline_depth: 0,
-                    source_file,
-                    source_line: 0,
-                })?;
+        match symbolizer.symbolize(&src, Input::AbsAddr(&containers.kernel_addrs)) {
+            Ok(results) => {
+                write_symbolized_batch(&results, &containers.kernel_addrs, &mut encoder)?;
+            }
+            Err(err) => {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(
+                        kallsyms = ?kallsyms,
+                        count = containers.kernel_addrs.len(),
+                        error = %err,
+                        "failed to symbolize kernel addresses, using placeholders"
+                    );
+                });
+                for &addr in &containers.kernel_addrs {
+                    let name = format!("[kernel] {:#x}", addr);
+                    let symbol_name = encoder.intern_string(&name)?;
+                    let source_file = encoder.intern_string("kernel")?;
+                    encoder.write(&SymbolTableEntry {
+                        timestamp_ns: 0,
+                        addr,
+                        size: 0,
+                        symbol_name,
+                        inline_depth: 0,
+                        source_file,
+                        source_line: 0,
+                    })?;
+                }
             }
         }
     }

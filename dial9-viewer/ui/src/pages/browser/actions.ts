@@ -47,7 +47,7 @@ import type { BrowserEls } from "./dom.js";
 import { dateToPickerStr, epochSeconds, pickerToDate, xToTime } from "./format.js";
 import { createOpenLinks } from "./open-links.js";
 import { sortRawRows, toRawRows } from "./raw-rows.js";
-import { computeExtent, toRows, toSegments } from "./segments.js";
+import { computeExtent, filterHostRows, toRows, toSegments } from "./segments.js";
 import type {
   BrowseObject,
   BrowserStore,
@@ -82,6 +82,7 @@ export interface BrowserActions {
   resetBrowsePane(): void;
   focusHost(row: HeatmapRow): void;
   showAllHosts(): void;
+  filterHosts(query: string): void;
   zoomToX(x0: number, x1: number): void;
   resetHeatmapZoom(): void;
   selectSegmentAt(x: number, y: number): void;
@@ -250,7 +251,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   function renderHeatmapState(opts?: { preserveSelection?: boolean }): void {
     const preserve = opts?.preserveSelection ?? false;
     const b = store.getState().browse;
-    if (!b.rows.length) {
+    if (!b.segments.length) {
       store.update("browse", {
         selection: preserve ? b.selection : null,
         heatmapVisible: false,
@@ -382,6 +383,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       });
 
       const segments = toSegments(allObjects);
+      const allRows = toRows(segments);
       const hostCount = new Set(
         segments.map((segment) => segment.host).filter((host) => host !== ""),
       ).size;
@@ -395,7 +397,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       store.update("browse", {
         serviceMetadata,
         segments,
-        rows: toRows(segments),
+        allRows,
+        rows: filterHostRows(allRows, store.getState().browse.hostFilter),
         unfocusedRows: null,
       });
 
@@ -649,6 +652,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         activeService: requestedSelection.active,
         serviceDiscovery: "ready",
         segments: [],
+        allRows: [],
         rows: [],
         unfocusedRows: null,
         domain: null,
@@ -674,6 +678,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       activeService: null,
       serviceDiscovery: "loading",
       segments: [],
+      allRows: [],
       rows: [],
       unfocusedRows: null,
       domain: null,
@@ -820,6 +825,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     els.serviceInput.value = "";
     store.update("browse", {
       segments: [],
+      allRows: [],
+      hostFilter: "",
       rows: [],
       unfocusedRows: null,
       services: [],
@@ -853,6 +860,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("browse", {
       activeService: null,
       segments: [],
+      allRows: [],
       rows: [],
       unfocusedRows: null,
       domain: null,
@@ -877,6 +885,18 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("browse", {
       unfocusedRows: b.rows,
       rows: [row],
+      selection: null,
+    });
+    store.update("transient", { drag: null });
+  }
+
+  function filterHosts(query: string): void {
+    const b = store.getState().browse;
+    pendingSelectionScope = null;
+    store.update("browse", {
+      hostFilter: query,
+      rows: filterHostRows(b.allRows, query),
+      unfocusedRows: null,
       selection: null,
     });
     store.update("transient", { drag: null });
@@ -1132,6 +1152,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     clearBrowseNoService,
     focusHost,
     showAllHosts,
+    filterHosts,
     zoomToX,
     resetHeatmapZoom,
     selectSegmentAt,

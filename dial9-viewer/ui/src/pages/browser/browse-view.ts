@@ -4,9 +4,9 @@
 // transitions, densityColor ramp).
 //
 // The paint is memoized on its redraw triggers: a new result set (rows
-// identity), a domain change (zoom/reset), a TZ flip, and the debounced
-// resize (browse.renderEpoch). Anything else that changes the browse slice
-// (e.g. the selection) re-runs the cheap chrome writes only.
+// identity), a domain change (zoom/reset), a TZ flip, a resize, or a scroll
+// (browse.renderEpoch). Other browse changes, such as the selection, re-run
+// the cheap chrome writes only.
 
 // Leaf heatmap seam, not the lib/canvas barrel (see actions.ts: the barrel
 // evaluates trace_analysis.js, which the browser page must not carry).
@@ -57,8 +57,33 @@ export function mountBrowseView({ store, els, actions }: PageCtx): void {
   let lastDomain: TimeDomain | null = null;
   let lastTz: boolean | null = null;
   let lastEpoch = -1;
+  let lastHeight = -1;
+  let densityRows: readonly HeatmapRow[] | null = null;
+  let densityDomain: TimeDomain | null = null;
+  let densityWidth = -1;
+  let colMax = 0;
+  let paintedRows: readonly HeatmapRow[] | null = null;
+  let paintedDomain: TimeDomain | null = null;
+  let paintedTz: boolean | null = null;
+  let paintedWidth = -1;
+  let paintedDpr = -1;
+  let paintedViewportHeight = -1;
+  let paintedOffsetLeft = -1;
+  let paintedTop = 0;
+  let paintedBottom = 0;
 
   els.heatmapShowAllHosts.addEventListener("click", () => actions.showAllHosts());
+  els.heatmapHostFilter.addEventListener("input", () => actions.filterHosts(els.heatmapHostFilter.value));
+  els.heatmapHostClear.addEventListener("click", () => actions.filterHosts(""));
+  const repaint = () => store.update("browse", {
+    renderEpoch: store.getState().browse.renderEpoch + 1,
+  });
+  els.heatmapBody.addEventListener("scroll", repaint);
+  // Header/credential-panel changes can resize the viewport without a
+  // window resize. Hidden tabs are measured again when they become visible.
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(repaint).observe(els.heatmapBody);
+  }
 
   function hostButton(row: HeatmapRow): HTMLButtonElement {
     const button = document.createElement("button");
@@ -126,11 +151,35 @@ export function mountBrowseView({ store, els, actions }: PageCtx): void {
 
   function drawCanvas(rows: readonly HeatmapRow[], domain: TimeDomain, tz: boolean): void {
     const W = Math.max(50, Math.floor(els.heatmapPlot.clientWidth));
-    const H = rows.length * ROW_H;
+    const totalHeight = rows.length * ROW_H;
+    const viewportHeight = Math.min(totalHeight, els.heatmapBody.clientHeight);
+    const scrollTop = els.heatmapBody.scrollTop;
     const dpr = window.devicePixelRatio || 1;
     const canvas = els.heatmapCanvas;
-    canvas.width = Math.floor(W * dpr);
-    canvas.height = Math.floor(H * dpr);
+    // Reserve full scroll coordinates; the absolutely positioned bitmap
+    // moves with the labels. A viewport of overscan above/below lets native
+    // scrolling reuse pixels without resetting the canvas on every frame.
+    els.heatmapPlot.style.height = totalHeight + "px";
+    els.heatmapLabelResizer.style.top = scrollTop + "px";
+    els.heatmapLabelResizer.style.height = viewportHeight + "px";
+    if (
+      rows === paintedRows && domain === paintedDomain && tz === paintedTz &&
+      W === paintedWidth && dpr === paintedDpr &&
+      viewportHeight === paintedViewportHeight &&
+      els.heatmapPlot.offsetLeft === paintedOffsetLeft &&
+      canvas.height > 0 &&
+      scrollTop >= paintedTop && scrollTop + viewportHeight <= paintedBottom
+    ) return;
+
+    const firstRow = Math.max(0, Math.floor((scrollTop - viewportHeight) / ROW_H));
+    const endRow = Math.min(rows.length, Math.ceil((scrollTop + 2 * viewportHeight) / ROW_H));
+    const top = firstRow * ROW_H;
+    const H = (endRow - firstRow) * ROW_H;
+    const pixelWidth = Math.floor(W * dpr);
+    const pixelHeight = Math.floor(H * dpr);
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    canvas.style.top = top + "px";
     canvas.style.width = W + "px";
     canvas.style.height = H + "px";
     const ctx = canvas.getContext("2d");
@@ -143,18 +192,25 @@ export function mountBrowseView({ store, els, actions }: PageCtx): void {
     // Pass 1: per-row density columns + global max (for normalization).
     // Uses tiled segments (ends clamped to the next start) so upload-lag
     // overlaps at segment seams don't double-count into a bright artifact.
-    const cols = rows.map((r) => accumulateDensity(r.tiled, tMin, tMax, W));
-    let colMax = 0;
-    for (const c of cols) {
-      for (let i = 0; i < c.length; i++) {
-        if (c[i]! > colMax) colMax = c[i]!;
+    // Normalize against all hosts, so scrolling never changes a row's color.
+    // Retain only the maximum, rather than a host-count × width pixel buffer.
+    if (rows !== densityRows || domain !== densityDomain || W !== densityWidth) {
+      colMax = 0;
+      for (const row of rows) {
+        const cols = accumulateDensity(row.tiled, tMin, tMax, W);
+        for (const value of cols) {
+          if (value > colMax) colMax = value;
+        }
       }
+      densityRows = rows;
+      densityDomain = domain;
+      densityWidth = W;
     }
 
-    // Pass 2: draw each row's strip, then boot-change markers on top.
-    for (let r = 0; r < rows.length; r++) {
-      const rowCols = cols[r]!;
-      const y = r * ROW_H;
+    // Pass 2: draw buffered strips, then boot-change markers on top.
+    for (let r = firstRow; r < endRow; r++) {
+      const rowCols = accumulateDensity(rows[r]!.tiled, tMin, tMax, W);
+      const y = r * ROW_H - top;
       // Alternating base background so empty rows stay visually distinct.
       ctx.fillStyle = r % 2 ? "#20203e" : "#191932";
       ctx.fillRect(0, y, W, ROW_H);
@@ -248,6 +304,15 @@ export function mountBrowseView({ store, els, actions }: PageCtx): void {
     }
 
     drawAxis(ticks);
+    paintedRows = rows;
+    paintedDomain = domain;
+    paintedTz = tz;
+    paintedWidth = W;
+    paintedDpr = dpr;
+    paintedViewportHeight = viewportHeight;
+    paintedOffsetLeft = els.heatmapPlot.offsetLeft;
+    paintedTop = top;
+    paintedBottom = endRow * ROW_H;
   }
 
   // Tick labels under the plot, offset by its actual position so they line
@@ -267,6 +332,10 @@ export function mountBrowseView({ store, els, actions }: PageCtx): void {
   store.subscribe(["browse", "ui"], (state) => {
     assertInScheduledRender("browse-view render");
     const b = state.browse;
+    if (els.heatmapHostFilter.value !== b.hostFilter) els.heatmapHostFilter.value = b.hostFilter;
+    els.heatmapHostClear.disabled = b.hostFilter === "";
+    els.heatmapHostCount.textContent =
+      `${b.rows.length} of ${b.allRows.length} rows${b.rows.length ? "" : " · No matching hosts"}`;
 
     // Truncation banner.
     if (b.warning) {
@@ -291,22 +360,33 @@ export function mountBrowseView({ store, els, actions }: PageCtx): void {
       (b.domain.tMin !== b.fullDomain.tMin || b.domain.tMax !== b.fullDomain.tMax);
     els.heatmapResetZoom.style.display = zoomed ? "" : "none";
 
-    if (b.heatmapVisible && b.rows !== lastRows) rebuildLabels(b.rows);
+    if (b.heatmapVisible && b.rows !== lastRows) {
+      els.heatmapBody.scrollTop = 0;
+      rebuildLabels(b.rows);
+    }
     els.heatmapShowAllHosts.style.display = b.unfocusedRows ? "" : "none";
 
-    if (!b.heatmapVisible || !b.rows.length || !b.domain) return;
+    if (!b.rows.length) {
+      els.heatmapCanvas.height = 0;
+      els.heatmapPlot.style.height = "0px";
+      lastRows = b.rows;
+      lastEpoch = -1;
+    }
+    if (!b.heatmapVisible || !b.rows.length || !b.domain || state.ui.tab !== "browse") return;
 
     if (
       b.rows !== lastRows ||
       b.domain !== lastDomain ||
       state.ui.useLocalTz !== lastTz ||
-      b.renderEpoch !== lastEpoch
+      b.renderEpoch !== lastEpoch ||
+      els.heatmapBody.clientHeight !== lastHeight
     ) {
       drawCanvas(b.rows, b.domain, state.ui.useLocalTz);
       lastRows = b.rows;
       lastDomain = b.domain;
       lastTz = state.ui.useLocalTz;
       lastEpoch = b.renderEpoch;
+      lastHeight = els.heatmapBody.clientHeight;
     }
   });
 }

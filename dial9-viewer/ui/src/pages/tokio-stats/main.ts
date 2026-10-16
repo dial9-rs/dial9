@@ -15,6 +15,7 @@ import {
   tokioStatsUrl,
 } from "../../lib/trace/index.js";
 import type { TokioStatsQuery, TokioStatsResponse } from "../../lib/trace/index.js";
+import { mountBrowserLink } from "../../lib/url/index.js";
 import { pageEls } from "./dom.js";
 import { formatDuration, datetimeToNs, thresholdNs, zoneName } from "./format.js";
 import { computeStats, buildDiffModel } from "./stats.js";
@@ -80,6 +81,7 @@ function effectiveScope(period: Period): ScopeParams {
 }
 
 const els = pageEls();
+mountBrowserLink(els.header, originalParams.toString());
 
 let periods: Period[] = [];
 let periodIdCounter = 0;

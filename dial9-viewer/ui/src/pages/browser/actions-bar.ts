@@ -86,7 +86,9 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
         els.cpuBtn.disabled = true;
         els.healthBtn.disabled = true;
         els.spansBtn.disabled = true;
-        els.selectionWarn.textContent = "";
+        els.selectionWarn.textContent = state.browse.hostFilter.trim() && state.browse.rows.length
+          ? "Select a trace to open it; host profiles need a recognized host layout."
+          : "";
         els.selectionCount.textContent = "";
         return;
       }
@@ -111,6 +113,7 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
           : "";
       const scopeLabel = sel ? "" : state.browse.unfocusedRows
         ? "Focused host · "
+        : state.browse.hostFilter.trim() ? "Filtered hosts · "
         : "Current service · ";
       els.selectionCount.textContent = `${scopeLabel}${profileSel.keys.length} segment${profileSel.keys.length !== 1 ? "s" : ""} · ${formatSize(profileSel.bytes)}${win}`;
       return;

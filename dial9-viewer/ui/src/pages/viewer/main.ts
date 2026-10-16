@@ -54,6 +54,7 @@ import {
 import { bootScopeFromSearch } from "./scope-boot.js";
 import {
   bindViewStateToUrl,
+  browserHref,
   type ViewStateBinding,
 } from "../../lib/url/index.js";
 import {
@@ -161,6 +162,7 @@ function boot(): void {
 
   const source = traceSource(window.location.search);
   const keyDerivedIdentity = readKeyDerivedIdentity(window.location.search);
+  const browserLink = browserHref(window.location.search);
 
   // Tab title: "<service> | dial9 Trace Viewer". Same embedded-wins rule as
   // the toolbar identity chip; the key-derived service shows until a trace
@@ -190,6 +192,7 @@ function boot(): void {
   const shell = mountShell(root, store, {
     toggleHelp: () => help.toggle(),
     sourceLabel: () => loadChrome?.currentLabel() ?? source.label,
+    browserHref: browserLink,
     // Key-derived svc/host from the browser handoff. A boot constant: the
     // toolbar reconciles it against the trace-embedded metadata.
     keyDerivedIdentity,
@@ -392,6 +395,7 @@ function boot(): void {
   const boot = mountLoadChrome({
     store,
     esc,
+    browserHref: browserLink,
     onError: (message) => {
       toasts.show({ id: "load-error", type: "error", message });
     },

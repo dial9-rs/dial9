@@ -161,6 +161,30 @@ impl OfflineSymbolizer {
         }
     }
 
+    /// Like [`new`](Self::new), but snapshot `/proc/kallsyms` now and symbolize
+    /// kernel frames against the copy, so they still resolve after the process
+    /// drops to a user that `kernel.kptr_restrict=1` masks addresses for. Call
+    /// before dropping privileges; kernel modules loaded afterwards are not
+    /// resolved, and the copy stays in memory for the symbolizer's lifetime.
+    /// Readable by other processes only while this one is dumpable or by
+    /// `CAP_SYS_PTRACE`.
+    ///
+    /// Errors if the snapshot cannot be taken (e.g. addresses are already
+    /// masked). On targets other than Linux and Android/aarch64 returns
+    /// `ErrorKind::Unsupported`.
+    pub fn try_with_kallsyms_snapshot() -> io::Result<Self> {
+        Ok(Self {
+            inner: imp::OfflineSymbolizerImpl::try_with_kallsyms_snapshot()?,
+        })
+    }
+
+    /// Path of the kallsyms snapshot (`/proc/self/fd/<n>`), if one is in use.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub fn kallsyms_snapshot_path(&self) -> Option<&std::path::Path> {
+        self.inner.kallsyms_snapshot_path()
+    }
+
     /// Symbolize a trace segment.
     ///
     /// Blocks the calling thread until the dedicated symbolizer thread
@@ -219,6 +243,7 @@ impl std::fmt::Debug for OfflineSymbolizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OfflineSymbolizer")
             .field("symbolizer_constructions", &self.symbolizer_constructions())
+            .field("kallsyms_snapshot", self.inner.kernel_symbols())
             .finish_non_exhaustive()
     }
 }
@@ -233,6 +258,7 @@ mod imp {
     use dial9_trace_format::decoder::Decoder;
     use std::io;
     use std::panic::AssertUnwindSafe;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread::JoinHandle;
@@ -296,15 +322,36 @@ mod imp {
         state: Mutex<Option<ThreadState>>,
         symbolizer_constructions: Arc<AtomicU64>,
         state_constructions: Arc<AtomicU64>,
+        /// `None`: live `/proc/kallsyms`. The memfd must outlive the worker thread, which `Drop`
+        /// guarantees by joining first.
+        kallsyms_snapshot: Option<crate::sys::KallsymsSnapshot>,
     }
 
     impl OfflineSymbolizerImpl {
         pub(super) fn new() -> Self {
+            Self::build(None)
+        }
+
+        pub(super) fn try_with_kallsyms_snapshot() -> io::Result<Self> {
+            Ok(Self::build(Some(crate::sys::KallsymsSnapshot::capture()?)))
+        }
+
+        pub(super) fn build(kallsyms_snapshot: Option<crate::sys::KallsymsSnapshot>) -> Self {
             Self {
                 state: Mutex::new(None),
                 symbolizer_constructions: Arc::new(AtomicU64::new(0)),
                 state_constructions: Arc::new(AtomicU64::new(0)),
+                kallsyms_snapshot,
             }
+        }
+
+        pub(super) fn kernel_symbols(&self) -> &dyn std::fmt::Debug {
+            &self.kallsyms_snapshot
+        }
+
+        #[cfg(feature = "test-util")]
+        pub(super) fn kallsyms_snapshot_path(&self) -> Option<&Path> {
+            self.kallsyms_snapshot.as_ref().map(|s| s.path())
         }
 
         /// Lazily spawn the worker thread on first use. Subsequent calls
@@ -317,9 +364,13 @@ mod imp {
             let (tx, rx) = mpsc::channel::<Request>();
             let counter = Arc::clone(&self.symbolizer_constructions);
             let state_counter = Arc::clone(&self.state_constructions);
+            let kallsyms = self
+                .kallsyms_snapshot
+                .as_ref()
+                .map(|s| s.path().to_path_buf());
             let join = std::thread::Builder::new()
                 .name("dial9-symbolizer".to_string())
-                .spawn(move || worker_loop(rx, counter, state_counter))
+                .spawn(move || worker_loop(rx, counter, state_counter, kallsyms))
                 .map_err(|e| {
                     io::Error::other(format!("failed to spawn dial9-symbolizer thread: {e}"))
                 })?;
@@ -381,6 +432,7 @@ mod imp {
         rx: mpsc::Receiver<Request>,
         constructions: Arc<AtomicU64>,
         state_constructions: Arc<AtomicU64>,
+        kallsyms: Option<PathBuf>,
     ) {
         // Register with ctimer so this thread is profiled even without perf's
         // inherit mode.
@@ -398,7 +450,7 @@ mod imp {
                 blazesym::symbolize::Symbolizer::new()
             });
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                run_symbolize(&req.input, &req.maps, sym, &mut state)
+                run_symbolize(&req.input, &req.maps, sym, &mut state, kallsyms.as_deref())
             }));
             let result = match result {
                 Ok(r) => r,
@@ -426,6 +478,7 @@ mod imp {
         maps: &[MapsEntry],
         symbolizer: &blazesym::symbolize::Symbolizer,
         state: &mut SymbolizeState,
+        kallsyms: Option<&Path>,
     ) -> io::Result<Vec<u8>> {
         state.clear();
 
@@ -449,6 +502,7 @@ mod imp {
             symbolizer,
             &mut state.containers,
             &mut state.output,
+            kallsyms,
         )?;
         Ok(std::mem::take(&mut state.output))
     }
@@ -480,6 +534,22 @@ mod imp {
     impl OfflineSymbolizerImpl {
         pub(super) fn new() -> Self {
             Self
+        }
+
+        pub(super) fn try_with_kallsyms_snapshot() -> io::Result<Self> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "kallsyms snapshot is only available on Linux and Android/aarch64",
+            ))
+        }
+
+        pub(super) fn kernel_symbols(&self) -> &dyn std::fmt::Debug {
+            &"Unsupported"
+        }
+
+        #[cfg(feature = "test-util")]
+        pub(super) fn kallsyms_snapshot_path(&self) -> Option<&std::path::Path> {
+            None
         }
 
         pub(super) fn symbolize(&self, _input: &[u8], _maps: &[MapsEntry]) -> io::Result<Vec<u8>> {
@@ -705,5 +775,61 @@ mod tests {
             .unwrap();
         assert_eq!(out_slice, out_bytes);
         assert!(!out_slice.is_empty());
+    }
+
+    /// Symbol names in the string pool after symbolizing a single kernel frame.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn symbolize_kernel_frame(symbolizer: &OfflineSymbolizer, addr: u64) -> Vec<String> {
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
+            .unwrap();
+        enc.write_event(&schema, 0, &[FieldValue::StackFrames(vec![addr].into())])
+            .unwrap();
+        let buf = enc.finish();
+
+        let output = symbolizer.symbolize(&buf, &[]).unwrap();
+        let mut combined = buf;
+        combined.extend_from_slice(&output);
+        let mut dec = Decoder::new(&combined).unwrap();
+        dec.decode_all();
+        dec.string_pool()
+            .iter()
+            .map(|(_, s)| s.to_owned())
+            .collect()
+    }
+
+    // x86_64 only: on aarch64 `write_symbol_data` strips the TBI byte before comparing with
+    // `USER_ADDR_LIMIT` (0x8000_0000_0000_0000), so no address is ever classified as kernel
+    // there — pre-existing, tracked separately.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn snapshot_resolves_kernel_frames() {
+        let snapshot = crate::sys::KallsymsSnapshot::from_bytes(
+            b"ffffffff81000000 T _stext\n\
+              ffffffff81000000 T _text\n\
+              ffffffff81001000 T dial9_test_kernel_fn\n\
+              ffffffff81002000 T dial9_test_kernel_fn_next\n\
+              ffffffff82000000 T _etext\n",
+        )
+        .unwrap();
+        let addr = 0xffff_ffff_8100_1010;
+
+        let from_snapshot = symbolize_kernel_frame(
+            &OfflineSymbolizer {
+                inner: imp::OfflineSymbolizerImpl::build(Some(snapshot)),
+            },
+            addr,
+        );
+        let live = symbolize_kernel_frame(&OfflineSymbolizer::new(), addr);
+
+        assert!(
+            from_snapshot.iter().any(|s| s == "dial9_test_kernel_fn"),
+            "expected dial9_test_kernel_fn from the snapshot, got: {from_snapshot:?}"
+        );
+        assert!(
+            !live.iter().any(|s| s == "dial9_test_kernel_fn"),
+            "live /proc/kallsyms must not resolve the synthetic symbol, got: {live:?}"
+        );
     }
 }

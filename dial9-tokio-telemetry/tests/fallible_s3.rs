@@ -5,6 +5,7 @@ mod fake_s3;
 
 use dial9_core::buffer::{BufferMode, SegmentWriter};
 use dial9_core::handle::Dial9Handle;
+use dial9_core::pipeline::{PipelineStatus, StopCause};
 use dial9_core::recording::Recorder;
 use dial9_core::source::{FlushContext, Source};
 use dial9_destinations_s3::{FailureBehavior, S3Config};
@@ -392,6 +393,10 @@ fn disable_s3_disk_preset_preserves_source_stage_and_gzip_writeback() {
     assert!(receipt.manifest_key.is_none());
     assert!(dump(&recorder, &runtime).manifest_key.is_none());
     assert!(recorder.handle().is_enabled());
+    assert!(matches!(
+        recorder.handle().pipeline_status(),
+        PipelineStatus::Running { .. }
+    ));
     recorder.graceful_shutdown(DEADLINE);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
@@ -551,6 +556,10 @@ fn disable_s3_memory_preset_discards_processed_data_but_keeps_recording() -> std
     handle.disable();
     recorder.enable();
     assert!(handle.is_enabled());
+    assert!(matches!(
+        handle.pipeline_status(),
+        PipelineStatus::Running { .. }
+    ));
     let mut recorded = false;
     handle.record_event_with(|| {
         recorded = true;
@@ -636,6 +645,12 @@ fn disable_dial9_refuses_enable_stops_dumps_and_retains_existing_files() {
         .expect("DisableDial9 stops the worker");
 
     assert!(!handle.is_enabled());
+    assert!(matches!(
+        handle.pipeline_status(),
+        PipelineStatus::Stopped {
+            cause: StopCause::InitializeFailed { processor, .. }, ..
+        } if processor.name() == "S3Upload"
+    ));
     recorder.enable();
     handle.enable();
     assert!(!handle.is_enabled());
@@ -701,4 +716,11 @@ fn pending_constructor_does_not_block_graceful_shutdown() {
     );
     assert!(!handle.is_enabled());
     assert_worker_stopped(&handle);
+    assert!(matches!(
+        handle.pipeline_status(),
+        PipelineStatus::Stopped {
+            cause: StopCause::DrainTimedOut { .. },
+            ..
+        }
+    ));
 }

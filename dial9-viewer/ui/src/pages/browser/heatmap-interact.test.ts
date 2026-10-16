@@ -27,6 +27,7 @@ class FakeElement extends FakeEventTarget {
   textContent = "";
   /** Measured label width, stubbed: there is no layout in this harness. */
   offsetWidth = 120;
+  rectTop = 0;
 
   constructor(ancestors: readonly string[] = []) {
     super();
@@ -38,7 +39,7 @@ class FakeElement extends FakeEventTarget {
   }
 
   getBoundingClientRect(): DOMRect {
-    return { left: 0, top: 0, width: 100 } as DOMRect;
+    return { left: 0, top: this.rectTop, width: 100 } as DOMRect;
   }
 }
 
@@ -73,12 +74,14 @@ function setup() {
   canvas.clientWidth = 100;
   const cursor = new FakeElement();
   const cursorLabel = new FakeElement();
+  const body = Object.assign(new FakeElement(), { scrollTop: 0 });
   const els = {
     heatmapPlot: plot,
     heatmapCanvas: canvas,
     heatmapCursor: cursor,
     heatmapCursorLabel: cursorLabel,
     heatmapResetZoom: new FakeElement(),
+    heatmapBody: body,
   } as unknown as BrowserEls;
 
   const store = createBrowserStore();
@@ -112,7 +115,7 @@ function setup() {
   } as unknown as BrowserActions;
 
   mountHeatmapInteraction({ store, els, actions });
-  return { win, doc, plot, cursor, cursorLabel, store, actions, setHeatmapSelection };
+  return { win, doc, plot, body, cursor, cursorLabel, store, actions, setHeatmapSelection };
 }
 
 /** Drag across the plot and release, committing a region selection. */
@@ -132,6 +135,19 @@ afterEach(() => {
 });
 
 describe("heatmap pointer interaction", () => {
+  it("selects the original host row after scrolling the sticky canvas", () => {
+    const { win, plot, body, store, actions } = setup();
+    const row = store.getState().browse.rows[0]!;
+    store.update("browse", { rows: Array.from({ length: 200 }, () => row) });
+    body.scrollTop = 100 * 26;
+    plot.rectTop = -body.scrollTop;
+    plot.dispatch("mousedown", {
+      clientX: 50, clientY: 5, altKey: false, preventDefault: vi.fn(),
+    });
+    win.dispatch("mouseup", { clientX: 50, clientY: 5 });
+    expect(actions.selectSegmentAt).toHaveBeenCalledWith(50, 2605);
+  });
+
   it("keeps a selection when its drag ends outside the pane", () => {
     const { win, doc, plot, store, setHeatmapSelection } = setup();
 
@@ -184,6 +200,16 @@ describe("heatmap pointer interaction", () => {
 // The hover readout (#631): pointing at the timeline answers "what time is
 // this?" without dragging out a selection to read its bounds.
 describe("heatmap hover time readout", () => {
+  it("keeps the time label in the viewport and hides it when scrolling", () => {
+    const { plot, body, cursor, cursorLabel } = setup();
+    body.scrollTop = 2600;
+    plot.dispatch("mousemove", { clientX: 50, clientY: 5 });
+    expect(cursorLabel.style["top"]).toBe("2602px");
+    body.dispatch("scroll");
+    expect(cursor.style["display"]).toBe("none");
+    expect(cursorLabel.style["display"]).toBe("none");
+  });
+
   it("follows the pointer with the timestamp beneath it", () => {
     const { plot, cursor, cursorLabel } = setup();
 
