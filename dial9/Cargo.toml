@@ -47,7 +47,7 @@ dial9-metrique = { workspace = true, optional = true }
 dial9-viewer = { workspace = true, optional = true, default-features = false }
 anyhow = { version = "1", optional = true }
 
-# `sync` for the smoke tester, which doesn't need the Tokio integration;
+# `sync` for the smoke test, which doesn't need the Tokio integration;
 # the `tokio` feature adds the runtime. `dial9-core` already depends on both.
 tokio = { version = "1.51.0", default-features = false, features = ["sync"] }
 bon = { version = "3" }

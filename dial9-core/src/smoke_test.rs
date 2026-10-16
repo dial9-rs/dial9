@@ -1,4 +1,4 @@
-//! Statuses the smoke test reports. The tester and its report live in the
+//! Statuses the smoke test reports. The smoke test and its report live in the
 //! `dial9` crate (`dial9::smoke_test`), which re-exports these.
 
 use crate::handle::Dial9Handle;
@@ -44,6 +44,8 @@ pub enum FailedReason {
     RecorderNotConnected,
     /// The recorder has shut down.
     RecorderStopped,
+    /// Recording was permanently disabled by an initialization failure.
+    RecorderFailed,
 }
 
 impl CheckStatus {
@@ -91,19 +93,102 @@ impl Check {
 }
 
 /// The recording check behind `dial9`'s `SmokeTestReport::recording_status`.
-// Called only by `dial9`'s smoke tester: kept out of the semver promise.
+// Called only by `dial9`'s smoke test: kept out of the semver promise.
 #[doc(hidden)]
 pub fn check_recording(handle: &Dial9Handle) -> CheckStatus {
-    if !handle.is_connected() {
-        CheckStatus::failed(
+    use crate::shared_state::State;
+
+    let Some(shared) = handle.shared() else {
+        return CheckStatus::failed(
             FailedReason::RecorderNotConnected,
             "handle is not connected to a recorder",
-        )
-    } else if handle.is_stopped() {
-        CheckStatus::failed(FailedReason::RecorderStopped, "recorder has shut down")
-    } else if !handle.is_enabled() {
-        CheckStatus::disabled(DisabledReason::RecordingPaused, "recording is paused")
-    } else {
-        CheckStatus::Ok
+        );
+    };
+    match shared.recording_state() {
+        State::Enabled => CheckStatus::Ok,
+        State::Disabled => {
+            CheckStatus::disabled(DisabledReason::RecordingPaused, "recording is paused")
+        }
+        State::Stopped => {
+            CheckStatus::failed(FailedReason::RecorderStopped, "recorder has shut down")
+        }
+        #[cfg(feature = "pipeline")]
+        State::Failed => CheckStatus::failed(
+            FailedReason::RecorderFailed,
+            "recording was permanently disabled by an initialization failure",
+        ),
+    }
+}
+
+#[cfg(all(test, feature = "pipeline", not(shuttle)))]
+mod tests {
+    use super::*;
+    use crate::primitives::sync::{Arc, mpsc};
+    use crate::shared_state::SharedState;
+
+    #[test]
+    fn permanently_failed_recorder_is_not_a_healthy_pause() {
+        let shared = Arc::new(SharedState::new(0));
+        shared.enable();
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let handle = Dial9Handle::enabled(shared.clone(), tx);
+        shared.disable_permanently();
+
+        assert!(matches!(
+            check_recording(&handle),
+            CheckStatus::Failed {
+                reason: FailedReason::RecorderFailed,
+                ..
+            }
+        ));
+        handle.enable();
+        assert!(matches!(
+            check_recording(&handle),
+            CheckStatus::Failed {
+                reason: FailedReason::RecorderFailed,
+                ..
+            }
+        ));
+    }
+}
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::*;
+    use crate::primitives::sync::{Arc, mpsc};
+    use crate::primitives::thread;
+    use crate::shared_state::SharedState;
+
+    crate::shuttle_test! {
+        default;
+        fn shuttle_recording_check_races_shutdown() {
+            let shared = Arc::new(SharedState::new(0));
+            shared.enable();
+            let (tx, _rx) = mpsc::sync_channel(1);
+            let handle = Dial9Handle::enabled(shared.clone(), tx);
+
+            let shutdown = thread::spawn(move || shared.mark_stopped());
+            let status = check_recording(&handle);
+            assert!(
+                matches!(
+                    status,
+                    CheckStatus::Ok
+                        | CheckStatus::Failed {
+                            reason: FailedReason::RecorderStopped,
+                            ..
+                        }
+                ),
+                "an enabled recorder was never paused: {status:?}"
+            );
+
+            shutdown.join().unwrap();
+            assert!(matches!(
+                check_recording(&handle),
+                CheckStatus::Failed {
+                    reason: FailedReason::RecorderStopped,
+                    ..
+                }
+            ));
+        }
     }
 }

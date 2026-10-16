@@ -235,16 +235,16 @@ See the [standalone guide](../dial9-sampling/README.md) and the [application ent
 
 ## Checking telemetry at startup
 
-To confirm dial9 is recording, for example from a startup probe or a deploy gate, build a smoke tester from the handle and run it. The report has one line per check, and `is_healthy()` is `false` if any check failed. A paused recorder shows up as `disabled`.
+To check the recorder's connection and recording state, for example from a startup probe or a deploy gate, build a smoke test from the handle and validate it. Inspect `failed_checks()` for each failure's identifier, typed reason, and detail. A paused recorder shows up as `disabled` and is not a failure. This check reads the recorder's state; it does not verify thread liveness or trace delivery.
 
 ```rust,no_run
-use dial9::smoke_test::SmokeTesterExt;
+use dial9::smoke_test::SmokeTestExt;
 
 # async fn startup_probe() {
-let tester = dial9::Dial9Handle::current().smoke_tester().build();
-let report = tester.run().await;
-if !report.is_healthy() {
-    eprintln!("dial9 smoke test failed:\n{report}");
+let smoke_test = dial9::Dial9Handle::current().smoke_test().build();
+let report = smoke_test.validate().await;
+for (check, status) in report.failed_checks() {
+    eprintln!("dial9 smoke test failed for {}: {status}", check.as_str());
 }
 # }
 ```

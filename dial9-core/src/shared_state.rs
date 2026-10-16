@@ -9,7 +9,8 @@ use std::time::Duration;
 /// Recording lifecycle states. `Stopped` is terminal: the flush thread is
 /// gone, nothing drains buffers anymore.
 #[repr(u8)]
-enum State {
+#[derive(Debug)]
+pub(crate) enum State {
     Disabled = 0,
     Enabled = 1,
     #[cfg(feature = "pipeline")]
@@ -147,6 +148,18 @@ impl SharedState {
     /// Whether the recorder has shut down for good.
     pub(crate) fn is_stopped(&self) -> bool {
         self.state.load(Ordering::Relaxed) == State::Stopped as u8
+    }
+
+    /// Snapshot the recording lifecycle with one atomic read.
+    pub(crate) fn recording_state(&self) -> State {
+        match self.state.load(Ordering::Relaxed) {
+            state if state == State::Disabled as u8 => State::Disabled,
+            state if state == State::Enabled as u8 => State::Enabled,
+            #[cfg(feature = "pipeline")]
+            state if state == State::Failed as u8 => State::Failed,
+            state if state == State::Stopped as u8 => State::Stopped,
+            state => unreachable!("invalid recording state: {state}"),
+        }
     }
 
     /// Set what the handle reads about the pipeline. Called by `build()`
