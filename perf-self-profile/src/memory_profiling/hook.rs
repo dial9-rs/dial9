@@ -3,11 +3,15 @@
 //!
 //! # Soundness contract
 //!
-//! Every function in this module must be **allocation-free** — it must not
+//! Sampling and event emission must be **allocation-free** — they must not
 //! allocate, deallocate, lock a mutex, call `tracing::warn!`, or do
 //! anything else that could trigger another allocation while we are
 //! inside `GlobalAlloc::alloc`. Any allocation here would re-enter our
 //! own hook and either deadlock or recurse without bound.
+//!
+//! Liveset operations and first-use collector initialization can allocate or
+//! reclaim memory. They run with the `SAMPLE_STATE` borrow held so nested
+//! allocations skip sampling and nested liveset operations cannot deadlock.
 //!
 //! Allowed operations:
 //! - `OnceLock::get` (Acquire load + null check, ~1 ns).
@@ -66,6 +70,16 @@ thread_local! {
     /// — the design's reentrancy guard (§6).
     static SAMPLE_STATE: std::cell::RefCell<SamplingState> =
         const { std::cell::RefCell::new(SamplingState::empty()) };
+}
+
+/// Suppress profiler-internal allocations during first-use collector setup.
+pub(super) fn with_sampling_disabled(f: impl FnOnce()) {
+    SAMPLE_STATE.with(|cell| {
+        // An existing on_alloc borrow already suppresses nested allocations;
+        // otherwise hold the guard ourselves (e.g. for a dealloc-first thread).
+        let _guard = cell.try_borrow_mut();
+        f();
+    });
 }
 
 #[inline]

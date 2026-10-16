@@ -809,7 +809,7 @@ thread_local! {
     static IS_SHUTTING_DOWN: Cell<bool> = const { Cell::new(false) };
     static LIFETIME_GUARD: Lifetime = {
         IS_SHUTTING_DOWN.with(|c| c.set(true));
-        drop(scc::Guard::new());
+        hook::with_sampling_disabled(|| drop(scc::Guard::new()));
         IS_SHUTTING_DOWN.with(|c| c.set(false));
         Lifetime
     };
@@ -822,8 +822,11 @@ The first hook entry initializes `sdd`'s collector before registering
 `LIFETIME_GUARD`. Our guard therefore drops *before* `sdd`'s destructor runs,
 so hooks invoked while `sdd` frees its own collector also see the shutdown
 flag. Collector initialization temporarily disables liveset access to prevent
-recursive initialization through allocator hooks. Subsequent calls only read
-TLS; the steady-state cost is ~1 ns (one TLS Cell read + branch).
+recursive initialization through allocator hooks. It also holds the sampling
+reentrancy guard so collector storage cannot produce an allocation event
+without a liveset entry, including when a thread's first hook is a free.
+Subsequent calls only read TLS; the steady-state cost is ~1 ns (one TLS Cell
+read + branch).
 
 **Init-order invariant.** Every code path that touches the liveset must
 call `check_shutdown()` first on every entry — that's what eagerly

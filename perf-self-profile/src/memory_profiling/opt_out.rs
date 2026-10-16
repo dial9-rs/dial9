@@ -39,9 +39,9 @@ thread_local! {
     /// Registered after sdd's TLS so shutdown is flagged before sdd drops.
     static LIFETIME_GUARD: Lifetime = {
         // Collector initialization can allocate or reclaim memory. Prevent
-        // those allocator hooks from recursively initializing this slot.
+        // recursive initialization and sampling untracked collector storage.
         IS_SHUTTING_DOWN.with(|c| c.set(true));
-        drop(scc::Guard::new());
+        super::hook::with_sampling_disabled(|| drop(scc::Guard::new()));
         IS_SHUTTING_DOWN.with(|c| c.set(false));
         Lifetime
     };
@@ -52,7 +52,8 @@ thread_local! {
 ///
 /// # Initialization
 ///
-/// The first call initializes sdd's collector with liveset access disabled.
+/// The first call initializes sdd's collector with liveset access and
+/// allocation sampling disabled.
 /// Subsequent calls perform only TLS reads — no allocations, no locks.
 #[inline]
 pub(crate) fn check_shutdown() -> bool {
