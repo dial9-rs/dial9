@@ -29,7 +29,7 @@ pub enum CheckStatus {
 }
 
 /// Why a check is [`Disabled`](CheckStatus::Disabled).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DisabledReason {
     /// Recording is paused.
@@ -37,7 +37,7 @@ pub enum DisabledReason {
 }
 
 /// Why a check [`Failed`](CheckStatus::Failed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FailedReason {
     /// The handle isn't connected to a recorder.
@@ -73,7 +73,7 @@ impl fmt::Display for CheckStatus {
 }
 
 /// One check in the smoke test report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Check {
     /// The recording check, reported by `dial9`'s
@@ -83,7 +83,7 @@ pub enum Check {
 
 impl Check {
     /// Stable name for logs and metrics.
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Recording => "recording",
         }
