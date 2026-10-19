@@ -137,6 +137,28 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
         ));
         self
     }
+
+    /// Construct the S3 client on the worker with a
+    /// [`FailureBehavior`](dial9_destinations_s3::FailureBehavior) policy.
+    ///
+    /// Adds only the S3 stage, without gzip or disk write-back.
+    #[cfg(feature = "worker-s3")]
+    pub fn try_s3_async<F>(
+        mut self,
+        config: dial9_destinations_s3::S3Config,
+        client_future: F,
+    ) -> Self
+    where
+        F: std::future::Future<
+                Output = Result<aws_sdk_s3::Client, dial9_destinations_s3::FailureBehavior>,
+            > + Send
+            + 'static,
+    {
+        self.processors.push(Box::new(
+            S3PipelineUploader::new(config, None).with_fallible_client_future(client_future),
+        ));
+        self
+    }
 }
 
 /// Disk-only methods on the pipeline builder.

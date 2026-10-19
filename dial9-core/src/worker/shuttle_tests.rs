@@ -29,6 +29,10 @@
 //! `initialize()` never resolves, so the worker future can never complete
 //! on its own and `primitives::time::timeout`'s `Elapsed` branch is the
 //! only way the scenario ever returns.
+//!
+//! `shuttle_pipeline_state_races_shutdown` also drives
+//! `run_background_task_inner`, checking that the published worker state only
+//! moves forward and ends `Stopped`.
 
 use super::*;
 use crate::pipeline::ProcessError;
@@ -38,6 +42,117 @@ use std::io::Write;
 use std::pin::Pin;
 
 struct CountingProcessor(Arc<AtomicUsize>);
+
+struct PermanentlyFailingInitializer;
+
+impl SegmentProcessor for PermanentlyFailingInitializer {
+    fn name(&self) -> &'static str {
+        "PermanentlyFailingInitializer"
+    }
+
+    fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        Box::pin(async {
+            Err(std::io::Error::other(
+                crate::pipeline::DisableRecording::new(std::io::Error::other(
+                    "destination authorization failed",
+                )),
+            ))
+        })
+    }
+
+    fn process(
+        &mut self,
+        _data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        panic!("failed initialization must prevent processing")
+    }
+}
+
+struct NoopSource;
+
+impl crate::source::Source for NoopSource {
+    fn name(&self) -> &'static str {
+        "Noop"
+    }
+
+    fn flush(&mut self, _context: &crate::source::FlushContext<'_>) {}
+}
+
+crate::shuttle_test! {
+    num_iters = 2_000, depth = 3;
+    fn shuttle_initialization_failure_races_enable_and_shutdown() {
+        for shutdown in [false, true] {
+            let pipeline_state = Arc::new(state::PipelineState::new(vec![
+                "PermanentlyFailingInitializer",
+            ]));
+            let shared = Arc::new(crate::shared_state::SharedState::new(0).with_pipeline(
+                state::PipelineShared {
+                    dump_trigger: None,
+                    state: Some(pipeline_state.clone()),
+                },
+            ));
+            let (control_tx, control_rx) = crate::primitives::sync::mpsc::sync_channel(1);
+            drop(control_rx);
+            let handle = crate::handle::Dial9Handle::enabled(shared.clone(), control_tx);
+            let recorder = Arc::new(crate::recording::Recorder::new(handle.clone(), None));
+            let starts = Arc::new(AtomicUsize::new(0));
+            let hook_starts = starts.clone();
+            recorder.set_recording_start_hooks(vec![Box::new(move |_| {
+                // A hook claimed by a successful enable may race the failure.
+                // It may run once even if the failure arrives before its body.
+                hook_starts.fetch_add(1, Ordering::Relaxed);
+            })]);
+            let mut config = BackgroundTaskConfig::builder()
+                .recording_state(shared.clone())
+                .processors(vec![Box::new(PermanentlyFailingInitializer) as Box<dyn SegmentProcessor>])
+                .build();
+            config.set_state(pipeline_state);
+            let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            let worker = crate::primitives::thread::spawn(move || {
+                shuttle::future::block_on(run_background_task_inner(config, shutdown_rx, fs));
+            });
+            let enabler_recorder = recorder.clone();
+            let enabler = crate::primitives::thread::spawn(move || {
+                enabler_recorder.enable();
+                enabler_recorder.disable();
+                enabler_recorder.enable();
+            });
+            let shutdown_state = shared.clone();
+            let stopper = crate::primitives::thread::spawn(move || {
+                if shutdown {
+                    // The terminal transition used after the flush thread stops.
+                    shutdown_state.mark_stopped();
+                    shutdown_state.clear_sources();
+                }
+            });
+            worker.join().unwrap();
+            enabler.join().unwrap();
+            stopper.join().unwrap();
+            drop(shutdown_tx);
+
+            assert!(!handle.is_enabled(), "failure must remain permanent");
+            handle.enable();
+            handle.disable();
+            handle.enable();
+            assert!(!handle.is_enabled(), "later enable must not revive a failure");
+            assert_eq!(handle.is_stopped(), shutdown, "late failure must preserve shutdown");
+            assert!(matches!(
+                handle.pipeline_status(),
+                crate::pipeline::PipelineStatus::Stopped {
+                    cause: StopCause::InitializeFailed { processor }, ..
+                } if processor.name() == "PermanentlyFailingInitializer"
+            ), "permanent recording failure must report the failing processor");
+            assert!(starts.load(Ordering::Relaxed) <= 1, "start hooks must remain one-shot");
+            if shutdown {
+                assert!(handle.with_source_or_insert::<NoopSource, ()>(
+                    || panic!("shutdown must refuse new sources"),
+                    |_| panic!("shutdown must refuse source access"),
+                ).is_none());
+            }
+        }
+    }
+}
 
 impl SegmentProcessor for CountingProcessor {
     fn name(&self) -> &'static str {
@@ -285,9 +400,13 @@ crate::shuttle_test! {
     // shuttle's harness for `shuttle_select!`.
     fn shuttle_background_task_contains_init_panic() {
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
-        let config = BackgroundTaskConfig::builder()
+        let state = crate::primitives::sync::Arc::new(state::PipelineState::new(vec![
+            "PanickingInitializer",
+        ]));
+        let mut config = BackgroundTaskConfig::builder()
             .processors(vec![Box::new(PanickingInitializer) as Box<dyn SegmentProcessor>])
             .build();
+        config.set_state(state.clone());
         let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         let worker = crate::primitives::thread::spawn(move || {
@@ -302,6 +421,13 @@ crate::shuttle_test! {
              run_background_task_inner's top-level catch_unwind, not \
              propagate to its caller"
         );
+        assert!(matches!(
+            state.status(),
+            crate::pipeline::PipelineStatus::Stopped {
+                cause: crate::pipeline::StopCause::Panicked,
+                ..
+            }
+        ));
     }
 }
 
@@ -350,5 +476,69 @@ crate::shuttle_test! {
 
         sender.join().unwrap();
         worker.join().unwrap();
+    }
+}
+
+crate::shuttle_test! {
+    default;
+    // Under any interleaving, readers see the state only move forward
+    // (initializing, running, stopped), and it ends stopped.
+    fn shuttle_pipeline_state_races_shutdown() {
+        use crate::pipeline::PipelineStatus;
+        use state::PipelineState;
+
+        fn rank(state: &PipelineStatus) -> u8 {
+            match state {
+                PipelineStatus::Initializing { .. } => 0,
+                PipelineStatus::Running { .. } => 1,
+                PipelineStatus::Stopped { .. } => 2,
+                other => panic!("configured pipeline has no worker: {other:?}"),
+            }
+        }
+
+        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+        let state =
+            crate::primitives::sync::Arc::new(PipelineState::new(vec!["CountingProcessor"]));
+        let mut config = BackgroundTaskConfig::builder()
+            .processors(vec![
+                Box::new(CountingProcessor(Arc::new(AtomicUsize::new(0))))
+                    as Box<dyn SegmentProcessor>,
+            ])
+            .build();
+        config.set_state(state.clone());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let worker = crate::primitives::thread::spawn(move || {
+            shuttle::future::block_on(run_background_task_inner(config, shutdown_rx, fs));
+        });
+        let reader = crate::primitives::thread::spawn({
+            let state = state.clone();
+            move || {
+                let mut last = 0;
+                for _ in 0..4 {
+                    let now = rank(&state.status());
+                    assert!(now >= last, "worker state moved backwards: {last} -> {now}");
+                    last = now;
+                }
+            }
+        });
+
+        shutdown_tx
+            .send(Duration::ZERO)
+            .expect("worker holds the shutdown receiver until it exits");
+        worker.join().unwrap();
+        reader.join().unwrap();
+        // Shutdown with no drain time: the worker exits or the drain times
+        // out, depending on the schedule.
+        assert!(matches!(
+            state.status(),
+            PipelineStatus::Stopped {
+                cause: crate::pipeline::StopCause::Exited | crate::pipeline::StopCause::DrainTimedOut,
+                ..
+            }
+        ));
+        let status = state.status();
+        let names: Vec<_> = status.processors().iter().map(|p| p.name()).collect();
+        assert_eq!(names, ["CountingProcessor"]);
     }
 }

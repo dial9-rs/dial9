@@ -780,6 +780,52 @@ recorder.graceful_shutdown(Duration::from_secs(5));
 The future is polled when the pipeline worker starts. The resulting client,
 including its credential refresh support, remains on the worker runtime.
 
+If client construction can fail, use `try_s3_async` and choose the failure policy:
+
+```rust,no_run
+# #[cfg(feature = "worker-s3")]
+# fn example(writer: dial9::core::SegmentWriter) -> dial9::Recorder {
+use dial9::RecorderS3ClientExt;
+use dial9::s3::{FailureBehavior, S3Config};
+
+# async fn create_s3_client() -> std::io::Result<aws_sdk_s3::Client> { todo!() }
+let config = S3Config::builder()
+    .bucket("my-trace-bucket")
+    .service_name("my-service")
+    .build();
+let recorder = dial9::recorder(writer)
+    .try_s3_async(config, async move {
+        create_s3_client().await.map_err(|error| {
+            FailureBehavior::disable_dial9().with_source(error)
+        })
+    })
+    .build();
+# recorder
+# }
+# fn main() {}
+```
+
+- `DisableDial9` permanently disables this recorder, including later calls to
+  `enable()`. It stops the pipeline, but does not delete existing files or replace
+  normal shutdown. Recording may have started before the failure arrives.
+- `DisableS3` disables uploads and S3 dump manifests, not recording. The disk
+  preset keeps source processors and gzip, then writes processed segments back
+  locally. A custom pipeline's `.try_s3_async(...)` stage passes data through
+  unchanged and adds no disk writes. Memory pipelines need another consumer;
+  without one, processed data is discarded.
+
+`build()` does not await construction. The future must be `Send + 'static`, but
+need not be `Sync`. Its result is cached, without automatic reconstruction.
+Put setup inside the async body. Select a policy with
+`FailureBehavior::disable_dial9()` or `FailureBehavior::disable_s3()`, and retain
+an available error with `.with_source(error)`. These policies do not change
+retries for later upload failures or provide a deadline for a pending constructor.
+
+Local retention uses the writer's existing settings. Rotating buffers evict old
+segments, but `max_total_size` is a soft retention budget, not a hard filesystem
+quota. Single-file writers do not evict. Multiple recorder directories and failed
+file deletions can also increase total disk usage.
+
 When you use `#[dial9::main]`, this shutdown drain happens
 automatically once `main` returns: the macro drops the runtime, then calls
 `graceful_shutdown` with a 1s deadline so the final segment is uploaded. Tune it

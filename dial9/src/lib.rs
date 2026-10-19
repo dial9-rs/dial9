@@ -51,8 +51,9 @@ pub mod core {
     #[cfg(feature = "pipeline")]
     pub mod pipeline {
         pub use dial9_core::pipeline::{
-            MemorySegment, Payload, ProcessError, ProcessErrorKind, SealedSegment, SegmentData,
-            SegmentProcessor, SegmentRef,
+            DisableRecording, MemorySegment, Payload, PipelineProcessor, PipelineStatus,
+            ProcessError, ProcessErrorKind, SealedSegment, SegmentData, SegmentProcessor,
+            SegmentRef, StopCause,
         };
 
         /// Offline symbolization processor. Needs the CPU profiler for stack frames.
@@ -68,7 +69,8 @@ pub mod core {
 #[cfg(all(feature = "tokio", feature = "worker-s3"))]
 pub mod s3 {
     pub use dial9_destinations_s3::{
-        InstanceIdentity, KeyContext, S3Config, S3ConfigBuilder, S3KeyFn, S3PipelineUploader,
+        FailureBehavior, InstanceIdentity, KeyContext, S3Config, S3ConfigBuilder, S3KeyFn,
+        S3PipelineUploader,
     };
 }
 
@@ -124,8 +126,8 @@ pub use dial9_perf_self_profile::RecorderPerfExt;
 #[cfg(feature = "cpu-profiling")]
 pub mod cpu {
     pub use dial9_perf_self_profile::{
-        CpuProfiler, CpuProfilingConfig, CpuSampleSource, EventSource, SchedEventConfig,
-        SchedProfiler,
+        ActiveCpuBackend, CpuProfiler, CpuProfilingConfig, CpuSampleSource, EventSource,
+        SchedEventConfig, SchedProfiler, StartFailed,
     };
 }
 

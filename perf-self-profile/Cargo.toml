@@ -1,6 +1,6 @@
 [package]
 name = "dial9-perf-self-profile"
-version = "0.5.4"
+version = "0.5.5"
 edition.workspace = true
 repository.workspace = true
 description = "Minimal self-profiling via Linux/Android perf_event_open with frame-pointer-based stack traces"
@@ -52,7 +52,7 @@ bytes = "1"
 crossbeam-queue = { version = "0.3", optional = true }
 dial9-core = { workspace = true }
 dial9-trace-format = { workspace = true }
-scc = { version = "2", optional = true }
+scc = { version = "3.8.4", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true, default-features = false }
 tracing = "0.1.44"
 nvml-wrapper = { version = "0.13", optional = true }
@@ -63,8 +63,8 @@ crossbeam-utils = "0.8"
 libc = "0.2.186"
 perf-event-data = "0.1.8"
 perf-event-open-sys2 = "5.0.6"
-netlink-packet-core = { version = "0.7", optional = true }
-netlink-packet-sock-diag = { version = "0.4.2", optional = true }
+netlink-packet-core = { version = "0.9", optional = true }
+netlink-packet-sock-diag = { version = "0.5", optional = true }
 netlink-sys = { version = "0.8.8", optional = true }
 
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
@@ -74,8 +74,10 @@ libc = { version = "0.2", optional = true }
 criterion = "0.5"
 dial9-core = { workspace = true, features = ["test-util"] }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+rstest = { version = "0.27", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 
 [[bench]]
 name = "unwind"

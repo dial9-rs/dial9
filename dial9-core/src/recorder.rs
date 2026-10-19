@@ -275,14 +275,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
             return recorder_disabled();
         };
 
-        let shared = Arc::new(SharedState::new(clock::clock_monotonic_ns()));
-
-        // Install the on-demand dump trigger so `Dial9Handle::dump_trigger` can
-        // reach it (paired with the `trigger` receiver handed to the worker).
-        #[cfg(feature = "pipeline")]
-        if let Some(trigger) = self.pending_dump_trigger {
-            shared.set_dump_trigger(trigger);
-        }
+        let start_time_ns = clock::clock_monotonic_ns();
 
         // Sync any `boot_id` metadata to the writer's per-process namespace, so a
         // trace's identity matches its on-disk `{boot_id}/` directory (and its
@@ -316,6 +309,25 @@ impl<M: BufferMode> RecorderBuilder<M> {
             }
         };
 
+        // Prepare both states before the worker can fail initialization:
+        // recording failures and pipeline status must reach the same handle.
+        #[cfg(feature = "pipeline")]
+        let pipeline_state = (!processors.is_empty() && writer.fs_handle().is_some()).then(|| {
+            Arc::new(crate::worker::state::PipelineState::new(
+                processors
+                    .iter()
+                    .map(|processor| processor.name())
+                    .collect(),
+            ))
+        });
+        let shared = SharedState::new(start_time_ns);
+        // The dump trigger pairs with the `trigger` receiver handed to the worker.
+        #[cfg(feature = "pipeline")]
+        let shared = shared.with_pipeline(crate::worker::state::PipelineShared {
+            dump_trigger: self.pending_dump_trigger,
+            state: pipeline_state.clone(),
+        });
+        let shared = Arc::new(shared);
         for source in sources {
             shared.push_source(source);
         }
@@ -333,14 +345,18 @@ impl<M: BufferMode> RecorderBuilder<M> {
                 .metrics_sink
                 .clone()
                 .unwrap_or_else(metrique::writer::sink::DevNullSink::boxed);
-            let config = crate::worker::BackgroundTaskConfig::builder()
+            let mut config = crate::worker::BackgroundTaskConfig::builder()
                 .maybe_trace_dir(M::IS_DISK.then(|| writer.trace_dir().to_path_buf()))
                 .maybe_trace_stem(M::IS_DISK.then(|| writer.trace_stem().to_string()))
                 .poll_interval(poll)
                 .processors(processors)
                 .metrics_sink(metrics)
                 .maybe_trigger(self.trigger)
+                .recording_state(shared.clone())
                 .build();
+            if let Some(state) = pipeline_state {
+                config.set_state(state);
+            }
             let (tx, rx) = tokio::sync::oneshot::channel();
             let hook = self.thread_init.clone();
             crate::worker::spawn(&writer, config, rx, move || hook())

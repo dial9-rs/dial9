@@ -6,7 +6,7 @@
 //! - [`CpuProfiler`] — process-wide frequency-based CPU sampling.
 //! - [`SchedProfiler`] — per-worker-thread context-switch capture.
 
-use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode, is_ctimer_active, sys};
+use crate::{ActiveCpuBackend, EventSource, PerfSampler, SamplerConfig, SamplingMode, sys};
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::source::{FlushContext, Source};
 use dial9_trace_format::encoder::FxHashMap;
@@ -310,22 +310,23 @@ pub struct CpuProfiler {
     stopped_tids: Vec<u32>,
     /// Original config retained for segment metadata emission.
     config: CpuProfilingConfig,
-    /// The effective backend that was selected after Auto resolution.
-    /// "perf" or "ctimer" — never "auto".
-    effective_backend: &'static str,
+    /// The active backend, selected after Auto resolution.
+    active_backend: ActiveCpuBackend,
     /// Whether segment metadata has been emitted yet (emit-once).
     metadata_emitted: bool,
     /// Effective snapshot state, set when `segment_processor()` builds the processor; `None`
     /// when not requested or when a custom pipeline bypassed it, so the key is never a false
     /// claim.
     kallsyms_snapshot: Option<bool>,
+    /// CPU samples from this process drained since start.
+    samples_drained: u64,
 }
 
 impl std::fmt::Debug for CpuProfiler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CpuProfiler")
             .field("pid", &self.pid)
-            .field("backend", &self.effective_backend)
+            .field("backend", &self.active_backend)
             .finish_non_exhaustive()
     }
 }
@@ -337,46 +338,49 @@ impl CpuProfiler {
 
     /// Start the process-wide CPU profiler with the given config.
     pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
-        let (sampler, effective_backend) = match config.backend {
-            CpuBackend::Auto => {
-                let s = PerfSampler::start(
-                    SamplerConfig::default()
-                        .event_source(config.event_source)
-                        .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                        .include_kernel(config.include_kernel),
-                )?;
-                // After Auto resolution, check which backend was actually selected.
-                let backend = if is_ctimer_active() { "ctimer" } else { "perf" };
-                (s, backend)
-            }
-            CpuBackend::Perf => {
-                let s = PerfSampler::start_perf_only(
-                    SamplerConfig::default()
-                        .event_source(config.event_source)
-                        .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                        .include_kernel(config.include_kernel),
-                )?;
-                (s, "perf")
-            }
-            CpuBackend::Ctimer => {
-                let s = PerfSampler::start_ctimer_only(
-                    SamplerConfig::default()
-                        .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                        .include_kernel(false),
-                )?;
-                (s, "ctimer")
-            }
+        let sampler = match config.backend {
+            CpuBackend::Auto => PerfSampler::start(
+                SamplerConfig::default()
+                    .event_source(config.event_source)
+                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                    .include_kernel(config.include_kernel),
+            )?,
+            CpuBackend::Perf => PerfSampler::start_perf_only(
+                SamplerConfig::default()
+                    .event_source(config.event_source)
+                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                    .include_kernel(config.include_kernel),
+            )?,
+            CpuBackend::Ctimer => PerfSampler::start_ctimer_only(
+                SamplerConfig::default()
+                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                    .include_kernel(false),
+            )?,
         };
+        // `Auto` resolves inside the sampler, which reports what it picked.
+        let active_backend = sampler.active_backend();
         Ok(Self {
             sampler,
             pid: std::process::id(),
             tid_to_name: FxHashMap::default(),
             stopped_tids: Vec::new(),
             config,
-            effective_backend,
+            active_backend,
             metadata_emitted: false,
             kallsyms_snapshot: None,
+            samples_drained: 0,
         })
+    }
+
+    /// Backend selected at start; `Auto` resolves to one of them.
+    pub fn active_backend(&self) -> &ActiveCpuBackend {
+        &self.active_backend
+    }
+
+    /// CPU samples from this process drained since start. Updated on the flush
+    /// thread each flush cycle while recording; unchanged while paused.
+    pub fn samples_drained(&self) -> u64 {
+        self.samples_drained
     }
 
     /// Drain all pending perf samples as raw (tid, callchain) tuples.
@@ -389,6 +393,7 @@ impl CpuProfiler {
             if sample.pid != pid {
                 return;
             }
+            self.samples_drained = self.samples_drained.saturating_add(1);
             if !self.tid_to_name.contains_key(&sample.tid)
                 && let Some(name) = read_thread_name(sample.tid)
             {
@@ -485,12 +490,9 @@ impl Source for CpuProfiler {
             "cpu.profile.frequency_hz".to_string(),
             self.config.frequency_hz.to_string(),
         ));
-        // Report the *effective* backend (perf or ctimer), never "auto".
-        // The Auto variant resolves at construction time; self.effective_backend
-        // captures the actual selection.
         out.push((
             "cpu.profile.backend".to_string(),
-            self.effective_backend.to_string(),
+            self.active_backend.as_str().to_string(),
         ));
         // "false": requested, but fell back to live /proc/kallsyms.
         if let Some(active) = self.kallsyms_snapshot {
@@ -500,11 +502,11 @@ impl Source for CpuProfiler {
             ));
         }
         out.extend(sys::system_metadata());
-        // When ctimer is the effective backend, it always samples thread CPU time
+        // When ctimer is the active backend, it always samples thread CPU time
         // (CLOCK_THREAD_CPUTIME_ID), regardless of what EventSource was
         // originally requested. Report the *effective* source honestly.
         #[allow(unreachable_patterns)]
-        let event_source_name = if self.effective_backend == "ctimer" {
+        let event_source_name = if self.active_backend == ActiveCpuBackend::Ctimer {
             "sw_cpu_clock"
         } else {
             match self.config.event_source {
@@ -539,6 +541,8 @@ pub struct SchedProfiler {
     config: SchedEventConfig,
     /// Whether segment metadata has been emitted yet (emit-once).
     metadata_emitted: bool,
+    /// Scheduler samples drained since start.
+    samples_drained: u64,
 }
 
 impl std::fmt::Debug for SchedProfiler {
@@ -562,7 +566,14 @@ impl SchedProfiler {
             sampler,
             config,
             metadata_emitted: false,
+            samples_drained: 0,
         })
+    }
+
+    /// Scheduler samples drained since start. Updated on the flush thread each
+    /// flush cycle while recording; unchanged while paused.
+    pub fn samples_drained(&self) -> u64 {
+        self.samples_drained
     }
 
     pub(crate) fn track_current_thread(&mut self) -> io::Result<()> {
@@ -575,6 +586,7 @@ impl SchedProfiler {
 
     pub(crate) fn drain(&mut self, mut f: impl FnMut(RawCpuSample)) {
         self.sampler.for_each_sample(|sample| {
+            self.samples_drained = self.samples_drained.saturating_add(1);
             f(RawCpuSample {
                 tid: sample.tid,
                 timestamp_nanos: sample.time,
@@ -746,11 +758,11 @@ mod metadata_tests {
     use super::*;
     use dial9_core::source::Source;
 
-    /// CpuProfiler::segment_metadata must report the effective backend
+    /// CpuProfiler::segment_metadata must report the active backend
     /// ("perf" or "ctimer"), never "auto", even when CpuBackend::Auto was
     /// configured. This test runs on Linux where `start` resolves Auto.
     #[test]
-    fn cpu_profiler_metadata_reports_effective_backend_not_auto() {
+    fn cpu_profiler_metadata_reports_active_backend_not_auto() {
         // CpuProfiler::start may fail in CI without perf access and without
         // ctimer (rare). If it succeeds, the metadata must not say "auto".
         let config = CpuProfilingConfig::default(); // backend = Auto
@@ -768,7 +780,7 @@ mod metadata_tests {
             .expect("metadata must contain cpu.profile.backend");
         assert!(
             backend.1 == "perf" || backend.1 == "ctimer",
-            "effective backend must be 'perf' or 'ctimer', got '{}'",
+            "active backend must be 'perf' or 'ctimer', got '{}'",
             backend.1
         );
         assert_ne!(

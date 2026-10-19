@@ -114,7 +114,7 @@ impl MemoryProfileSource {
             if alloc_ts_ns >= f.ts_ns {
                 return; // address-reuse race or timestamp tie — see comment above
             }
-            liveset.remove(&f.addr);
+            liveset.remove_sync(&f.addr);
             (size, alloc_ts_ns)
         } else {
             (f.size, f.alloc_ts_ns)
@@ -615,7 +615,9 @@ mod tests {
         let liveset = fresh_liveset();
         // Producer-side state: the dying thread sampled this allocation
         // earlier with timestamp 100 and size 4096.
-        liveset.insert(0xAABB, (4096, 100)).expect("liveset insert");
+        liveset
+            .insert_sync(0xAABB, (4096, 100))
+            .expect("liveset insert");
 
         // Producer pushed a shutdown-flagged free at ts=200.
         rings
@@ -663,7 +665,9 @@ mod tests {
         // Liveset contains the NEW allocation's data — the dying thread's
         // entry was already overwritten by `on_alloc` (via the
         // remove-then-reinsert path) before the consolidator ran.
-        liveset.insert(0xAABB, (8192, 300)).expect("liveset insert");
+        liveset
+            .insert_sync(0xAABB, (8192, 300))
+            .expect("liveset insert");
 
         // Producer's shutdown push has ts=100 (older than the new alloc).
         rings
@@ -727,7 +731,9 @@ mod tests {
         let rings = rings(16, 16);
         let liveset = fresh_liveset();
         // Liveset entry has alloc_ts_ns = 100.
-        liveset.insert(0xBBCC, (2048, 100)).expect("liveset insert");
+        liveset
+            .insert_sync(0xBBCC, (2048, 100))
+            .expect("liveset insert");
 
         // Shutdown free also has ts_ns = 100 (tie).
         rings

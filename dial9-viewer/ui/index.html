@@ -111,6 +111,13 @@
                 Select a time range and click Search to find traces.
             </div>
             <div id="heatmap-view" style="display:none">
+                <div id="heatmap-host-controls">
+                    <label for="heatmap-host-filter">Filter hosts</label>
+                    <input id="heatmap-host-filter" type="search" placeholder="Host name or path…" />
+                    <button id="heatmap-host-clear" type="button">Clear</button>
+                    <span id="heatmap-host-count" role="status" aria-live="polite"></span>
+                    <span id="heatmap-sort-order" title="Ordered by total trace bytes in the loaded time range, largest first.">Most data first</span>
+                </div>
                 <div id="heatmap-hint">
                     <span>Click a host label to focus &middot; Click a segment to select just one &middot; Drag to select a window &middot; <b>⌥ Option+drag</b> to zoom &middot; double-click to reset.</span>
                     <span class="legend">low <span class="bar"></span> high data density</span>

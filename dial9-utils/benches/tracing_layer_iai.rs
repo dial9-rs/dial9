@@ -11,7 +11,7 @@
 //!
 //! Gated on `--cfg iai_enabled` so plain `cargo test --all-targets`
 //! compiles to a no-op stub `fn main()` instead of spawning
-//! `iai-callgrind-runner`. CI iai jobs set RUSTFLAGS to enable.
+//! `gungraun-runner`. CI iai jobs set RUSTFLAGS to enable.
 
 #![cfg_attr(not(iai_enabled), allow(unused))]
 
@@ -23,7 +23,7 @@ use dial9_tokio_telemetry::telemetry::{
     AttachedRuntime, Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions, recorder,
 };
 use dial9_utils::tracing_layer::Dial9TracingLayer;
-use iai_callgrind::{library_benchmark, library_benchmark_group, main};
+use gungraun::{library_benchmark, library_benchmark_group, main};
 use std::hint::black_box;
 use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::prelude::*;
@@ -112,7 +112,7 @@ fn run_fields(h: &Harness) {
     }
 }
 
-// Each bench fn returns its Harness so iai-callgrind's `teardown` callback
+// Each bench fn returns its Harness so Gungraun's `teardown` callback
 // drops it outside the measurement region.
 fn drop_harness(h: Harness) {
     drop(h);

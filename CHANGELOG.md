@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.4...dial9-v0.5.5) - 2026-10-16
+
+### Added
+
+- support fallible asynchronous S3 client construction ([#1038](https://github.com/dial9-rs/dial9/pull/1038))
+- *(core)* report pipeline lifecycle and processor order ([#1002](https://github.com/dial9-rs/dial9/pull/1002))
+- *(perf-self-profile)* snapshot kallsyms at recorder build ([#1041](https://github.com/dial9-rs/dial9/pull/1041))
+
 ## [0.5.4](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.3...dial9-v0.5.4) - 2026-10-12
 
 ### Fixed

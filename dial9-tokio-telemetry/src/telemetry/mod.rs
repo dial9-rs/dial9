@@ -34,12 +34,13 @@ pub use dial9_core::recorder::{RecorderBuilder, recorder};
 pub use dial9_perf_self_profile::RecorderPerfExt;
 #[cfg(feature = "linux-socket")]
 pub use dial9_perf_self_profile::SocketAcceptQueuesConfig;
-#[cfg(feature = "memory-profiling")]
-pub use dial9_perf_self_profile::{AllocEvent, FreeEvent};
 #[cfg(feature = "cpu-profiling")]
 pub use dial9_perf_self_profile::{
-    CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
+    ActiveCpuBackend, CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig,
+    SchedProfiler, StartFailed,
 };
+#[cfg(feature = "memory-profiling")]
+pub use dial9_perf_self_profile::{AllocEvent, FreeEvent};
 #[cfg(feature = "process-resource")]
 pub use dial9_perf_self_profile::{ProcessResourceUsageConfig, ProcessResourceUsageEvent};
 pub use events::clock_monotonic_ns;

@@ -9,10 +9,12 @@
 // expect <script>-established globals), which this page must not load.
 import { segmentsOverlapping } from "../../lib/canvas/heatmap.js";
 import { traceTitleParams } from "../../lib/trace/title.js";
+import { parseKey } from "../../lib/trace/keys.js";
 import {
   encodeAggregationParams,
   encodeScope,
   scopeFromKeys,
+  type TraceScope,
 } from "../../lib/trace/trace_scope.js";
 import type { SourceScope } from "../../lib/trace/source-scope.js";
 import type { BrowserEls } from "./dom.js";
@@ -31,6 +33,25 @@ function currentSource(store: BrowserStore, els: BrowserEls): SourceScope {
     bucket: els.bucketInput.value.trim() || source.bucket,
     region: els.credsRegion.value.trim() || source.region,
   };
+}
+
+function scopeForKeys(
+  store: BrowserStore,
+  els: BrowserEls,
+  keys: readonly string[],
+  t0: number | null,
+  t1: number | null,
+): TraceScope | null {
+  const scope = scopeFromKeys(currentSource(store, els), keys, t0, t1);
+  // A recognized layout may validly start at bucket root. Only unknown
+  // layouts need the active search prefix to re-list the same directory.
+  if (scope && !scope.prefix && parseKey(keys[0]!).layout === "unknown") {
+    const state = store.getState();
+    scope.prefix = state.ui.tab === "raw"
+      ? els.rawSearchInput.value.trim()
+      : state.form.prefix;
+  }
+  return scope;
 }
 
 // The selection spanned too many hosts to name them all in the URL, so the
@@ -52,14 +73,20 @@ export function effectiveProfileSelection(
   browse: Readonly<BrowseSlice>,
 ): HeatmapSelection | null {
   if (browse.selection?.keys.length) return browse.selection;
-  const domain = browse.unfocusedRows ? browse.domain : browse.fullDomain;
+  const narrowed = browse.unfocusedRows || browse.hostFilter.trim() !== "";
+  const domain = narrowed ? browse.domain : browse.fullDomain;
   if (!domain) return null;
-  const segments = browse.unfocusedRows
+  const segments = narrowed
     ? browse.rows.flatMap((row) =>
         segmentsOverlapping(row.segments, domain.tMin, domain.tMax),
       )
     : browse.segments;
   if (!segments.length) return null;
+  // A raw path cannot be encoded as a verified host in a compact scope.
+  // Require a trace selection instead of silently profiling hidden groups.
+  if (browse.hostFilter.trim() && segments.some(segment => segment.layout === "unknown")) {
+    return null;
+  }
   return {
     keys: segments.map((segment) => segment.key),
     bytes: segments.reduce((sum, segment) => sum + segment.size, 0),
@@ -80,7 +107,7 @@ export function selectionScope(
   if (!sel || !sel.keys.length) return null;
   const bucket = els.bucketInput.value.trim();
   if (!bucket) return null;
-  const scope = scopeFromKeys(currentSource(store, els), sel.keys, sel.t0, sel.t1);
+  const scope = scopeForKeys(store, els, sel.keys, sel.t0, sel.t1);
   if (!scope) return null;
   const { query, hostsDropped } = encodeAggregationParams(new URLSearchParams(), scope);
   if (hostsDropped) warnHostsDropped();
@@ -135,8 +162,9 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
     // re-lists files from. Unknown-layout keys don't leak shifted svc/host.
     const titleParams = traceTitleParams(keys, { localTz: localTz() });
     const sel = store.getState().browse.selection;
-    const scope = scopeFromKeys(
-      currentSource(store, els),
+    const scope = scopeForKeys(
+      store,
+      els,
       keys,
       sel ? sel.t0 : null,
       sel ? sel.t1 : null,
@@ -173,7 +201,7 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
       alert("Bucket is required");
       return;
     }
-    const scope = scopeFromKeys(currentSource(store, els), sel.keys, sel.t0, sel.t1);
+    const scope = scopeForKeys(store, els, sel.keys, sel.t0, sel.t1);
     if (!scope) return; // a box selection always carries a window, so unreachable
 
     if (s.config.aggregationEnabled) {
@@ -208,7 +236,7 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
       alert("Bucket is required");
       return;
     }
-    const scope = scopeFromKeys(currentSource(store, els), sel.keys, sel.t0, sel.t1);
+    const scope = scopeForKeys(store, els, sel.keys, sel.t0, sel.t1);
     if (!scope) return; // window always present for a box selection
     const { query, hostsDropped } = encodeAggregationParams(new URLSearchParams(), scope);
     if (hostsDropped) warnHostsDropped();
@@ -226,7 +254,7 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
       alert("Bucket is required");
       return;
     }
-    const scope = scopeFromKeys(currentSource(store, els), sel.keys, sel.t0, sel.t1);
+    const scope = scopeForKeys(store, els, sel.keys, sel.t0, sel.t1);
     if (!scope) return; // window always present for a box selection
     const base = new URLSearchParams();
     base.set("api", "1");

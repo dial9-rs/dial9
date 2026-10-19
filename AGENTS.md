@@ -14,9 +14,17 @@ these rules for all public APIs:
   optional or defaulted to avoid breaking existing callers.
 - **Mark config structs `#[non_exhaustive]`** if not using `#[bon::builder]`,
   so adding fields is not a breaking change.
+- **Do not implement `Copy` on public enums.** Variants may gain owned fields
+  later; implementing `Copy` commits every future field to being `Copy` too.
+  Prefer borrowing or explicit cloning.
+- **Make extensible public enums and their variants `#[non_exhaustive]`.**
+  Use named fields for variant payloads instead of tuple fields. Provide
+  constructors and setters for downstream callers, because non-exhaustive
+  variants cannot be constructed outside their crate. Give new fields defaults.
 - **Think about semver hazards:** adding a required parameter, removing a
   public type, or changing a trait signature are all breaking. When in doubt,
   keep it private or behind a builder.
+- **Don't invent new names for things that already exist**: For example, if a pipeline has something called a processor, do not use "stage" to refer to the same concept.
 
 ## Trace Format Backwards Compatibility
 
@@ -86,6 +94,21 @@ Vite. `/new/*.html` assets are compatibility redirects to those entries; there
 is no second page implementation.
 
 ## Testing
+
+### Writing Tests
+
+Tests that rely on timing should use paused time.
+
+```
+#[tokio::test(start_paused = true)]
+
+```
+
+Tests MUST NOT use `std::thread::sleep`.
+
+If a test is testing something where multiple orderings can happen, the test should `shuttle`.
+
+If a test is checking multiple different variants, it should use `rstest`.
 
 ### Local viewer server
 

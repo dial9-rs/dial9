@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 /// Create an `aws_sdk_s3::Client` backed by s3s-fs (in-memory fake S3).
-pub fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
+pub(crate) fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
     let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
     let mut builder = s3s::service::S3ServiceBuilder::new(fs);
     builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
@@ -116,7 +116,7 @@ impl<S: s3s::S3 + Send + Sync> s3s::S3 for RegionEnforcingFs<S> {
 /// Build an `aws_sdk_s3::Client` backed by `RegionEnforcingFs`.
 /// The client is intentionally configured with the WRONG region (`us-west-2`).
 /// Only requests corrected to `expected_region` will succeed.
-pub fn fake_s3_client_with_region(
+pub(crate) fn fake_s3_client_with_region(
     fs_root: &std::path::Path,
     expected_region: &str,
 ) -> aws_sdk_s3::Client {
@@ -220,7 +220,7 @@ impl<S: s3s::S3 + Send + Sync> s3s::S3 for FlakyS3<S> {
 }
 
 /// Build an `aws_sdk_s3::Client` that enforces region AND fails every Nth `put_object`.
-pub fn fake_s3_client_flaky(
+pub(crate) fn fake_s3_client_flaky(
     fs_root: &std::path::Path,
     expected_region: &str,
     fail_every_n: u64,
@@ -311,7 +311,7 @@ impl<S: s3s::S3 + Send + Sync> s3s::S3 for HangingS3<S> {
 }
 
 /// Build an `aws_sdk_s3::Client` where `put_object` hangs forever.
-pub fn fake_s3_client_hanging(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
+pub(crate) fn fake_s3_client_hanging(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
     let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
     let hanging = HangingS3 { inner: fs };
     let mut builder = s3s::service::S3ServiceBuilder::new(hanging);
@@ -402,7 +402,7 @@ impl<S: s3s::S3 + Send + Sync> s3s::S3 for AlwaysFailS3<S> {
 }
 
 /// Build an `aws_sdk_s3::Client` where all uploads permanently fail with 500.
-pub fn fake_s3_client_always_failing(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
+pub(crate) fn fake_s3_client_always_failing(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
     let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
     let failing = AlwaysFailS3 { inner: fs };
     let mut builder = s3s::service::S3ServiceBuilder::new(failing);
@@ -429,7 +429,7 @@ pub fn fake_s3_client_always_failing(fs_root: &std::path::Path) -> aws_sdk_s3::C
 /// so this is race-free; polling the trace dir is not, because the local
 /// segment file is deleted immediately after a successful upload (the worker is
 /// actively consuming while a dump window is open). Panics on timeout.
-pub fn wait_for_uploaded_segment(
+pub(crate) fn wait_for_uploaded_segment(
     runtime: &tokio::runtime::Runtime,
     client: &aws_sdk_s3::Client,
     bucket: &str,

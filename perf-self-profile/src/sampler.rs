@@ -114,3 +114,31 @@ pub struct Sample {
     /// Parse with [`TracepointDef::extract_fields`](crate::tracepoint::TracepointDef::extract_fields).
     pub raw: Option<Vec<u8>>,
 }
+
+/// CPU sampling backend a [`PerfSampler`](crate::PerfSampler) runs on, after
+/// `Auto` resolves.
+///
+/// Variants are `#[non_exhaustive]` so they can gain fields: match them as
+/// `ActiveCpuBackend::Ctimer { .. }`, or compare [`as_str`](Self::as_str).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActiveCpuBackend {
+    /// `perf_event_open`. A `CpuProfiler` on it samples every thread
+    /// descended from the one that started it.
+    #[non_exhaustive]
+    Perf,
+    /// Per-thread CPU timers. A `CpuProfiler` on it samples only threads dial9
+    /// tracks and, on Linux, the thread that started it.
+    #[non_exhaustive]
+    Ctimer,
+}
+
+impl ActiveCpuBackend {
+    /// `"perf"` or `"ctimer"`, as written to segment metadata.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Perf => "perf",
+            Self::Ctimer => "ctimer",
+        }
+    }
+}

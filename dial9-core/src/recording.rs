@@ -188,6 +188,9 @@ impl Recorder {
     /// Enable recording.
     pub fn enable(&self) {
         self.handle.enable();
+        if !self.handle.is_enabled() {
+            return;
+        }
         // Run the one-shot start hooks now that the handle is live and
         // recording. Draining leaves them run-once across repeated enables.
         let hooks = std::mem::take(&mut *self.recording_start_hooks.lock().unwrap());

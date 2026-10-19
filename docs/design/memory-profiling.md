@@ -807,27 +807,32 @@ operation would panic. The **OPT_OUT sentinel** eliminates this without
 ```rust
 thread_local! {
     static IS_SHUTTING_DOWN: Cell<bool> = const { Cell::new(false) };
-    static LIFETIME_GUARD: Lifetime = const { Lifetime };
+    static LIFETIME_GUARD: Lifetime = {
+        IS_SHUTTING_DOWN.with(|c| c.set(true));
+        drop(scc::Guard::new());
+        IS_SHUTTING_DOWN.with(|c| c.set(false));
+        Lifetime
+    };
 }
 // Lifetime::drop sets IS_SHUTTING_DOWN = true.
 // check_shutdown() reads IS_SHUTTING_DOWN; if true, bails out.
 ```
 
-Because `LIFETIME_GUARD` is initialized before `sdd`'s TLS (on the first
-hook entry), it drops *after* `sdd`'s destructor runs. Any subsequent hook
-entry sees the flag and returns without touching `scc`. Cost: ~1 ns
-(one TLS Cell read + branch).
+The first hook entry initializes `sdd`'s collector before registering
+`LIFETIME_GUARD`. Our guard therefore drops *before* `sdd`'s destructor runs,
+so hooks invoked while `sdd` frees its own collector also see the shutdown
+flag. Collector initialization temporarily disables liveset access to prevent
+recursive initialization through allocator hooks. Subsequent calls only read
+TLS; the steady-state cost is ~1 ns (one TLS Cell read + branch).
 
 **Init-order invariant.** Every code path that touches the liveset must
 call `check_shutdown()` first on every entry — that's what eagerly
-initialises `LIFETIME_GUARD` before the first lazy `sdd` TLS init. If a
-new code path skips this and triggers an `scc` op before
-`check_shutdown()`, the destructor order at thread exit can flip and the
-guard becomes useless.
+initialises `sdd` and registers `LIFETIME_GUARD` in the required order.
+Skipping the check during teardown could access a destroyed collector.
 
 ### Stale-entry handling on `on_alloc`
 
-`scc::HashIndex::insert` returns `Err` and does **not** overwrite when the
+`scc::HashIndex::insert_sync` returns `Err` and does **not** overwrite when the
 key already exists. Address space is recycled by the OS allocator, so a
 stale entry can land on `on_alloc`'s insert in two cases:
 
@@ -843,16 +848,16 @@ silently dropped and a future `FreeEvent` would carry the *old*
 allocation's data — a hard-to-detect correctness bug.
 
 The hot path stays on the cheap lock-free `insert`. On the rare `Err`
-(stale entry), we fall through to `scc::HashIndex::entry` and overwrite
+(stale entry), we fall through to `scc::HashIndex::entry_sync` and overwrite
 atomically inside the bucket lock:
 
 ```rust
 let key = ptr as u64;
 let val = (size as u64, timestamp_ns);
-if let Err((k, v)) = liveset.insert(key, val) {
+if let Err((k, v)) = liveset.insert_sync(key, val) {
     use scc::hash_index::Entry;
-    match liveset.entry(k) {
-        Entry::Occupied(o) => o.update(v),
+    match liveset.entry_sync(k) {
+        Entry::Occupied(mut o) => o.update(v),
         Entry::Vacant(ve) => {
             // A concurrent dealloc removed the stale entry between our
             // `insert` and `entry` — fine, treat as a fresh insert.
@@ -898,7 +903,7 @@ Protocol:
    if alloc_ts_ns >= f.ts_ns {
        return; // race or timestamp tie: leave entry for the new alloc
    }
-   liveset.remove(&f.addr);
+   liveset.remove_sync(&f.addr);
    enc.encode(&FreeEvent { ts_ns: f.ts_ns, addr: f.addr, size, alloc_ts_ns, .. });
    ```
 

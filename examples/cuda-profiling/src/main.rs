@@ -1,23 +1,26 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use candle_core::{Device, Tensor};
+use cudarc::cublas::{CudaBlas, Gemm, GemmConfig, Gemv, GemvConfig, sys::cublasOperation_t};
+use cudarc::driver::CudaContext;
 use dial9::{DiskBuffer, recorder};
-use dial9_perf_self_profile::{cuda::CudaGpuConfig, RecorderPerfExt};
+use dial9_perf_self_profile::{RecorderPerfExt, cuda::CudaGpuConfig};
 
 const TRACE_DIR: &str = "traces";
 
-fn cos_sin(n: usize, device: &Device) -> Result<Tensor> {
-    let thetas: Vec<_> = (0..n).map(|i| i as f32 / n as f32).collect();
-    let xs: Vec<_> = thetas.iter().map(|t| t.cos().abs()).collect();
-    let ys: Vec<_> = thetas.iter().map(|t| t.sin().abs()).collect();
-    let xs = Tensor::from_vec(xs, (n, 1), device)?;
-    let ys = Tensor::from_vec(ys, (1, n), device)?;
-    let ys = Tensor::cat(&[&ys, &ys, &ys, &ys, &ys, &ys], 1)?;
-    Ok(xs.matmul(&ys)?)
-}
-
 fn main() -> Result<()> {
+    let n = std::env::args()
+        .nth(1)
+        .map(|value| value.parse())
+        .transpose()
+        .context("matrix size must be a positive integer")?
+        .unwrap_or(2000usize);
+    anyhow::ensure!(n > 0, "matrix size must be positive");
+    let columns = n.checked_mul(6).context("matrix size is too large")?;
+    let elements = n.checked_mul(columns).context("matrix size is too large")?;
+    let rows_i32 = i32::try_from(n).context("matrix size exceeds cuBLAS limits")?;
+    let columns_i32 = i32::try_from(columns).context("matrix size exceeds cuBLAS limits")?;
+
     let writer = DiskBuffer::builder()
         .base_path(TRACE_DIR)
         .max_file_size(10 * 1024 * 1024)
@@ -32,27 +35,82 @@ fn main() -> Result<()> {
         .context("failed to start NVIDIA GPU profiling")?
         .build();
 
-    let device = Device::new_cuda(0)?;
-    let n = std::env::args()
-        .nth(1)
-        .map(|value| value.parse())
-        .transpose()
-        .context("matrix size must be a positive integer")?
-        .unwrap_or(2000usize);
-    let xys_cpu = cos_sin(n, &Device::Cpu)?;
-    let xys = cos_sin(n, &device)?;
-    let sum_keepdim_cpu = xys_cpu.sum_keepdim(1)?;
-    let sum_keepdim = xys.sum_keepdim(1)?;
-    std::hint::black_box((&sum_keepdim_cpu, &sum_keepdim));
+    let context = CudaContext::new(0)?;
+    let stream = context.default_stream();
+    let blas = CudaBlas::new(stream.clone())?;
+    let xs: Vec<_> = (0..n).map(|i| (i as f32 / n as f32).cos().abs()).collect();
+    let ys: Vec<_> = (0..columns)
+        .map(|i| ((i % n) as f32 / n as f32).sin().abs())
+        .collect();
+    let expected = xs.iter().sum::<f32>() * ys.iter().sum::<f32>();
+    let xs = stream.clone_htod(&xs)?;
+    let ys = stream.clone_htod(&ys)?;
+    let column_ones = stream.clone_htod(&vec![1f32; columns])?;
+    let row_ones = stream.clone_htod(&vec![1f32; n])?;
+    let mut xys = stream.alloc_zeros::<f32>(elements)?;
+    let mut row_sums = stream.alloc_zeros::<f32>(n)?;
+    let mut total = stream.alloc_zeros::<f32>(1)?;
+    let no_transpose = cublasOperation_t::CUBLAS_OP_N;
+
+    // SAFETY: column-major (n x 1) * (1 x 6n) writes exactly n * 6n elements.
+    // Every buffer belongs to the same CUDA stream and remains alive.
+    unsafe {
+        blas.gemm(
+            GemmConfig {
+                transa: no_transpose,
+                transb: no_transpose,
+                m: rows_i32,
+                n: columns_i32,
+                k: 1,
+                alpha: 1f32,
+                lda: rows_i32,
+                ldb: 1,
+                beta: 0f32,
+                ldc: rows_i32,
+            },
+            &xs,
+            &ys,
+            &mut xys,
+        )?;
+    }
+    let sum_rows = GemvConfig {
+        trans: no_transpose,
+        m: rows_i32,
+        n: columns_i32,
+        alpha: 1f32,
+        lda: rows_i32,
+        incx: 1,
+        beta: 0f32,
+        incy: 1,
+    };
+    let sum_total = GemvConfig {
+        trans: cublasOperation_t::CUBLAS_OP_T,
+        m: rows_i32,
+        n: 1,
+        alpha: 1f32,
+        lda: rows_i32,
+        incx: 1,
+        beta: 0f32,
+        incy: 1,
+    };
+    stream.synchronize()?;
 
     let start = std::time::Instant::now();
     let n_iters = 100;
     let mut v = 0f32;
     for _ in 0..n_iters {
-        let sum_keepdim = xys.sum_keepdim(1)?;
-        let sum_keepdim = sum_keepdim.sum_keepdim(0)?;
-        let sum_keepdim: f32 = sum_keepdim.reshape(&[])?.to_scalar()?;
-        v += sum_keepdim;
+        // SAFETY: (n x 6n) * (6n) writes n row sums, then (n x 1)^T * (n)
+        // writes one total. Buffers are disjoint and remain on the same stream.
+        unsafe {
+            blas.gemv(sum_rows, &xys, &column_ones, &mut row_sums)?;
+            blas.gemv(sum_total, &row_sums, &row_ones, &mut total)?;
+        }
+        let actual = stream.clone_dtoh(&total)?[0];
+        anyhow::ensure!(
+            actual.is_finite() && (actual - expected).abs() <= expected.abs() * 1e-4,
+            "GPU sum {actual} differs from CPU sum {expected}"
+        );
+        v += actual;
     }
     let elapsed = start.elapsed();
     if v > 0. {

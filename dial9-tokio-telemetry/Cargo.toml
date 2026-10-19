@@ -1,6 +1,6 @@
 [package]
 name = "dial9-tokio-telemetry"
-version = "0.5.4"
+version = "0.5.5"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -52,7 +52,7 @@ dial9-trace-format = { workspace = true, features = [
 tracing = "0.1.44"
 hostname = "0.4"
 bon = "3"
-aws-sdk-s3 = { version = "1", default-features = false, optional = true, features = [
+aws-sdk-s3 = { version = "1.145", default-features = false, optional = true, features = [
     "behavior-version-latest",
     "sigv4a",
     "rt-tokio",
@@ -122,6 +122,7 @@ __nonlinux_all_features = [
 ]
 
 [dev-dependencies]
+rstest = "0.26.1"
 dial9-tokio-telemetry = { path = ".", features = [
     "analysis",
     "memory-profiling",
@@ -148,11 +149,10 @@ proptest = "1"
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dial9-destinations-s3 = { workspace = true }
-# Allow s3s 0.13 for Tokio 1.51; s3s 0.14 requires Tokio >= 1.52.3.
-s3s = ">=0.13.0, <0.15.0"
-s3s-fs = ">=0.13.0, <0.15.0"
-s3s-aws = ">=0.13.0, <0.15.0"
-aws-sdk-s3 = { version = "1", default-features = false, features = [
+s3s = "0.14.1"
+s3s-fs = "0.14.1"
+s3s-aws = "0.14.1"
+aws-sdk-s3 = { version = "1.145", default-features = false, features = [
     "behavior-version-latest",
     "default-https-client",
     "http-1x",
@@ -161,7 +161,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = [
 ] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 async-trait = "0.1.89"
-iai-callgrind = "=0.16.1"
+gungraun = "=0.19.4"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dial9-tokio-telemetry = { path = ".", features = [

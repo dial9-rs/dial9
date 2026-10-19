@@ -131,7 +131,47 @@ impl Dial9Handle {
     pub fn dump_trigger(&self) -> Option<crate::dump::DumpTrigger> {
         self.inner
             .as_ref()
-            .and_then(|i| i.shared.dump_trigger().cloned())
+            .and_then(|i| i.shared.pipeline().dump_trigger.clone())
+    }
+
+    /// A snapshot of the pipeline's lifecycle and ordered processors.
+    /// A disconnected handle reports `Disconnected`; a recorder without
+    /// a pipeline worker reports `NotConfigured`. Pausing recording doesn't
+    /// disconnect the handle or change the pipeline's lifecycle.
+    ///
+    /// Reads shared state; the worker isn't involved. Call again to refresh
+    /// the snapshot.
+    ///
+    /// Shutdown stops recording before the worker stops, so this can still
+    /// report `Running` after [`is_stopped`](Self::is_stopped) returns `true`,
+    /// until the worker exits.
+    ///
+    /// ```no_run
+    /// # fn f(handle: dial9_core::handle::Dial9Handle) {
+    /// use dial9_core::pipeline::PipelineStatus;
+    ///
+    /// match handle.pipeline_status() {
+    ///     PipelineStatus::Disconnected { .. } => eprintln!("no recorder"),
+    ///     PipelineStatus::NotConfigured { .. } => eprintln!("no pipeline worker"),
+    ///     PipelineStatus::Running { .. } => {}
+    ///     PipelineStatus::Initializing { processor, .. } => {
+    ///         eprintln!("waiting on {:?}", processor.as_ref().map(|p| p.name()))
+    ///     }
+    ///     other => eprintln!("pipeline not running: {other:?}"),
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "pipeline")]
+    pub fn pipeline_status(&self) -> crate::pipeline::PipelineStatus {
+        use crate::pipeline::PipelineStatus;
+
+        let Some(inner) = &self.inner else {
+            return PipelineStatus::Disconnected;
+        };
+        match &inner.shared.pipeline().state {
+            Some(state) => state.status(),
+            None => PipelineStatus::NotConfigured,
+        }
     }
 
     /// Return the [`Dial9Handle`] to record through, resolved in order:

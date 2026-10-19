@@ -1,4 +1,4 @@
-# iai-callgrind PR regression gate. See benchmarks.yml for prereqs.
+# Gungraun PR regression gate. See benchmarks.yml for prereqs.
 #
 # Compares against the persistent thresholds maintained on the main
 # branch (set by benchmarks.yml). Skipped on PRs labeled `skip-bench`.

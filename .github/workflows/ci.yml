@@ -96,29 +96,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # All instrumentation except task dumps supports the 1.51 LTS line.
           - tokio: "1.51.0"
-            features: __nonlinux_all_features
-            # These demo apps enable taskdump unconditionally on Linux.
-            exclude: metrics-service telemetry-test-app
-            # This viewer fixture runs the taskdump-enabled demo app.
-            filter: not test(local_javascript_matches_the_self_described_fixture)
-          # Task dumps need Tokio 1.53.2 for correct captures.
+            manifest: tests/min-versions/Cargo.toml
+          # Task dumps require Tokio 1.53.2; exercise the full workspace here.
           - tokio: "1.53.2"
-            features: ""
-            exclude: ""
-            filter: all()
+            manifest: ""
     env:
       RUST_BACKTRACE: 1
+      CARGO_TARGET_DIR: target
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: ./.github/actions/rust-build
         with:
           toolchain: ${{ env.STABLE_TOOLCHAIN }}
           tokio-version: ${{ matrix.tokio }}
-          test-features: ${{ matrix.features }}
-          test-exclude: ${{ matrix.exclude }}
-          test-filter: ${{ matrix.filter }}
+          test-manifest: ${{ matrix.manifest }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
   freebsd:

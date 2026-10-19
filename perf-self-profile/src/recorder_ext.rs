@@ -1,8 +1,9 @@
 //! `.with_*` sugar for plugging this crate's profiling `Source`s into a
-//! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. Each
-//! method is `.source(<Source>::new(cfg))` that warns and skips on a start
-//! failure or unsupported platform. Use `.source(CpuProfiler::start(cfg)?)` to
-//! propagate the failure instead.
+//! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. The
+//! CPU and scheduler profilers warn on a start failure and register a
+//! `StartFailed` placeholder. The other methods register nothing on failure;
+//! see each method. Use `.source(CpuProfiler::start(cfg)?)` to propagate the
+//! failure instead.
 
 use dial9_core::buffer::BufferMode;
 use dial9_core::recorder::RecorderBuilder;
@@ -24,11 +25,13 @@ pub trait RecorderPerfExt: recorder_perf_ext_sealed::Sealed + Sized {
         config: crate::cuda::CudaGpuConfig,
     ) -> Result<Self, crate::cuda::CudaGpuStartError>;
 
-    /// Register the process-wide CPU profiler. Warns and skips on start failure.
+    /// Register the process-wide CPU profiler. On a start failure, warns and
+    /// registers a [`StartFailed`](crate::StartFailed) placeholder.
     #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self;
 
-    /// Register the per-thread scheduler-event profiler. Warns and skips on start failure.
+    /// Register the per-thread scheduler-event profiler. On a start failure,
+    /// warns and registers a [`StartFailed`](crate::StartFailed) placeholder.
     #[cfg(feature = "cpu-profiling")]
     fn with_sched_events(self, config: crate::SchedEventConfig) -> Self;
 
@@ -87,7 +90,7 @@ impl<M: BufferMode> RecorderPerfExt for RecorderBuilder<M> {
                 rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::warn!("failed to start CPU profiler: {e}");
                 });
-                self
+                self.source(crate::StartFailed::<crate::CpuProfiler>::new(&e))
             }
         }
     }
@@ -100,7 +103,7 @@ impl<M: BufferMode> RecorderPerfExt for RecorderBuilder<M> {
                 rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::warn!("failed to start scheduler event profiler: {e}");
                 });
-                self
+                self.source(crate::StartFailed::<crate::SchedProfiler>::new(&e))
             }
         }
     }

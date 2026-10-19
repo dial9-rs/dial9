@@ -93,6 +93,7 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
     els.heatmapCursor.style.display = "none";
     els.heatmapCursorLabel.style.display = "none";
   }
+  els.heatmapBody.addEventListener("scroll", hideCursor);
 
   els.heatmapPlot.addEventListener("mousemove", (e) => {
     const s = store.getState();
@@ -114,6 +115,7 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
     els.heatmapCursor.style.height = s.browse.rows.length * ROW_H + "px";
     els.heatmapCursor.style.display = "block";
     els.heatmapCursorLabel.style.left = place.labelLeft + "px";
+    els.heatmapCursorLabel.style.top = els.heatmapBody.scrollTop + 2 + "px";
   });
   els.heatmapPlot.addEventListener("mouseleave", hideCursor);
 

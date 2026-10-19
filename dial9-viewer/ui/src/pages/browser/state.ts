@@ -6,8 +6,8 @@
 //
 // Text inputs (bucket/prefix/pickers/raw query/creds fields) stay DOM-owned
 // (uncontrolled): user-typed values are not state the store renders. The
-// single input mirrored into state is the prefix (FormSlice) because the
-// Search button's disabled state renders from it.
+// Prefix (FormSlice) drives Search availability; the host filter (BrowseSlice)
+// drives the visible row set and can be cleared by its button.
 
 import { createStore, type Store } from "../../store/store.js";
 import type { HostRow } from "../../lib/canvas/heatmap.js";
@@ -142,6 +142,9 @@ export interface BrowseSlice {
   /** Truncation warning banner text; null = hidden. */
   warning: string | null;
   segments: readonly HeatmapSegment[];
+  /** Complete host rows before the local host filter or focus is applied. */
+  allRows: readonly HeatmapRow[];
+  hostFilter: string;
   rows: readonly HeatmapRow[];
   /** Preserve row identities so host focus can restore the original result. */
   unfocusedRows: readonly HeatmapRow[] | null;
@@ -254,6 +257,8 @@ export function initialBrowserState(): BrowserState {
       },
       warning: null,
       segments: [],
+      allRows: [],
+      hostFilter: "",
       rows: [],
       unfocusedRows: null,
       domain: null,

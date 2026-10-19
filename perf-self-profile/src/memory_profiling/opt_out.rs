@@ -14,11 +14,10 @@
 //! - `LIFETIME_GUARD`: a `Lifetime` struct whose `Drop` impl flips
 //!   `IS_SHUTTING_DOWN = true`.
 //!
-//! On first hook entry, both slots are initialized. Because `LIFETIME_GUARD`
-//! is initialized *before* `sdd`'s internal TLS (which is lazily initialized
-//! on the first `scc` operation), TLS destructors run in reverse order:
-//! `sdd` drops first, then our `LIFETIME_GUARD`. After our guard drops,
-//! subsequent hook entries see `IS_SHUTTING_DOWN = true` and bail out.
+//! On first hook entry, initialize `sdd`'s collector before registering
+//! `LIFETIME_GUARD`. TLS destructors run in reverse order, so our guard
+//! drops first and disables liveset access before `sdd` frees its collector.
+//! This also covers allocator hooks invoked from `sdd`'s own destructor.
 //!
 //! Cost: ~1 ns (one TLS `Cell::get` + one branch).
 
@@ -37,16 +36,24 @@ thread_local! {
     /// never returns `Err` under normal circumstances.
     static IS_SHUTTING_DOWN: Cell<bool> = const { Cell::new(false) };
 
-    /// Has `Drop`. Destructor flips `IS_SHUTTING_DOWN = true`.
-    static LIFETIME_GUARD: Lifetime = const { Lifetime };
+    /// Registered after sdd's TLS so shutdown is flagged before sdd drops.
+    static LIFETIME_GUARD: Lifetime = {
+        // Collector initialization can allocate or reclaim memory. Prevent
+        // those allocator hooks from recursively initializing this slot.
+        IS_SHUTTING_DOWN.with(|c| c.set(true));
+        drop(scc::Guard::new());
+        IS_SHUTTING_DOWN.with(|c| c.set(false));
+        Lifetime
+    };
 }
 
 /// Returns `true` if the current thread is shutting down and `scc` operations
 /// are unsafe. The hook must bail out without touching the liveset.
 ///
-/// # Allocation-free guarantee
+/// # Initialization
 ///
-/// This function performs only TLS reads — no allocations, no locks.
+/// The first call initializes sdd's collector with liveset access disabled.
+/// Subsequent calls perform only TLS reads — no allocations, no locks.
 #[inline]
 pub(crate) fn check_shutdown() -> bool {
     let is_shutting_down = IS_SHUTTING_DOWN.try_with(|c| c.get()).unwrap_or(true);

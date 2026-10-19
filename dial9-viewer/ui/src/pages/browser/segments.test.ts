@@ -3,8 +3,8 @@
 //   parsed service/host/boot; unknown keys carry "" service and their raw
 //   directory as host), while time placement stays layout-independent and
 //   falls back to the upload mtime for keys with no filename epoch (#627).
-// - toRows: upload-lag overlaps are tiled away rather than double-counted,
-//   and only genuine missing coverage becomes a gap.
+// - toRows: hosts sort by total bytes; upload-lag overlaps are tiled away
+//   rather than double-counted, and only genuine missing coverage becomes a gap.
 // - computeExtent: the union of every segment's normalized span.
 
 import { describe, expect, it } from "vitest";
@@ -86,6 +86,23 @@ describe("toSegments", () => {
 describe("toRows", () => {
   it("empty input -> no rows", () => {
     expect(toRows([])).toEqual([]);
+  });
+
+  it("orders hosts by their combined trace bytes, largest first, with label ties", () => {
+    const segments = toSegments([
+      { key: knownKey(1000, { host: "zeta" }), size: 12 },
+      { key: knownKey(1000, { host: "beta" }), size: 18 },
+      { key: knownKey(1000, { host: "alpha" }), size: 20 },
+      { key: knownKey(1060, { host: "zeta", boot: "boot-b", seg: 1 }), size: 8 },
+    ]);
+    const rows = toRows(segments);
+    expect(rows.map(row => [row.host, row.totalBytes])).toEqual([
+      ["alpha", 20],
+      ["zeta", 20],
+      ["beta", 18],
+    ]);
+    expect(rows[1]!.segments).toHaveLength(2);
+    expect(segments.map(segment => segment.host)).toEqual(["zeta", "beta", "alpha", "zeta"]);
   });
 
   it("unknown-layout keys group by directory, one row per directory", () => {

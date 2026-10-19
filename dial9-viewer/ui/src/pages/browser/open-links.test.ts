@@ -5,8 +5,9 @@ import type { BrowserEls } from "./dom.js";
 import {
   createOpenLinks,
   effectiveProfileSelection,
+  selectionScope,
 } from "./open-links.js";
-import { toRows } from "./segments.js";
+import { filterHostRows, toRows } from "./segments.js";
 import { createBrowserStore } from "./state.js";
 import type { HeatmapSegment } from "./state.js";
 
@@ -48,6 +49,7 @@ function fakeEls(): BrowserEls {
   return {
     bucketInput: Object.assign(el(), { value: "trace-bucket" }),
     credsRegion: el(),
+    rawSearchInput: el(),
     viewBtn: el(),
     cpuBtn: el(),
     healthBtn: el(),
@@ -88,7 +90,7 @@ describe("effectiveProfileSelection", () => {
     const rows = toRows(loaded);
     store.update("browse", {
       segments: loaded,
-      rows: [rows[1]!],
+      rows: [rows.find((row) => row.host === "host-b")!],
       unfocusedRows: rows,
       domain: { tMin: 160, tMax: 180 },
       fullDomain: { tMin: 100, tMax: 200 },
@@ -120,9 +122,109 @@ describe("effectiveProfileSelection", () => {
 
     expect(effectiveProfileSelection(store.getState().browse)).toBe(selection);
   });
+
+  it("profiles only the hosts matching the filter", () => {
+    const store = createBrowserStore();
+    const loaded = segments();
+    store.update("browse", {
+      segments: loaded,
+      allRows: toRows(loaded),
+      rows: filterHostRows(toRows(loaded), "host-b"),
+      hostFilter: "host-b",
+      domain: { tMin: 100, tMax: 200 },
+      fullDomain: { tMin: 100, tMax: 200 },
+    });
+    expect(effectiveProfileSelection(store.getState().browse)).toEqual({
+      keys: [loaded[1]!.key],
+      bytes: 20,
+      t0: 100,
+      t1: 200,
+    });
+
+    store.update("browse", { rows: [] });
+    expect(effectiveProfileSelection(store.getState().browse)).toBeNull();
+  });
+
+  it("requires a trace selection when a filtered path has no recognized host identity", () => {
+    const store = createBrowserStore();
+    const loaded: HeatmapSegment[] = [{
+      ...segments()[0]!,
+      layout: "unknown",
+      service: "",
+      host: "traces/date/minute/service/region/host/boot",
+      bootId: "",
+    }];
+    store.update("browse", {
+      segments: loaded,
+      rows: toRows(loaded),
+      allRows: toRows(loaded),
+      hostFilter: "host",
+      domain: { tMin: 100, tMax: 200 },
+      fullDomain: { tMin: 100, tMax: 200 },
+    });
+    expect(effectiveProfileSelection(store.getState().browse)).toBeNull();
+    const selection = { keys: [loaded[0]!.key], bytes: 10, t0: 110, t1: 111 };
+    store.update("browse", { selection });
+    expect(effectiveProfileSelection(store.getState().browse)).toBe(selection);
+  });
 });
 
 describe("profile links without a heatmap selection", () => {
+  it.each([
+    "2026-10-15/1200/api/host/boot/1792065600-0.bin.gz",
+    "version=1/date=2026-10-15/service=api/time=1200/instance=host/boot=boot/1792065600-0.bin.gz",
+  ])("preserves a recognized bucket-root scope from Raw: %s", (key) => {
+    const open = vi.fn();
+    vi.stubGlobal("window", { Dial9Creds: null, open });
+    const store = createBrowserStore();
+    store.update("ui", { tab: "raw" });
+    store.update("form", { prefix: "unrelated-browse-prefix" });
+    const links = createOpenLinks({
+      store, els: fakeEls(), getSelectedKeys: () => [key], launchDiff: vi.fn(),
+    });
+    links.viewSelected();
+    const url = new URL(String(open.mock.calls[0]![0]), "https://viewer.example/");
+    expect(url.searchParams.has("s_prefix")).toBe(false);
+    expect(url.searchParams.get("s_svc")).toBe("api");
+    expect(url.searchParams.getAll("s_host")).toEqual(["host"]);
+  });
+
+  it("uses the Raw search prefix for an unrecognized Raw key layout", () => {
+    const open = vi.fn();
+    vi.stubGlobal("window", { Dial9Creds: null, open });
+    const store = createBrowserStore();
+    store.update("ui", { tab: "raw" });
+    store.update("form", { prefix: "unrelated-browse-prefix" });
+    const els = fakeEls();
+    els.rawSearchInput.value = "other/traces";
+    const key = "other/traces/2026-10-15/1200/api/region/host/boot/1792065600-0.bin.gz";
+    const links = createOpenLinks({
+      store, els, getSelectedKeys: () => [key], launchDiff: vi.fn(),
+    });
+    links.viewSelected();
+    const url = new URL(String(open.mock.calls[0]![0]), "https://viewer.example/");
+    expect(url.searchParams.get("s_prefix")).toBe("other/traces");
+  });
+
+  it("retains the searched prefix when selected keys use an unrecognized layout", () => {
+    const open = vi.fn();
+    vi.stubGlobal("window", { Dial9Creds: null, open });
+    const store = createBrowserStore();
+    const key = "team/traces/2026-10-15/1200/api/region/host/boot/1792065600-0.bin.gz";
+    store.update("form", { prefix: "team/traces" });
+    store.update("browse", {
+      selection: { keys: [key], bytes: 10, t0: 1792065600, t1: 1792065660 },
+    });
+    const els = fakeEls();
+    const links = createOpenLinks({
+      store, els, getSelectedKeys: () => [key], launchDiff: vi.fn(),
+    });
+    links.viewSelected();
+    const url = new URL(String(open.mock.calls[0]![0]), "https://viewer.example/");
+    expect(url.searchParams.get("s_prefix")).toBe("team/traces");
+    expect(selectionScope(store, els)?.get("prefix")).toBe("team/traces");
+  });
+
   it("opens Flamegraph, Tokio Stats, and Spans over the loaded service", () => {
     const open = vi.fn();
     vi.stubGlobal("window", {
@@ -179,7 +281,7 @@ describe("profile links without a heatmap selection", () => {
       selection: { keys: [loaded[0]!.key], bytes: 10, t0: 110, t1: 120 },
     });
     const actions = createActions(store, fakeEls());
-    actions.focusHost(rows[1]!);
+    actions.focusHost(rows.find((row) => row.host === "host-b")!);
     actions.viewSelected();
     expect(open).not.toHaveBeenCalled();
     actions.viewCpuProfile();
@@ -217,7 +319,7 @@ describe("profile links without a heatmap selection", () => {
       domain: { tMin: 160, tMax: 180 },
       fullDomain: { tMin: 100, tMax: 200 },
     });
-    actions.focusHost(rows[1]!);
+    actions.focusHost(rows.find((row) => row.host === "host-b")!);
     await flushStore();
     expect(els.selectionCount.textContent).toContain("Focused host · 1 segment");
     actions.showAllHosts();

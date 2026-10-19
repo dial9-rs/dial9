@@ -7,7 +7,7 @@
 //!
 //! Gated on `--cfg iai_enabled` so plain `cargo test --all-targets`
 //! compiles to a no-op stub `fn main()` instead of spawning
-//! `iai-callgrind-runner`. CI iai jobs set RUSTFLAGS to enable.
+//! `gungraun-runner`. CI iai jobs set RUSTFLAGS to enable.
 
 #![cfg_attr(not(iai_enabled), allow(unused))]
 
@@ -17,7 +17,7 @@ fn main() {}
 use dial9_trace_format::decoder::Decoder;
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::{StackFrames, TraceEvent};
-use iai_callgrind::{library_benchmark, library_benchmark_group, main};
+use gungraun::{library_benchmark, library_benchmark_group, main};
 use std::hint::black_box;
 
 #[derive(TraceEvent)]

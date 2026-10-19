@@ -194,6 +194,35 @@ pub trait SegmentProcessor: Send {
     }
 }
 
+/// An initialization error that permanently disables the owning recorder.
+///
+/// Return this inside an [`io::Error`] from [`SegmentProcessor::initialize`]
+/// when continuing to record without this pipeline would be undesirable.
+#[derive(Debug)]
+pub struct DisableRecording {
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl DisableRecording {
+    pub fn new(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
+
+impl std::fmt::Display for DisableRecording {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "recording disabled: {}", self.source)
+    }
+}
+
+impl std::error::Error for DisableRecording {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 /// Error returned by a [`SegmentProcessor`].
 ///
 /// Carries the [`SegmentData`] back so the caller can recover it for retry,
@@ -301,6 +330,106 @@ impl From<std::io::Error> for ProcessErrorKind {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
     }
+}
+
+/// A snapshot of the pipeline, from
+/// [`Dial9Handle::pipeline_status`](crate::handle::Dial9Handle::pipeline_status).
+///
+/// A disconnected handle and a recorder without a pipeline have distinct
+/// variants. A configured pipeline retains its ordered processors in every
+/// lifecycle state, including after it stops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PipelineStatus {
+    /// The handle isn't connected to a recorder.
+    #[non_exhaustive]
+    Disconnected,
+    /// The recorder has no pipeline worker.
+    #[non_exhaustive]
+    NotConfigured,
+    /// Awaiting a processor's [`SegmentProcessor::initialize`], or not
+    /// started yet (`processor: None`).
+    #[non_exhaustive]
+    Initializing {
+        /// Processors in pipeline order.
+        processors: std::sync::Arc<[PipelineProcessor]>,
+        /// The processor being initialized.
+        processor: Option<PipelineProcessor>,
+    },
+    /// Every processor initialized; the worker loop is running.
+    #[non_exhaustive]
+    Running {
+        /// Processors in pipeline order.
+        processors: std::sync::Arc<[PipelineProcessor]>,
+    },
+    /// Final: the worker doesn't restart and its processors have dropped.
+    /// Background tasks spawned by processors may still be running.
+    #[non_exhaustive]
+    Stopped {
+        /// Processors in pipeline order.
+        processors: std::sync::Arc<[PipelineProcessor]>,
+        /// Why the worker stopped.
+        cause: StopCause,
+    },
+}
+
+impl PipelineStatus {
+    /// Each processor, in pipeline order. Empty for a disconnected handle
+    /// or a recorder without a pipeline worker.
+    pub fn processors(&self) -> &[PipelineProcessor] {
+        match self {
+            Self::Disconnected | Self::NotConfigured => &[],
+            Self::Initializing { processors, .. }
+            | Self::Running { processors }
+            | Self::Stopped { processors, .. } => processors,
+        }
+    }
+}
+
+/// One processor in the pipeline, from [`PipelineStatus::processors`].
+///
+/// This describes a [`SegmentProcessor`] by its name; it isn't another
+/// processing abstraction. Names need not be unique.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PipelineProcessor {
+    name: &'static str,
+}
+
+impl PipelineProcessor {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self { name }
+    }
+
+    /// [`SegmentProcessor::name`] of the processor.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// Why the pipeline worker is [`Stopped`](PipelineStatus::Stopped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StopCause {
+    /// Shut down normally, including a `Recorder` dropped without
+    /// `graceful_shutdown` while the worker was idle.
+    #[non_exhaustive]
+    Exited,
+    /// A processor's [`SegmentProcessor::initialize`] returned an error.
+    #[non_exhaustive]
+    InitializeFailed {
+        /// The processor whose `initialize()` failed.
+        processor: PipelineProcessor,
+    },
+    /// Panicked: in a processor, the thread-start hook or the runtime build.
+    #[non_exhaustive]
+    Panicked,
+    /// Still running when the shutdown drain timeout ran out. A `Recorder`
+    /// dropped without `graceful_shutdown` allows no drain time, so a worker
+    /// that was mid-segment, or still in a processor's `initialize()`, stops this
+    /// way.
+    #[non_exhaustive]
+    DrainTimedOut,
 }
 
 #[cfg(test)]

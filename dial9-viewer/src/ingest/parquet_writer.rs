@@ -40,7 +40,7 @@ pub fn write_samples<W: Write + Send>(
 ) -> anyhow::Result<()> {
     let schema = samples_schema();
     let props = writer_props()
-        .set_max_row_group_size(SAMPLES_ROW_GROUP_SIZE)
+        .set_max_row_group_row_count(Some(SAMPLES_ROW_GROUP_SIZE))
         .build();
 
     let mut arrow_writer = ArrowWriter::try_new(writer, schema.clone(), Some(props))?;
@@ -425,7 +425,9 @@ fn write_spans_with_batch_size<W: Write + Send>(
 ) -> anyhow::Result<()> {
     anyhow::ensure!(batch_rows > 0, "span batch size must be positive");
     let schema = spans_schema();
-    let props = writer_props().set_max_row_group_size(128 * 1024).build();
+    let props = writer_props()
+        .set_max_row_group_row_count(Some(128 * 1024))
+        .build();
     let mut arrow_writer = ArrowWriter::try_new(writer, schema.clone(), Some(props))?;
 
     if spans.is_empty() {

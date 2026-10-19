@@ -10,20 +10,12 @@ inputs:
         default: "true"
     tokio-version:
         required: false
-        description: "exact Tokio version to test instead of the checked-in lockfile version"
+        description: "exact Tokio version to resolve before running tests"
         default: ""
-    test-features:
+    test-manifest:
         required: false
-        description: "feature list to test instead of the platform's full feature set"
+        description: "standalone consumer manifest for minimum-version tests"
         default: ""
-    test-exclude:
-        required: false
-        description: "space-separated workspace packages to exclude from tests"
-        default: ""
-    test-filter:
-        required: false
-        description: "nextest filter expression for minimum-version tests"
-        default: "all()"
 
 runs:
     using: "composite"
@@ -56,27 +48,19 @@ runs:
           shell: bash
           env:
               TOKIO_VERSION: ${{ inputs.tokio-version }}
+              TEST_MANIFEST: ${{ inputs.test-manifest }}
           run: |
-              if [ "$TOKIO_VERSION" = "1.51.0" ]; then
-                  # Resolve a fresh graph so S3 fixtures can also downgrade.
-                  # Restore the manifest before --locked validates its bounds.
-                  manifest_backup="$(mktemp)"
-                  cp dial9-tokio-telemetry/Cargo.toml "$manifest_backup"
-                  trap 'cp "$manifest_backup" dial9-tokio-telemetry/Cargo.toml; rm -f "$manifest_backup"' EXIT
-                  rm -f Cargo.lock
-                  cargo add -p dial9-tokio-telemetry "tokio@=$TOKIO_VERSION"
-                  cp "$manifest_backup" dial9-tokio-telemetry/Cargo.toml
-                  # s3s 0.13 selects aws-runtime 1.7.2, whose event-stream
-                  # signer does not compile with aws-smithy-eventstream 0.60.21.
-                  cargo update -p aws-smithy-eventstream --precise 0.60.20
-              else
-                  cargo update -p tokio --precise "$TOKIO_VERSION"
+              manifest_args=()
+              if [ -n "$TEST_MANIFEST" ]; then
+                  manifest_args=(--manifest-path "$TEST_MANIFEST")
               fi
-              cargo tree --locked -p tokio --depth 0
+              cargo update "${manifest_args[@]}" -p tokio --precise "$TOKIO_VERSION"
+              cargo tree "${manifest_args[@]}" --locked -p tokio --depth 0
         - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
           with:
               save-if: ${{ inputs.save-if }}
               cache-bin: "false"
+              key: ${{ inputs.tokio-version }}
         - uses: taiki-e/install-action@184183c2401be73c3bf42c2e61268aa5855379c1 # v2
           with:
               tool: nextest
@@ -91,52 +75,40 @@ runs:
           env:
               RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
               TOKIO_VERSION: ${{ inputs.tokio-version }}
-              TEST_FEATURES: ${{ inputs.test-features }}
-              TEST_EXCLUDE: ${{ inputs.test-exclude }}
-              TEST_FILTER: ${{ inputs.test-filter }}
+              TEST_MANIFEST: ${{ inputs.test-manifest }}
           run: |
               if [ "${{ inputs.toolchain }}" = nightly ] && [ -z "$TOKIO_VERSION" ]; then
                   rm -fv Cargo.lock
               fi
               lock_args=()
+              manifest_args=()
               if [ -n "$TOKIO_VERSION" ]; then
-                  # Never let a test invocation silently upgrade Tokio again.
                   lock_args=(--locked)
+              fi
+              if [ -n "$TEST_MANIFEST" ]; then
+                  manifest_args=(--manifest-path "$TEST_MANIFEST")
               fi
               # tokio's `taskdump` feature only compiles on linux aarch64/x86/x86_64.
               # On macOS drop it from --all-features; leave everything else intact.
-              if [ -n "$TEST_FEATURES" ]; then
-                  feature_args=(--features "$TEST_FEATURES")
-              elif [ "$RUNNER_OS" = "Linux" ]; then
-                  feature_args=(--all-features)
-              else
-                  feature_args=(--features __nonlinux_all_features)
-              fi
-              workspace_args=()
-              if [ -n "$TEST_EXCLUDE" ]; then
-                  workspace_args=(--workspace)
-                  read -r -a excluded_packages <<< "$TEST_EXCLUDE"
-                  for package in "${excluded_packages[@]}"; do
-                      workspace_args+=(--exclude "$package")
-                  done
-              fi
               if [ "$RUNNER_OS" = "Linux" ]; then
                   # Raise locked-memory limit for large perf ring buffers
                   sudo prlimit --pid $$ --memlock=unlimited:unlimited
               fi
               if [ -n "$TOKIO_VERSION" ]; then
-                  # Custom benchmark harnesses cannot be listed by nextest.
-                  cargo nextest run "${lock_args[@]}" "${workspace_args[@]}" \
-                    --lib --tests "${feature_args[@]}" -E "$TEST_FILTER"
+                  cargo nextest run "${manifest_args[@]}" --locked --all-features
+              elif [ "$RUNNER_OS" = "Linux" ]; then
+                  cargo test --all-targets --all-features
               else
-                  cargo test --all-targets "${feature_args[@]}"
+                  cargo test --all-targets --features __nonlinux_all_features
               fi
               # dial9-core alone: `test-util` is off here, so the single-recorder
               # guard is enforced. Plain `cargo test` shares one process across
               # threads, so unrelated tests would race for the guard; nextest's
               # one-process-per-test model avoids that without changing any
               # test to work around it.
-              cargo nextest run "${lock_args[@]}" -p dial9-core --lib
+              if [ -z "$TEST_MANIFEST" ]; then
+                  cargo nextest run "${lock_args[@]}" -p dial9-core --lib
+              fi
         - name: Test optimized caller stacks on both CPU sampling backends
           if: runner.os == 'Linux'
           shell: bash
@@ -144,11 +116,17 @@ runs:
               DIAL9_REQUIRE_PERF: "1"
               RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
               TOKIO_VERSION: ${{ inputs.tokio-version }}
+              TEST_MANIFEST: ${{ inputs.test-manifest }}
           run: |
               sudo prlimit --pid $$ --memlock=unlimited:unlimited
               lock_args=()
               if [ -n "$TOKIO_VERSION" ]; then
                   lock_args=(--locked)
               fi
-              cargo test "${lock_args[@]}" --release -p dial9-perf-self-profile \
-                --features cpu-profiling --test call_site_inline_stack
+              if [ -n "$TEST_MANIFEST" ]; then
+                  cargo test --manifest-path "$TEST_MANIFEST" --locked --release \
+                    --all-features --test call_site_inline_stack
+              else
+                  cargo test "${lock_args[@]}" --release -p dial9-perf-self-profile \
+                    --features cpu-profiling --test call_site_inline_stack
+              fi

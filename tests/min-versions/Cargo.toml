@@ -1,0 +1,194 @@
+[package]
+name = "dial9-min-versions-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+autotests = false
+
+# Test the production consumer graph independently of workspace dev-dependencies.
+[workspace]
+resolver = "3"
+
+[profile.release]
+debug = 1
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)", "cfg(shuttle)", 'cfg(feature, values("taskdump"))'] }
+
+# Match the feature gates in the reused test sources. The dependencies below
+# enable the corresponding production features without task dumps or the CLI.
+[features]
+default = ["tokio", "pipeline", "analysis", "cpu-profiling", "memory-profiling", "process-resource", "linux-socket", "worker-s3", "unstable-events", "metrique-sink"]
+tokio = []
+pipeline = []
+analysis = []
+cpu-profiling = []
+memory-profiling = []
+process-resource = []
+linux-socket = []
+worker-s3 = []
+unstable-events = []
+metrique-sink = []
+
+[dependencies]
+tokio = { version = "=1.51.0", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "test-util"] }
+dial9 = { path = "../../dial9", default-features = false, features = ["tokio", "analysis", "cpu-profiling", "memory-profiling", "process-resource", "linux-socket", "worker-s3", "metrique-sink", "unstable-events"] }
+dial9-tokio-telemetry = { path = "../../dial9-tokio-telemetry", features = ["__nonlinux_all_features", "unstable-events"] }
+dial9-core = { path = "../../dial9-core", features = ["pipeline", "test-util"] }
+dial9-destinations-s3 = { path = "../../dial9-destinations-s3" }
+dial9-perf-self-profile = { path = "../../perf-self-profile", features = ["cpu-profiling", "test-util", "unstable-events"] }
+dial9-trace-format = { path = "../../dial9-trace-format", features = ["serde-deserialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+flate2 = "1"
+libc = "0.2"
+nix = { version = "0.29", features = ["process"] }
+proptest = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrique = { version = "0.1.29", features = ["local-format"] }
+metrique-writer = { version = "0.1", features = ["test-util"] }
+metrique-timesource = { version = "0.1", features = ["custom-timesource", "tokio", "test-util"] }
+
+# Reuse the actual integration tests, rather than maintaining separate copies.
+
+[[test]]
+name = "active_tasks_metric"
+path = "../../dial9-tokio-telemetry/tests/active_tasks_metric.rs"
+
+[[test]]
+name = "spawn_with"
+path = "../../dial9-tokio-telemetry/tests/spawn_with.rs"
+
+[[test]]
+name = "segment_metadata_survives_tokio"
+path = "../../dial9-tokio-telemetry/tests/segment_metadata_survives_tokio.rs"
+
+[[test]]
+name = "end_to_end"
+path = "../../dial9-tokio-telemetry/tests/end_to_end.rs"
+
+[[test]]
+name = "writeback_no_leaked_gz"
+path = "../../dial9-tokio-telemetry/tests/writeback_no_leaked_gz.rs"
+
+[[test]]
+name = "background_symbolization"
+path = "../../dial9-tokio-telemetry/tests/background_symbolization.rs"
+
+[[test]]
+name = "rotation_time_alignment"
+path = "../../dial9-tokio-telemetry/tests/rotation_time_alignment.rs"
+
+[[test]]
+name = "dump_trigger"
+path = "../../dial9-tokio-telemetry/tests/dump_trigger.rs"
+
+[[test]]
+name = "sched_clock_alignment"
+path = "../../dial9-tokio-telemetry/tests/sched_clock_alignment.rs"
+
+[[test]]
+name = "join_set_ext"
+path = "../../dial9-tokio-telemetry/tests/join_set_ext.rs"
+
+[[test]]
+name = "echo_server"
+path = "../../dial9-tokio-telemetry/tests/echo_server.rs"
+
+[[test]]
+name = "spawn_in"
+path = "../../dial9-tokio-telemetry/tests/spawn_in.rs"
+
+[[test]]
+name = "park_unpark_tid"
+path = "../../dial9-tokio-telemetry/tests/park_unpark_tid.rs"
+
+[[test]]
+name = "disable_stops_events"
+path = "../../dial9-tokio-telemetry/tests/disable_stops_events.rs"
+
+[[test]]
+name = "sched_profiler_fd_leak"
+path = "../../dial9-tokio-telemetry/tests/sched_profiler_fd_leak.rs"
+
+[[test]]
+name = "runtime_metrics"
+path = "../../dial9-tokio-telemetry/tests/runtime_metrics.rs"
+
+[[test]]
+name = "process_resource_usage"
+path = "../../dial9-tokio-telemetry/tests/process_resource_usage.rs"
+
+[[test]]
+name = "shutdown_releases_shared_state"
+path = "../../dial9-tokio-telemetry/tests/shutdown_releases_shared_state.rs"
+
+[[test]]
+name = "socket_accept_queues"
+path = "../../dial9-tokio-telemetry/tests/socket_accept_queues.rs"
+
+[[test]]
+name = "cpu_sample_clock_alignment"
+path = "../../dial9-tokio-telemetry/tests/cpu_sample_clock_alignment.rs"
+
+[[test]]
+name = "builtin_event_serde"
+path = "../../dial9-tokio-telemetry/tests/builtin_event_serde.rs"
+
+[[test]]
+name = "sched_events"
+path = "../../dial9-tokio-telemetry/tests/sched_events.rs"
+
+[[test]]
+name = "custom_events"
+path = "../../dial9-tokio-telemetry/tests/custom_events.rs"
+
+[[test]]
+name = "writeback_no_trailing_data"
+path = "../../dial9-tokio-telemetry/tests/writeback_no_trailing_data.rs"
+
+[[test]]
+name = "guard_seals_on_drop"
+path = "../../dial9-tokio-telemetry/tests/guard_seals_on_drop.rs"
+
+[[test]]
+name = "tokio_hooks"
+path = "../../dial9-tokio-telemetry/tests/tokio_hooks.rs"
+
+[[test]]
+name = "facade_recorder"
+path = "../../dial9/tests/recorder.rs"
+
+[[test]]
+name = "facade_recorder_attach"
+path = "../../dial9/tests/recorder_attach.rs"
+
+[[test]]
+name = "facade_macro_main"
+path = "../../dial9/tests/macro_main.rs"
+
+[[test]]
+name = "facade_macro_graceful_shutdown_symbolization"
+path = "../../dial9/tests/macro_graceful_shutdown_symbolization.rs"
+
+[[test]]
+name = "facade_namespace_isolation"
+path = "../../dial9/tests/namespace_isolation.rs"
+
+[[test]]
+name = "facade_global_handle"
+path = "../../dial9/tests/global_handle.rs"
+
+[[test]]
+name = "facade_single_global_handle"
+path = "../../dial9/tests/single_global_handle.rs"
+
+[[test]]
+name = "facade_recorder_symbolization"
+path = "../../dial9/tests/recorder_symbolization.rs"
+
+[[test]]
+name = "call_site_inline_stack"
+path = "../../perf-self-profile/tests/call_site_inline_stack.rs"

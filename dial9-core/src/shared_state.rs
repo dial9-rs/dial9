@@ -12,13 +12,16 @@ use std::time::Duration;
 enum State {
     Disabled = 0,
     Enabled = 1,
-    Stopped = 2,
+    #[cfg(feature = "pipeline")]
+    Failed = 2,
+    // Late worker failures must not undo shutdown's refusal of new attachments.
+    Stopped = 3,
 }
 
 crate::test_util_pub! {
 /// Runtime-agnostic core recording state.
 struct SharedState {
-    /// Recording lifecycle: `Disabled ⇄ Enabled → Stopped` (terminal).
+    /// Recording lifecycle: disabled/enabled, permanently failed, then stopped.
     state: AtomicU8,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
@@ -32,11 +35,9 @@ struct SharedState {
     tl_buffers: Mutex<Vec<TlBufferHandle>>,
     /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
     pub(crate) sources: Mutex<Vec<Box<dyn crate::source::Source>>>,
-    /// On-demand dump trigger, set once at build time when the runtime is
-    /// built with `with_dump_trigger`. Reached by application code through
-    /// [`Dial9Handle::dump_trigger`](super::handle::Dial9Handle::dump_trigger).
+    /// What the handle reads about the pipeline, fixed at build.
     #[cfg(feature = "pipeline")]
-    dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
+    pipeline: crate::worker::state::PipelineShared,
 }
 }
 
@@ -60,7 +61,7 @@ impl SharedState {
                 tl_buffers: Mutex::new(Vec::new()),
                 sources: Mutex::new(Vec::new()),
                 #[cfg(feature = "pipeline")]
-                dump_trigger: std::sync::OnceLock::new(),
+                pipeline: crate::worker::state::PipelineShared::default(),
             }
         }
     }
@@ -111,7 +112,7 @@ impl SharedState {
     }
 
     crate::test_util_pub! {
-        /// Turn recording on. No-op once stopped.
+        /// Turn recording on. No-op once permanently failed or stopped.
         fn enable(&self) {
             let _ = self.state.compare_exchange(
                 State::Disabled as u8,
@@ -122,7 +123,7 @@ impl SharedState {
         }
     }
 
-    /// Turn recording off. No-op once stopped.
+    /// Turn recording off. No-op once permanently failed or stopped.
     pub(crate) fn disable(&self) {
         let _ = self.state.compare_exchange(
             State::Enabled as u8,
@@ -130,6 +131,11 @@ impl SharedState {
             Ordering::Relaxed,
             Ordering::Relaxed,
         );
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn disable_permanently(&self) {
+        self.state.fetch_max(State::Failed as u8, Ordering::Relaxed);
     }
 
     /// Stop for good: recording off, [`enable`](Self::enable) and new attaches
@@ -143,19 +149,17 @@ impl SharedState {
         self.state.load(Ordering::Relaxed) == State::Stopped as u8
     }
 
-    /// Install the on-demand dump trigger. Set once at build time by the
-    /// facade builder; later calls are ignored. `pub` so the facade (a
-    /// sibling crate) can wire the trigger in.
+    /// Set what the handle reads about the pipeline. Called by `build()`
+    /// before the state is shared.
     #[cfg(feature = "pipeline")]
-    pub(crate) fn set_dump_trigger(&self, trigger: crate::dump::DumpTrigger) {
-        let _ = self.dump_trigger.set(trigger);
+    pub(crate) fn with_pipeline(mut self, pipeline: crate::worker::state::PipelineShared) -> Self {
+        self.pipeline = pipeline;
+        self
     }
 
-    /// The on-demand dump trigger, or `None` when the runtime was built
-    /// without `with_dump_trigger`.
     #[cfg(feature = "pipeline")]
-    pub(crate) fn dump_trigger(&self) -> Option<&crate::dump::DumpTrigger> {
-        self.dump_trigger.get()
+    pub(crate) fn pipeline(&self) -> &crate::worker::state::PipelineShared {
+        &self.pipeline
     }
 
     /// Check whether recording is currently enabled.

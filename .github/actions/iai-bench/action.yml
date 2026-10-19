@@ -1,14 +1,14 @@
-name: 'iai-callgrind bench'
+name: 'Gungraun bench'
 description: >-
-  Sets up rust toolchain, build cache, valgrind, iai-callgrind-runner, and the
+  Sets up rust toolchain, build cache, valgrind, gungraun-runner, and the
   Bencher CLI, then runs the iai bench suite via `bencher run`. Caller does
   `actions/checkout` so the ref can be event-specific.
 
 inputs:
-  iai-callgrind-version:
-    description: Version of iai-callgrind-runner to install
+  gungraun-version:
+    description: Version of gungraun-runner to install
     required: false
-    default: '0.16.1'
+    default: '0.19.4'
   bencher-token:
     description: Bencher API token
     required: true
@@ -34,21 +34,21 @@ runs:
         packages: valgrind
         version: '1.0'
 
-    - name: Cache iai-callgrind-runner
+    - name: Cache gungraun-runner
       id: runner_cache
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
-        path: ~/.cargo/bin/iai-callgrind-runner
-        key: iai-runner-${{ inputs.iai-callgrind-version }}
+        path: ~/.cargo/bin/gungraun-runner
+        key: gungraun-runner-${{ inputs.gungraun-version }}
 
     - name: Install cargo-binstall
       if: steps.runner_cache.outputs.cache-hit != 'true'
       uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
 
-    - name: Install iai-callgrind-runner (prebuilt via binstall)
+    - name: Install gungraun-runner (prebuilt via binstall)
       if: steps.runner_cache.outputs.cache-hit != 'true'
       shell: bash
-      run: cargo binstall iai-callgrind-runner --version ${{ inputs.iai-callgrind-version }} --no-confirm --locked --force
+      run: cargo binstall gungraun-runner --version ${{ inputs.gungraun-version }} --no-confirm --locked --force
 
     - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
 
@@ -60,7 +60,7 @@ runs:
           --token '${{ inputs.bencher-token }}' \
           --branch '${{ inputs.bencher-branch }}' \
           --testbed ubuntu-latest \
-          --adapter rust_iai_callgrind \
+          --adapter rust_gungraun \
           ${{ inputs.bencher-extra-args }} \
           "cargo bench --workspace \
             --features dial9-utils/tracing-layer \

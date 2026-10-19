@@ -188,11 +188,11 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
 
         // Insert into the producer-side liveset OUTSIDE the RefCell borrow.
         // The borrow is still held (we're inside the try_with closure), but
-        // scc::HashIndex::insert is allocation-free on the hot path (it uses
+        // scc::HashIndex::insert_sync is allocation-free on the hot path (it uses
         // epoch-based reclamation internally with no heap allocation per insert
         // on the common path).
         //
-        // **Stale-entry handling.** `scc::HashIndex::insert` returns `Err` and
+        // **Stale-entry handling.** `scc::HashIndex::insert_sync` returns `Err` and
         // does NOT overwrite when the key already exists. The address space is
         // reused by the OS allocator, so a stale entry can land here in two
         // cases:
@@ -208,11 +208,10 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         // `insert`; only the rare stale case pays the bucket-lock cost.
         //
         // **OPT_OUT init ordering invariant.** `check_shutdown()` MUST be
-        // called before any `liveset` op on this thread. It eagerly initialises
-        // the `LIFETIME_GUARD` TLS *before* `sdd`'s lazy TLS slot, so the
-        // destructor order at thread exit is `sdd` → `LIFETIME_GUARD`, with
-        // the guard flipping `IS_SHUTTING_DOWN = true` after sdd is gone. If
-        // anyone moves the `liveset.insert` call site, `check_shutdown` must
+        // called before any `liveset` op on this thread. It initialises
+        // `sdd`'s collector before `LIFETIME_GUARD`, so the guard flips
+        // `IS_SHUTTING_DOWN = true` before sdd's destructor frees memory. If
+        // anyone moves the `liveset.insert_sync` call site, `check_shutdown` must
         // be called first on every code path that touches the liveset, or
         // we'll panic in `sdd::Collector::current()` during teardown.
         if let Some(liveset) = &inner.liveset
@@ -220,10 +219,10 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         {
             let key = ptr as u64;
             let val = (size as u64, timestamp_ns);
-            if let Err((k, v)) = liveset.insert(key, val) {
+            if let Err((k, v)) = liveset.insert_sync(key, val) {
                 use scc::hash_index::Entry;
-                match liveset.entry(k) {
-                    Entry::Occupied(o) => o.update(v),
+                match liveset.entry_sync(k) {
+                    Entry::Occupied(mut o) => o.update(v),
                     Entry::Vacant(ve) => {
                         // Concurrent dealloc removed the stale entry between our
                         // `insert` and `entry` — treat as fresh insert.
@@ -254,7 +253,7 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
 ///
 /// **Re-entrancy guard.** The non-shutdown branch takes the
 /// `SAMPLE_STATE` `RefCell` borrow as a per-thread re-entrancy guard,
-/// symmetric with `on_alloc`. `liveset.entry` acquires a per-bucket
+/// symmetric with `on_alloc`. `liveset.entry_sync` acquires a per-bucket
 /// write lock, and `scc`'s epoch-based reclamation (via `sdd`) can free
 /// retired buckets when an epoch guard drops — so a re-entrant
 /// `on_dealloc` from inside `scc` internals could in theory hit the
@@ -293,7 +292,7 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
     // Non-shutdown branch: take the SAMPLE_STATE borrow as a re-entrancy
     // guard. If a prior `on_alloc`/`on_dealloc` frame on this thread is
     // still on the stack and holds the borrow, skip — otherwise the
-    // re-entrant `liveset.entry` could deadlock against the outer one on
+    // re-entrant `liveset.entry_sync` could deadlock against the outer one on
     // a shared bucket lock, and any allocation triggered inside `scc`
     // would otherwise be unguarded.
     let _ = SAMPLE_STATE.try_with(|cell| {
@@ -353,7 +352,7 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
 fn take_liveset_entry(liveset: &Liveset, addr: u64) -> Option<(u64, u64)> {
     liveset.peek_with(&addr, |_, _| ())?;
     use scc::hash_index::Entry;
-    if let Entry::Occupied(o) = liveset.entry(addr) {
+    if let Entry::Occupied(o) = liveset.entry_sync(addr) {
         let val = *o.get();
         o.remove_entry();
         Some(val)
@@ -529,7 +528,7 @@ pub(crate) fn on_realloc_failed(
         // Cannot collide: we still own `addr` (see the doc above), so the
         // only way this errs is a stale entry that `on_alloc` would have
         // overwritten anyway.
-        let _ = liveset.insert(addr, val);
+        let _ = liveset.insert_sync(addr, val);
     });
 }
 
@@ -938,7 +937,7 @@ mod tests {
 
             // Second sampled allocation at the same address: size 200. With
             // the fix, on_alloc detects the duplicate-key Err from
-            // `scc::HashIndex::insert` and overwrites the entry with
+            // `scc::HashIndex::insert_sync` and overwrites the entry with
             // (200, ts2).
             on_alloc(&inner_for_thread, addr, 200);
 
@@ -977,7 +976,7 @@ mod tests {
     /// Re-entrancy guard for `on_dealloc`. If a prior frame on this thread is
     /// already inside `on_alloc`/`on_dealloc` and holds the `SAMPLE_STATE`
     /// borrow, a re-entrant `on_dealloc` must skip — otherwise the inner
-    /// call's `liveset.remove` could try to take a bucket write lock that
+    /// call's `liveset.remove_sync` could try to take a bucket write lock that
     /// the outer call already holds (same-thread deadlock if `scc` happens
     /// to recycle a stale liveset key into the very bucket the outer
     /// operation is mutating).
@@ -1020,7 +1019,7 @@ mod tests {
         let liveset = inner.liveset.as_ref().expect("liveset configured");
         assert!(
             liveset.peek_with(&addr_u64, |_, _| ()).is_some(),
-            "re-entrant on_dealloc must skip the liveset.remove; entry was \
+            "re-entrant on_dealloc must skip the liveset.remove_sync; entry was \
              unexpectedly removed (the guard is not in place)"
         );
 
