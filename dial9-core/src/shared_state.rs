@@ -9,7 +9,7 @@ use std::time::Duration;
 /// Recording lifecycle states. `Stopped` is terminal: the flush thread is
 /// gone, nothing drains buffers anymore.
 #[repr(u8)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum State {
     Disabled = 0,
     Enabled = 1,
@@ -17,6 +17,26 @@ pub(crate) enum State {
     Failed = 2,
     // Late worker failures must not undo shutdown's refusal of new attachments.
     Stopped = 3,
+}
+
+/// A stored state byte that doesn't match a known [`State`].
+#[derive(Debug)]
+pub(crate) struct UnknownState(pub(crate) u8);
+
+// A match on a `u8` can't be exhaustive, so new variants need to be added here.
+impl TryFrom<u8> for State {
+    type Error = UnknownState;
+
+    fn try_from(value: u8) -> Result<Self, UnknownState> {
+        match value {
+            v if v == Self::Disabled as u8 => Ok(Self::Disabled),
+            v if v == Self::Enabled as u8 => Ok(Self::Enabled),
+            #[cfg(feature = "pipeline")]
+            v if v == Self::Failed as u8 => Ok(Self::Failed),
+            v if v == Self::Stopped as u8 => Ok(Self::Stopped),
+            v => Err(UnknownState(v)),
+        }
+    }
 }
 
 crate::test_util_pub! {
@@ -151,15 +171,8 @@ impl SharedState {
     }
 
     /// Snapshot the recording lifecycle with one atomic read.
-    pub(crate) fn recording_state(&self) -> State {
-        match self.state.load(Ordering::Relaxed) {
-            state if state == State::Disabled as u8 => State::Disabled,
-            state if state == State::Enabled as u8 => State::Enabled,
-            #[cfg(feature = "pipeline")]
-            state if state == State::Failed as u8 => State::Failed,
-            state if state == State::Stopped as u8 => State::Stopped,
-            state => unreachable!("invalid recording state: {state}"),
-        }
+    pub(crate) fn recording_state(&self) -> Result<State, UnknownState> {
+        State::try_from(self.state.load(Ordering::Relaxed))
     }
 
     /// Set what the handle reads about the pipeline. Called by `build()`
@@ -345,6 +358,19 @@ impl EventBuffer<'_> {
 mod tests {
     use super::*;
     use crate::primitives::sync::atomic::AtomicBool;
+
+    #[test]
+    fn every_state_round_trips_through_its_byte() {
+        #[cfg(feature = "pipeline")]
+        let states = [State::Disabled, State::Enabled, State::Failed, State::Stopped];
+        #[cfg(not(feature = "pipeline"))]
+        let states = [State::Disabled, State::Enabled, State::Stopped];
+        for byte in states.into_iter().map(|state| state as u8) {
+            let decoded = State::try_from(byte).map(|state| state as u8);
+            assert_eq!(Some(byte), decoded.ok());
+        }
+        assert!(matches!(State::try_from(u8::MAX), Err(UnknownState(u8::MAX))));
+    }
 
     fn sample_event() -> crate::format::ClockSyncEvent {
         crate::format::ClockSyncEvent {

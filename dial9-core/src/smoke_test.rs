@@ -96,7 +96,7 @@ impl Check {
 // Called only by `dial9`'s smoke test: kept out of the semver promise.
 #[doc(hidden)]
 pub fn check_recording(handle: &Dial9Handle) -> CheckStatus {
-    use crate::shared_state::State;
+    use crate::shared_state::{State, UnknownState};
 
     let Some(shared) = handle.shared() else {
         return CheckStatus::failed(
@@ -105,18 +105,26 @@ pub fn check_recording(handle: &Dial9Handle) -> CheckStatus {
         );
     };
     match shared.recording_state() {
-        State::Enabled => CheckStatus::Ok,
-        State::Disabled => {
+        Ok(State::Enabled) => CheckStatus::Ok,
+        Ok(State::Disabled) => {
             CheckStatus::disabled(DisabledReason::RecordingPaused, "recording is paused")
         }
-        State::Stopped => {
+        Ok(State::Stopped) => {
             CheckStatus::failed(FailedReason::RecorderStopped, "recorder has shut down")
         }
         #[cfg(feature = "pipeline")]
-        State::Failed => CheckStatus::failed(
+        Ok(State::Failed) => CheckStatus::failed(
             FailedReason::RecorderFailed,
             "recording was permanently disabled by an initialization failure",
         ),
+        // Only reachable if `try_from` misses a variant.
+        Err(UnknownState(byte)) => {
+            debug_assert!(false, "unknown recording state {byte}");
+            CheckStatus::failed(
+                FailedReason::RecorderFailed,
+                format!("unknown recording state {byte}"),
+            )
+        }
     }
 }
 
