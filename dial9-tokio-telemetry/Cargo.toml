@@ -24,7 +24,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 missing_debug_implementations = "warn"
 
 [dependencies]
-tokio = { version = "1.53.2", features = [
+tokio = { version = "1.51.0", features = [
     "rt",
     "macros",
     "time",
@@ -95,6 +95,7 @@ _shuttle = [
 ## (aarch64/x86/x86_64): tokio's upstream `taskdump` feature refuses to
 ## compile on other targets. Enabling this feature on an unsupported target
 ## is a hard compile error from tokio.
+## Requires Tokio >= 1.53.2 for `tokio::runtime::dump::trace_with`.
 taskdump = ["tokio/taskdump"]
 ## Sampled memory allocation profiling via ring buffers.
 memory-profiling = [
@@ -142,14 +143,15 @@ metrique-timesource = { version = "0.1", features = [
 ] }
 metrique-writer = { version = "0.1", features = ["test-util"] }
 metrique = { version = "0.1.29", features = ["local-format"] }
-tokio = { version = "1.53.2", features = ["test-util"] }
+tokio = { version = "1.51.0", features = ["test-util"] }
 proptest = "1"
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dial9-destinations-s3 = { workspace = true }
-s3s = "0.14.1"
-s3s-fs = "0.14.1"
-s3s-aws = "0.14.1"
+# Allow s3s 0.13 for Tokio 1.51; s3s 0.14 requires Tokio >= 1.52.3.
+s3s = ">=0.13.0, <0.15.0"
+s3s-fs = ">=0.13.0, <0.15.0"
+s3s-aws = ">=0.13.0, <0.15.0"
 aws-sdk-s3 = { version = "1", default-features = false, features = [
     "behavior-version-latest",
     "default-https-client",

@@ -8,6 +8,22 @@ inputs:
         required: false
         description: "whether to save the cache (e.g. only on main)"
         default: "true"
+    tokio-version:
+        required: false
+        description: "exact Tokio version to test instead of the checked-in lockfile version"
+        default: ""
+    test-features:
+        required: false
+        description: "feature list to test instead of the platform's full feature set"
+        default: ""
+    test-exclude:
+        required: false
+        description: "space-separated workspace packages to exclude from tests"
+        default: ""
+    test-filter:
+        required: false
+        description: "nextest filter expression for minimum-version tests"
+        default: "all()"
 
 runs:
     using: "composite"
@@ -35,6 +51,28 @@ runs:
         - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
           with:
               toolchain: ${{ inputs.toolchain }}
+        - name: Resolve the minimum supported Tokio version
+          if: inputs.tokio-version != ''
+          shell: bash
+          env:
+              TOKIO_VERSION: ${{ inputs.tokio-version }}
+          run: |
+              if [ "$TOKIO_VERSION" = "1.51.0" ]; then
+                  # Resolve a fresh graph so S3 fixtures can also downgrade.
+                  # Restore the manifest before --locked validates its bounds.
+                  manifest_backup="$(mktemp)"
+                  cp dial9-tokio-telemetry/Cargo.toml "$manifest_backup"
+                  trap 'cp "$manifest_backup" dial9-tokio-telemetry/Cargo.toml; rm -f "$manifest_backup"' EXIT
+                  rm -f Cargo.lock
+                  cargo add -p dial9-tokio-telemetry "tokio@=$TOKIO_VERSION"
+                  cp "$manifest_backup" dial9-tokio-telemetry/Cargo.toml
+                  # s3s 0.13 selects aws-runtime 1.7.2, whose event-stream
+                  # signer does not compile with aws-smithy-eventstream 0.60.21.
+                  cargo update -p aws-smithy-eventstream --precise 0.60.20
+              else
+                  cargo update -p tokio --precise "$TOKIO_VERSION"
+              fi
+              cargo tree --locked -p tokio --depth 0
         - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
           with:
               save-if: ${{ inputs.save-if }}
@@ -52,32 +90,65 @@ runs:
           shell: bash
           env:
               RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
+              TOKIO_VERSION: ${{ inputs.tokio-version }}
+              TEST_FEATURES: ${{ inputs.test-features }}
+              TEST_EXCLUDE: ${{ inputs.test-exclude }}
+              TEST_FILTER: ${{ inputs.test-filter }}
           run: |
-              if [ "${{ inputs.toolchain }}" = nightly ]; then
+              if [ "${{ inputs.toolchain }}" = nightly ] && [ -z "$TOKIO_VERSION" ]; then
                   rm -fv Cargo.lock
+              fi
+              lock_args=()
+              if [ -n "$TOKIO_VERSION" ]; then
+                  # Never let a test invocation silently upgrade Tokio again.
+                  lock_args=(--locked)
               fi
               # tokio's `taskdump` feature only compiles on linux aarch64/x86/x86_64.
               # On macOS drop it from --all-features; leave everything else intact.
+              if [ -n "$TEST_FEATURES" ]; then
+                  feature_args=(--features "$TEST_FEATURES")
+              elif [ "$RUNNER_OS" = "Linux" ]; then
+                  feature_args=(--all-features)
+              else
+                  feature_args=(--features __nonlinux_all_features)
+              fi
+              workspace_args=()
+              if [ -n "$TEST_EXCLUDE" ]; then
+                  workspace_args=(--workspace)
+                  read -r -a excluded_packages <<< "$TEST_EXCLUDE"
+                  for package in "${excluded_packages[@]}"; do
+                      workspace_args+=(--exclude "$package")
+                  done
+              fi
               if [ "$RUNNER_OS" = "Linux" ]; then
                   # Raise locked-memory limit for large perf ring buffers
                   sudo prlimit --pid $$ --memlock=unlimited:unlimited
-                  cargo test --all-targets --all-features
+              fi
+              if [ -n "$TOKIO_VERSION" ]; then
+                  # Custom benchmark harnesses cannot be listed by nextest.
+                  cargo nextest run "${lock_args[@]}" "${workspace_args[@]}" \
+                    --lib --tests "${feature_args[@]}" -E "$TEST_FILTER"
               else
-                  cargo test --all-targets --features __nonlinux_all_features
+                  cargo test --all-targets "${feature_args[@]}"
               fi
               # dial9-core alone: `test-util` is off here, so the single-recorder
               # guard is enforced. Plain `cargo test` shares one process across
               # threads, so unrelated tests would race for the guard; nextest's
               # one-process-per-test model avoids that without changing any
               # test to work around it.
-              cargo nextest run -p dial9-core --lib
+              cargo nextest run "${lock_args[@]}" -p dial9-core --lib
         - name: Test optimized caller stacks on both CPU sampling backends
           if: runner.os == 'Linux'
           shell: bash
           env:
               DIAL9_REQUIRE_PERF: "1"
               RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
+              TOKIO_VERSION: ${{ inputs.tokio-version }}
           run: |
               sudo prlimit --pid $$ --memlock=unlimited:unlimited
-              cargo test --release -p dial9-perf-self-profile \
+              lock_args=()
+              if [ -n "$TOKIO_VERSION" ]; then
+                  lock_args=(--locked)
+              fi
+              cargo test "${lock_args[@]}" --release -p dial9-perf-self-profile \
                 --features cpu-profiling --test call_site_inline_stack

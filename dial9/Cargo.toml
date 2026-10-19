@@ -130,6 +130,7 @@ analysis = ["deserialize", "tokio", "dial9-tokio-telemetry/analysis"]
 worker-s3 = ["tokio", "dep:dial9-destinations-s3", "dial9-tokio-telemetry/worker-s3"]
 
 ## Async backtraces at Tokio yield points (Linux only).
+## Requires Tokio >= 1.53.2.
 taskdump = ["tokio", "dial9-tokio-telemetry/taskdump"]
 
 ## TCP accept-queue depth sampling as a standalone `Source` (Linux only).
@@ -187,7 +188,6 @@ dial9 = { path = ".", features = [
     "memory-profiling",
     "worker-s3",
     "analysis",
-    "taskdump",
     "linux-socket",
 ] }
 
