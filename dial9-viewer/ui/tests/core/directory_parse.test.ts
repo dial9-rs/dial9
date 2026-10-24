@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import * as zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
@@ -453,6 +454,36 @@ describe("directory parsing", { timeout: 120_000 }, () => {
         Math.abs(actualRatio - expectedRatio),
         `sample: event ratio ~0.5 (got ${actualRatio.toFixed(3)})`,
       ).toBeLessThan(0.01);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  // ── a segment with no runtime events must not reset the time bounds ──
+  it("analyzeTraces ignores segments without runtime events for bounds", async () => {
+    const { analyzeTraces } = require(analyzeJsPath) as {
+      analyzeTraces: (
+        dir: string,
+        opts?: { sample?: number; force?: boolean },
+      ) => Promise<{ minTs: number; maxTs: number; durationMs: number }>;
+    };
+    const single = await analyzeTraces(demoPath);
+    expect(single.durationMs, "single: positive duration").toBeGreaterThan(0);
+
+    const dir = setupDir(2);
+    try {
+      // The file header alone parses to a trace with minTs/maxTs === null, like
+      // a rotated segment recorded while the runtime was idle.
+      const raw = zlib.gunzipSync(fs.readFileSync(demoPath));
+      fs.writeFileSync(path.join(dir, "trace-000-idle.bin"), raw.subarray(0, 8));
+      fs.writeFileSync(path.join(dir, "trace-999-idle.bin"), raw.subarray(0, 8));
+
+      const result = await analyzeTraces(dir);
+      expect(result.minTs, "bounds: minTs from segments with events").toBe(single.minTs);
+      expect(result.maxTs, "bounds: maxTs from segments with events").toBe(single.maxTs);
+      expect(result.durationMs, "bounds: duration matches the real span").toBe(
+        single.durationMs,
+      );
     } finally {
       cleanup(dir);
     }
