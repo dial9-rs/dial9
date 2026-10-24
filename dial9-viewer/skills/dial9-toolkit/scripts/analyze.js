@@ -229,8 +229,10 @@ function accumulateTrace(acc, trace, sourceFile) {
 
   // Scalars
   for (const w of workerIds) acc.workerIds.add(w);
-  if (minTs < acc.minTs) acc.minTs = minTs;
-  if (maxTs > acc.maxTs) acc.maxTs = maxTs;
+  // A segment without runtime events has null bounds; `null < x` would coerce
+  // it to 0, so only fold real timestamps.
+  if (minTs != null && minTs < acc.minTs) acc.minTs = minTs;
+  if (maxTs != null && maxTs > acc.maxTs) acc.maxTs = maxTs;
   acc.eventCount += trace.events.length;
   acc.cpuSampleCount += trace.cpuSamples.length;
   const onCpu = trace.cpuSamples.filter(s => s.source === 0);
@@ -364,8 +366,10 @@ function finalizeAccumulator(acc) {
   }
 
   return {
-    workerIds, minTs: acc.minTs, maxTs: acc.maxTs,
-    durationMs: (acc.maxTs - acc.minTs) / 1e6,
+    workerIds,
+    minTs: Number.isFinite(acc.minTs) ? acc.minTs : null,
+    maxTs: Number.isFinite(acc.maxTs) ? acc.maxTs : null,
+    durationMs: acc.minTs <= acc.maxTs ? (acc.maxTs - acc.minTs) / 1e6 : 0,
     eventCount: acc.eventCount, cpuSampleCount: acc.cpuSampleCount,
     onCpuSampleCount: acc.onCpuSampleCount, offCpuSampleCount: acc.offCpuSampleCount,
     taskSpawnCount: acc.taskSpawnCount, taskAliveAtEnd: acc.taskAliveAtEnd,
@@ -865,8 +869,8 @@ async function main() {
 /** Merge a partial accumulator (from accumulate_worker) into the main accumulator. */
 function mergePartial(acc, p) {
   for (const w of p.workerIds) acc.workerIds.add(w);
-  if (p.minTs < acc.minTs) acc.minTs = p.minTs;
-  if (p.maxTs > acc.maxTs) acc.maxTs = p.maxTs;
+  if (p.minTs != null && p.minTs < acc.minTs) acc.minTs = p.minTs;
+  if (p.maxTs != null && p.maxTs > acc.maxTs) acc.maxTs = p.maxTs;
   acc.eventCount += p.eventCount;
   acc.cpuSampleCount += p.cpuSampleCount;
   acc.onCpuSampleCount += p.onCpuSampleCount;
