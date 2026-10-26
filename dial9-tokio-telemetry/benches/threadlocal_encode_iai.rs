@@ -55,6 +55,8 @@ fn encode_batch(encoder: &mut Encoder<Vec<u8>>, batch: &[(u64, WorkerId, TaskId)
             local_queue: 3,
             task_id: task,
             spawn_loc,
+            #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+            scheduling_delay_ns: 0,
         });
         encoder.write_infallible(&PollEndEvent {
             timestamp_ns: ts + 5,

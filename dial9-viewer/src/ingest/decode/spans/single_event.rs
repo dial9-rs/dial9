@@ -154,6 +154,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 10,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -163,6 +164,7 @@ mod tests {
                 worker_id: 2,
                 task_id: 10,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -172,6 +174,7 @@ mod tests {
                 worker_id: 3,
                 task_id: 10,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -301,6 +304,7 @@ mod tests {
                 worker_id: 0,
                 task_id: 1,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
             }),
             TraceEvent::PollEnd(PollEnd {
                 timestamp_ns: 200,
@@ -316,6 +320,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 2,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
             }),
             TraceEvent::PollEnd(PollEnd {
                 timestamp_ns: 400,
@@ -372,6 +377,7 @@ mod tests {
                 worker_id: 0,
                 task_id: 1,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
             }),
             TraceEvent::PollEnd(PollEnd {
                 timestamp_ns: 180,
@@ -424,6 +430,7 @@ mod tests {
                 worker_id: 0,
                 task_id: 1,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
             }),
             TraceEvent::PollEnd(PollEnd {
                 timestamp_ns: 140,

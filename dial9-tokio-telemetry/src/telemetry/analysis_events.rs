@@ -101,6 +101,9 @@ pub struct PollStartEvent {
     pub task_id: TaskId,
     /// Spawn location string.
     pub spawn_loc: String,
+    /// Time from the task becoming scheduled until this poll began.
+    #[serde(default)]
+    pub scheduling_delay_ns: Option<u64>,
 }
 
 /// A task poll completed on a worker thread.
@@ -489,6 +492,8 @@ mod tests {
             local_queue: 5,
             task_id: TaskId::from_u32(100),
             spawn_loc,
+            #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+            scheduling_delay_ns: 0,
         })
         .unwrap();
 
@@ -643,6 +648,10 @@ mod tests {
         assert_eq!(e.local_queue, 5);
         assert_eq!(e.task_id, 100);
         assert_eq!(e.spawn_loc, "src/main.rs:42");
+        #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+        assert_eq!(e.scheduling_delay_ns, Some(0));
+        #[cfg(not(all(tokio_unstable, feature = "schedule-latency")))]
+        assert_eq!(e.scheduling_delay_ns, None);
 
         // 2. PollEndEvent
         let Dial9Event::PollEndEvent(ref e) = events[1] else {

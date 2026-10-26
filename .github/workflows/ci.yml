@@ -98,8 +98,9 @@ jobs:
         include:
           - tokio: "1.51.0"
             manifest: tests/min-versions/Cargo.toml
-          # Task dumps require Tokio 1.53.2; exercise the full workspace here.
-          - tokio: "1.53.2"
+          # Task dumps require Tokio 1.53.2 and schedule latency requires 1.54;
+          # exercise the full workspace at 1.54 to cover both.
+          - tokio: "1.54.0"
             manifest: ""
     env:
       RUST_BACKTRACE: 1

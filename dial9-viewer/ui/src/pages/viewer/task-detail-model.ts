@@ -196,10 +196,10 @@ export function wakerLabelFor(
 
 /**
  * Collect the selection-keyed detail for `taskId`: gather the task's polls
- * across every worker and sort by start; match wakes with computePollWakes; read
- * the numbers from the trace's task maps. Returns EMPTY_TASK_DETAIL_DATA when
- * nothing is selected or the task has no polls (the "hide on deselect / no
- * polls" contract).
+ * across every worker and sort by start; match wakes when direct scheduling
+ * delays are unavailable; read the numbers from the trace's task maps. Returns
+ * EMPTY_TASK_DETAIL_DATA when nothing is selected or the task has no polls (the
+ * "hide on deselect / no polls" contract).
  */
 export function computeTaskDetailData(
   source: TaskPollSource,
@@ -234,7 +234,9 @@ export function computeTaskDetailData(
   if (polls.length < 1) return EMPTY_TASK_DETAIL_DATA;
 
   const wakes = source.wakeIndex.materializeForTask(taskId);
-  const rawPollWakes = computePollWakes(polls, wakes);
+  const rawPollWakes = polls.every((poll) => poll.schedulingDelay != null)
+    ? new Array(polls.length).fill(null)
+    : computePollWakes(polls, wakes);
   const workerIdCount = source.workerIds.length;
   const pollWakes: (PollWakeInfo | null)[] = rawPollWakes.map((pw) =>
     pw === null
@@ -381,7 +383,15 @@ export interface WakeSchedulingBand extends SchedulingBandBase {
   showWakerLabel: boolean;
 }
 
-export type SchedulingBand = SpawnSchedulingBand | WakeSchedulingBand;
+/** A direct scheduled-to-poll measurement reported by Tokio. */
+export interface TaskMetaSchedulingBand extends SchedulingBandBase {
+  kind: "task-meta";
+}
+
+export type SchedulingBand =
+  | SpawnSchedulingBand
+  | WakeSchedulingBand
+  | TaskMetaSchedulingBand;
 
 /** A cyan poll bar (per-poll regime). */
 export interface PollBar {
@@ -508,9 +518,8 @@ function severityOf(delayNs: number): SchedulingSeverity {
 }
 
 /**
- * Build the per-frame render model: spawn/wake->poll scheduling-delay bands,
- * the lifespan bar, poll bars OR the coverage histogram, and idle gaps with
- * their dump lookup.
+ * Build the per-frame render model: scheduling-delay bands, the lifespan bar,
+ * poll bars OR the coverage histogram, and idle gaps with their dump lookup.
  * Draw-area-relative coordinates. Hit regions are emitted in scheduled ->
  * polling -> idle order so the first-match-wins status lookup matches.
  */
@@ -534,9 +543,9 @@ export function buildTaskDetailRenderModel(
 
   // ── Spawn->first-poll delay ──────────────────────────────────────────
   const firstPoll = polls[0]!;
+  const hasSpawnDelay = data.spawnTs != null && data.spawnTs < firstPoll.start;
   if (
-    data.spawnTs != null &&
-    data.spawnTs < firstPoll.start &&
+    hasSpawnDelay &&
     firstPoll.start >= viewStart &&
     data.spawnTs <= viewEnd
   ) {
@@ -563,45 +572,76 @@ export function buildTaskDetailRenderModel(
     }
   }
 
-  // ── Wake->poll delay bands + waker labels ────────────────────────────
+  // ── Scheduling delay bands ───────────────────────────────────────────
   for (let i = 0; i < polls.length; i++) {
-    const pw = pollWakes[i];
-    if (pw == null) continue;
     const s = polls[i]!;
-    if (s.start < viewStart || pw.effectiveWake > viewEnd) continue;
-    const delay = s.start - pw.effectiveWake;
-    const x1 = Math.max(0, nsToX(pw.effectiveWake));
+    const directDelay = s.schedulingDelay;
+    let pw: PollWakeInfo | null = null;
+    let readyAt: number;
+    let delay: number;
+
+    if (directDelay != null) {
+      // The spawn band owns the first poll when its spawn timestamp is known.
+      if (i === 0 && hasSpawnDelay) continue;
+      if (directDelay <= 0) continue;
+      readyAt = Math.max(0, s.start - directDelay);
+      delay = directDelay;
+    } else {
+      pw = pollWakes[i] ?? null;
+      if (pw === null) continue;
+      readyAt = pw.effectiveWake;
+      delay = s.start - readyAt;
+    }
+
+    if (s.start < viewStart || readyAt > viewEnd) continue;
+    const x1 = Math.max(0, nsToX(readyAt));
     const x2 = Math.min(drawW, nsToX(s.start));
     const w = x2 - x1;
     if (w < 1) continue;
-    const showWakerLabel = w > 40;
-    schedulingBands.push({
-      kind: "wake",
-      x1,
-      x2,
-      delayNs: delay,
-      severity: severityOf(delay),
-      wakerTaskId: pw.wake.wakerTaskId,
-      wakerLabel: pw.wakerLabel,
-      showDelayLabel: w > 25,
-      showWakerLabel,
-    });
+    const showDelayLabel = w > 25;
+
+    if (pw === null) {
+      schedulingBands.push({
+        kind: "task-meta",
+        x1,
+        x2,
+        delayNs: delay,
+        severity: severityOf(delay),
+        showDelayLabel,
+      });
+    } else {
+      const showWakerLabel = w > 40;
+      schedulingBands.push({
+        kind: "wake",
+        x1,
+        x2,
+        delayNs: delay,
+        severity: severityOf(delay),
+        wakerTaskId: pw.wake.wakerTaskId,
+        wakerLabel: pw.wakerLabel,
+        showDelayLabel,
+        showWakerLabel,
+      });
+      if (showWakerLabel) {
+        wakeRegions.push({
+          x1,
+          x2,
+          y1: BAND_TOP + BAND_H,
+          y2: BAND_TOP + BAND_H + 24,
+          wakerTaskId: pw.wake.wakerTaskId,
+        });
+      }
+    }
     hitRegions.push({
       x1,
-      x2: x1 + w,
+      x2,
       type: "scheduled",
-      detail: `Scheduled — waiting ${formatHumanDuration(delay)} for worker to poll after wake`,
+      detail:
+        pw === null
+          ? `Scheduled — waiting ${formatHumanDuration(delay)} for worker to poll (measured by Tokio)`
+          : `Scheduled — waiting ${formatHumanDuration(delay)} for worker to poll after wake`,
       dumps: null,
     });
-    if (showWakerLabel) {
-      wakeRegions.push({
-        x1,
-        x2: x1 + w,
-        y1: BAND_TOP + BAND_H,
-        y2: BAND_TOP + BAND_H + 24,
-        wakerTaskId: pw.wake.wakerTaskId,
-      });
-    }
   }
 
   // ── Task lifespan bar ────────────────────────────────────────────────
@@ -666,17 +706,21 @@ export function buildTaskDetailRenderModel(
   let dumpIdx = 0;
   for (let i = 0; i < polls.length - 1; i++) {
     const gapStart = polls[i]!.end;
-    const gapEnd = polls[i + 1]!.start;
+    const nextPoll = polls[i + 1]!;
+    const gapEnd = nextPoll.start;
     const nextPw = pollWakes[i + 1];
-    const nextWakeTs = nextPw != null ? nextPw.effectiveWake : null;
-    const wakeOwnsGap = nextWakeTs !== null && nextWakeTs <= gapStart;
+    const nextReadyTs =
+      nextPoll.schedulingDelay != null
+        ? Math.max(0, nextPoll.start - nextPoll.schedulingDelay)
+        : nextPw?.effectiveWake ?? null;
+    const readinessOwnsGap = nextReadyTs !== null && nextReadyTs <= gapStart;
 
     // Captures made during poll[i] describe its following idle gap. Pre-1.53
-    // Tokio inserted a synthetic poll after capture; when that wake owns the
+    // Tokio inserted a synthetic poll after capture; when readiness owns the
     // whole gap, retain the capture for the next real idle. Prefer a fresh
     // current-poll capture over retained legacy captures.
     const gapDumps: TaskDump[] = [];
-    if (!wakeOwnsGap) {
+    if (!readinessOwnsGap) {
       let eligibleEnd = dumpIdx;
       while (
         eligibleEnd < dumps.length &&
@@ -696,18 +740,18 @@ export function buildTaskDetailRenderModel(
       dumpIdx = eligibleEnd;
     }
 
-    if (gapEnd < viewStart || gapStart > viewEnd || wakeOwnsGap) continue;
+    if (gapEnd < viewStart || gapStart > viewEnd || readinessOwnsGap) continue;
     const x1 = Math.max(0, nsToX(gapStart));
-    const wakeX =
-      nextWakeTs !== null
-        ? Math.max(0, nsToX(nextWakeTs))
+    const readyX =
+      nextReadyTs !== null
+        ? Math.max(0, nsToX(nextReadyTs))
         : Math.min(drawW, nsToX(gapEnd));
-    const x2 = Math.min(wakeX, Math.min(drawW, nsToX(gapEnd)));
+    const x2 = Math.min(readyX, Math.min(drawW, nsToX(gapEnd)));
     const w = Math.max(x2 - x1, 0);
     if (w < 1) continue;
 
     const hasDump = gapDumps.length > 0;
-    const dur = (nextWakeTs !== null ? nextWakeTs : gapEnd) - gapStart;
+    const dur = (nextReadyTs !== null ? nextReadyTs : gapEnd) - gapStart;
     idleBands.push({
       x1,
       x2: x1 + w,

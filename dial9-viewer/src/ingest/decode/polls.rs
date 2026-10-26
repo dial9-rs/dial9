@@ -29,6 +29,8 @@ pub(crate) struct PollRecord {
     pub(crate) worker_id: u64,
     pub(crate) task_id: u64,
     pub(crate) spawn_loc: Option<String>,
+    /// Direct scheduled-to-poll measurement from Tokio's `TaskMeta`.
+    pub(crate) scheduling_delay_ns: Option<u64>,
     /// Readiness evidence for this poll, when the segment could prove it.
     pub(crate) readiness: Option<ReadyEvidence>,
     /// Whether the polled task used dial9's traced waker. `None` when the source
@@ -168,6 +170,7 @@ struct OpenPoll {
     worker_id: u64,
     task_id: u64,
     spawn_loc: Option<String>,
+    scheduling_delay_ns: Option<u64>,
     readiness: Option<ReadyEvidence>,
     task_instrumented: Option<bool>,
     /// A wake seen while this poll was running, made effective at PollEnd.
@@ -275,6 +278,7 @@ impl Reconstructor {
                 worker_id: event.worker_id,
                 task_id: event.task_id,
                 spawn_loc: event.spawn_loc.clone(),
+                scheduling_delay_ns: event.scheduling_delay_ns,
                 readiness,
                 task_instrumented,
                 wake_during_poll: None,
@@ -339,6 +343,7 @@ impl Reconstructor {
             worker_id: open.worker_id,
             task_id: open.task_id,
             spawn_loc: open.spawn_loc,
+            scheduling_delay_ns: open.scheduling_delay_ns,
             readiness: open.readiness,
             task_instrumented: open.task_instrumented,
         });
@@ -523,9 +528,18 @@ impl PollTimeline {
             .map(|(poll, &(cpu_sample_count, sched_sample_count))| {
                 let start = poll.start.to_wall_or_raw(clock_offset);
                 let end = poll.end.to_wall_or_raw(clock_offset);
-                // Only trust readiness that precedes the poll start; a later
-                // timestamp would be a reconstruction artifact, not a delay.
-                let readiness = poll.readiness.filter(|ready| ready.timestamp <= poll.start);
+                // Prefer Tokio's direct measurement. Reconstructed spawn/wake
+                // evidence remains the fallback for older traces and builds
+                // without task schedule-latency tracking.
+                let direct_readiness = poll.scheduling_delay_ns.map(|delay_ns| ReadyEvidence {
+                    timestamp: MonoNs(poll.start.raw().saturating_sub(delay_ns)),
+                    kind: SchedulingDelayKind::TaskMeta,
+                    waker_task_id: None,
+                });
+                // Only trust inferred readiness that precedes the poll start;
+                // a later timestamp would be a reconstruction artifact.
+                let readiness = direct_readiness
+                    .or_else(|| poll.readiness.filter(|ready| ready.timestamp <= poll.start));
                 ResolvedPoll {
                     start_ns: start.raw(),
                     end_ns: end.raw(),
@@ -666,6 +680,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 7,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -675,6 +690,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 8,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -691,6 +707,7 @@ mod tests {
             worker_id: 0,
             task_id,
             spawn_loc: Some("src/test.rs:1".to_string()),
+            scheduling_delay_ns: None,
         }
     }
 
@@ -707,6 +724,7 @@ mod tests {
             worker_id,
             task_id,
             spawn_loc: Some("src/test.rs:1".to_string()),
+            scheduling_delay_ns: None,
         }
     }
 
@@ -739,6 +757,33 @@ mod tests {
             reconstructor.records[1].readiness.is_none(),
             "later polls without wake evidence must remain unknown"
         );
+    }
+
+    #[test]
+    fn task_meta_schedule_latency_overrides_inferred_readiness() {
+        let mut poll_start = start(300, 7);
+        poll_start.scheduling_delay_ns = Some(50);
+        let events = [
+            TraceEvent::TaskSpawn(TaskSpawn {
+                timestamp_ns: 100,
+                task_id: 7,
+                instrumented: Some(false),
+            }),
+            TraceEvent::PollStart(poll_start),
+            TraceEvent::PollEnd(end(320)),
+        ];
+
+        let poll = PollTimeline::reconstruct(&events)
+            .resolved(None, "host", "service", "date")
+            .pop()
+            .unwrap();
+        assert_eq!(poll.ready_at_ns, Some(250));
+        assert_eq!(poll.scheduling_delay_ns, Some(50));
+        assert_eq!(
+            poll.scheduling_delay_kind,
+            Some(SchedulingDelayKind::TaskMeta)
+        );
+        assert_eq!(poll.waker_task_id, None);
     }
 
     #[test]

@@ -183,6 +183,17 @@ describe("task tracking", () => {
     }
   });
 
+  it("records Tokio scheduling delay on every poll", () => {
+    const pollStarts = trace.events.filter(
+      (e) => e.eventType === EVENT_TYPES["PollStart"],
+    );
+    expect(pollStarts.length, "No PollStart events").toBeGreaterThan(0);
+    for (const event of pollStarts) {
+      expect(event.schedulingDelay).toBeTypeOf("number");
+      expect(event.schedulingDelay).toBeGreaterThanOrEqual(0);
+    }
+  });
+
   it("all polled tasks were spawned", () => {
     const pollStarts = trace.events.filter(
       (e) => e.eventType === EVENT_TYPES["PollStart"],

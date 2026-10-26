@@ -218,6 +218,14 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 1. The wake event, when your future was _ready_ to run vs. when Tokio actually started running it.
 2. A task dump, a backtrace of what your future was doing when it went idle (with the `taskdump` feature on).
 
+Scheduling delays work without an extra feature: dial9 infers them from task spawn and wake events. On Tokio 1.54 or newer, the optional `schedule-latency` feature records Tokio's direct per-poll measurement instead:
+
+```toml
+dial9 = { version = "0.5", features = ["tokio", "schedule-latency"] }
+```
+
+This feature also requires `--cfg tokio_unstable`.
+
 If you drive the runtime yourself, use [`dial9::block_on`](https://docs.rs/dial9/latest/dial9/fn.block_on.html) instead of `Runtime::block_on`. `dial9::block_on` spawns your root future as a task, so its polls and wakes reach the trace along with everything awaited inline under it. `Runtime::block_on` would poll it outside any task, where the per-task hooks never fire. `#[dial9::main]` does this for you.
 
 The wake event and task dump come from any dial9 spawner. Besides [`spawn`](https://docs.rs/dial9/latest/dial9/fn.spawn.html), there are variants for spawning onto another runtime and into a `JoinSet`:

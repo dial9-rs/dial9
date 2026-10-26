@@ -324,7 +324,8 @@ fn polls_schema() -> Arc<Schema> {
         Field::new("worker_id", DataType::UInt32, false),
         Field::new("task_id", DataType::UInt64, false),
         Field::new("spawn_loc", DataType::Utf8, true),
-        // Nullable means the segment had no safe readiness evidence for this poll.
+        // Nullable means the segment had neither a direct measurement nor safe
+        // readiness evidence for this poll.
         Field::new("ready_at_ns", DataType::Int64, true),
         Field::new("scheduling_delay_ns", DataType::Int64, true),
         Field::new("scheduling_delay_kind", DataType::UInt8, true),

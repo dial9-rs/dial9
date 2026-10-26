@@ -166,6 +166,20 @@ fn builtin_signatures(schema_name: &str) -> Option<&'static [BuiltinFieldSignatu
                 ("local_queue", U8),
                 ("task_id", V),
                 ("spawn_loc", PS),
+                ("scheduling_delay_ns", V),
+            ],
+            &[
+                ("worker_id", V),
+                ("local_queue", V),
+                ("task_id", V),
+                ("spawn_loc", PS),
+                ("scheduling_delay_ns", V),
+            ],
+            &[
+                ("worker_id", V),
+                ("local_queue", U8),
+                ("task_id", V),
+                ("spawn_loc", PS),
             ],
             &[
                 ("worker_id", V),
@@ -6941,6 +6955,18 @@ mod tests {
         ];
         let error = validate_builtin_schema_signature("PollStartEvent", &fields).unwrap_err();
         assert!(error.to_string().contains("signature"), "{error:#}");
+    }
+
+    #[test]
+    fn poll_start_schedule_latency_signature_accepted() {
+        let fields = [
+            FieldDef::new("worker_id", FieldType::Varint),
+            FieldDef::new("local_queue", FieldType::U8),
+            FieldDef::new("task_id", FieldType::Varint),
+            FieldDef::new("spawn_loc", FieldType::PooledString),
+            FieldDef::new("scheduling_delay_ns", FieldType::Varint),
+        ];
+        validate_builtin_schema_signature("PollStartEvent", &fields).unwrap();
     }
 
     #[test]
