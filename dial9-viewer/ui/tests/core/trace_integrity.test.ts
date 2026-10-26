@@ -31,6 +31,7 @@ interface TraceEvent {
   globalQueue?: number;
   cpuTime?: number;
   schedWait?: number;
+  schedulingDelay?: number;
   wokenTaskId?: number;
   targetWorker?: number;
 }

@@ -543,14 +543,15 @@ export function buildTaskDetailRenderModel(
 
   // ── Spawn->first-poll delay ──────────────────────────────────────────
   const firstPoll = polls[0]!;
-  const hasSpawnDelay = data.spawnTs != null && data.spawnTs < firstPoll.start;
+  const spawnTs = data.spawnTs;
+  const hasSpawnDelay = spawnTs != null && spawnTs < firstPoll.start;
   if (
     hasSpawnDelay &&
     firstPoll.start >= viewStart &&
-    data.spawnTs <= viewEnd
+    spawnTs <= viewEnd
   ) {
-    const delay = firstPoll.start - data.spawnTs;
-    const x1 = Math.max(0, nsToX(data.spawnTs));
+    const delay = firstPoll.start - spawnTs;
+    const x1 = Math.max(0, nsToX(spawnTs));
     const x2 = Math.min(drawW, nsToX(firstPoll.start));
     const w = x2 - x1;
     if (w >= 1) {
