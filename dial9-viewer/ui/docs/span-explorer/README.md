@@ -98,15 +98,21 @@ Escape closes the explanation and returns focus.
 File repetition needs five observations in each cohort. Spearman compares up to
 2,048 evenly spaced observations across latency ranks; comparison means,
 medians, and p99s use every loaded recorded value in their original units.
-Drawing uses up to 330 recorded-span dots alongside the full-observation
-density grid. Hover or keyboard focus shows one actual retained span and its
-original key/value strings, including duplicate keys. **Box X/Y** gives the
-originating density box's elapsed and field bounds, units, and full span count;
+Drawing retains up to 330 rank/tail span samples and adds representatives for
+occupied numeric density cells with navigable source identity. The 37-by-32
+grid bounds drawing at 1,514 actual recorded-span dots per numeric field;
+density counts still cover every loaded recorded value. Hover or keyboard focus
+shows one actual retained span and its original key/value strings, including
+duplicate keys.
+**Box X/Y** gives the originating density box's elapsed and field bounds,
+units, and full span count;
 **Sample X/Y** gives the shown span's own coordinates. White outlines connect
 the box and actual sample to these details without changing their cohort colors.
-Moving within or between cells updates the span and box context; an unsampled
-cell explicitly labels its nearby retained span, and unavailable samples remain
-explicit. No metadata is inferred from the active field.
+Moving within or between cells updates the span and box context. Current trace
+reports supply an in-cell span for each occupied box with source identity.
+Older cached or count-only reports can lack such a span: the inspector explicitly
+labels a nearby retained span or unavailable sample. No metadata is inferred
+from the active field.
 
 Click a dot or populated cell, or press Enter or Space, to pin the details.
 Only one inspector is active at a time. Pinning preserves its original values

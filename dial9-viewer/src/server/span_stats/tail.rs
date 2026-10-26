@@ -765,30 +765,6 @@ impl Collector {
                 .into_iter()
                 .map(|i| (all[i].0.example.elapsed_ms, all[i].1))
                 .collect();
-            let slow_indices: Vec<_> = all
-                .iter()
-                .enumerate()
-                .filter(|(_, (r, _))| {
-                    r.example.elapsed_ms >= boundary_ms
-                        && selection.max_ms.is_none_or(|n| r.example.elapsed_ms <= n)
-                })
-                .map(|(i, _)| i)
-                .collect();
-            let mut plot_indices: BTreeSet<_> =
-                sample_indices(all.len(), 250).into_iter().collect();
-            plot_indices.extend(
-                sample_indices(slow_indices.len(), 80)
-                    .into_iter()
-                    .map(|i| slow_indices[i]),
-            );
-            let points = plot_indices
-                .into_iter()
-                .filter_map(|i| {
-                    let (r, n) = &all[i];
-                    (!r.example.start_ns.is_empty())
-                        .then(|| (r.example.elapsed_ms, *n, r.example.clone()))
-                })
-                .collect();
             let value_axis = ValueAxis {
                 unit: displayed_unit,
                 multiplier,
@@ -819,7 +795,7 @@ impl Collector {
                         })
                     })
                     .count(),
-                points,
+                points: Vec::new(),
                 value_axis,
                 density: None,
                 tail_difference,
@@ -870,7 +846,36 @@ impl Collector {
                 .iter()
                 .filter_map(|row| row.numeric.get(&signal.key).map(|n| (*row, *n)))
                 .collect();
-            signal.density = Some(numeric_density(&all, &elapsed_edges_ms, &signal.value_axis));
+            let slow_indices: Vec<_> = all
+                .iter()
+                .enumerate()
+                .filter(|(_, (r, _))| {
+                    r.example.elapsed_ms >= boundary_ms
+                        && selection.max_ms.is_none_or(|n| r.example.elapsed_ms <= n)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            let mut plot_indices: BTreeSet<_> =
+                sample_indices(all.len(), 250).into_iter().collect();
+            plot_indices.extend(
+                sample_indices(slow_indices.len(), 80)
+                    .into_iter()
+                    .map(|i| slow_indices[i]),
+            );
+            signal.density = Some(numeric_density(
+                &all,
+                &elapsed_edges_ms,
+                &signal.value_axis,
+                &mut plot_indices,
+            ));
+            signal.points = plot_indices
+                .into_iter()
+                .filter_map(|i| {
+                    let (row, value) = all[i];
+                    (!row.example.start_ns.is_empty())
+                        .then(|| (row.example.elapsed_ms, value, row.example.clone()))
+                })
+                .collect();
         }
         let prevalence = |cohort: &[&Observation], key: &str, values: &BTreeSet<String>| {
             values
@@ -1044,6 +1049,7 @@ fn numeric_density(
     observations: &[(&Observation, f64)],
     elapsed_edges_ms: &[f64],
     axis: &ValueAxis,
+    plot_indices: &mut BTreeSet<usize>,
 ) -> Density {
     let mut value_edges: Vec<_> = (0..=DENSITY_VALUE_BINS)
         .map(|i| {
@@ -1054,10 +1060,27 @@ fn numeric_density(
     value_edges.dedup();
     let elapsed_bins = elapsed_edges_ms.len() - 1;
     let mut counts = vec![0; elapsed_bins * (value_edges.len() - 1)];
-    for (row, value) in observations {
+    let cell_index = |row: &Observation, value: f64| {
         let x = bin_index(elapsed_edges_ms, row.example.elapsed_ms);
         let y = bin_index(&value_edges, value * axis.multiplier);
-        counts[y * elapsed_bins + x] += 1;
+        y * elapsed_bins + x
+    };
+    let mut represented = vec![false; counts.len()];
+    for &index in plot_indices.iter() {
+        let (row, value) = observations[index];
+        if !row.example.start_ns.is_empty() {
+            represented[cell_index(row, value)] = true;
+        }
+    }
+    for (index, (row, value)) in observations.iter().enumerate() {
+        let cell = cell_index(row, *value);
+        counts[cell] += 1;
+        // Count-only legacy rows remain in the density. Supplement the rank
+        // samples only when a cell has an actual source span to inspect.
+        if !represented[cell] && !row.example.start_ns.is_empty() {
+            represented[cell] = true;
+            plot_indices.insert(index);
+        }
     }
     let max_count = counts.iter().copied().max().unwrap_or(0);
     Density {
@@ -1887,7 +1910,8 @@ mod tests {
         let report = collector.report(&selection).unwrap();
         let signal = &report.signals[0];
         assert_eq!((signal.typical_count, signal.slow_count), (5_000, 101));
-        assert!(signal.points.len() <= 330);
+        assert_density_sample_bound(signal);
+        assert_occupied_cells_have_samples(signal);
         assert_eq!(signal.correlation_count, 2_048);
         let difference = signal.tail_difference.as_ref().unwrap();
         assert_eq!(difference.typical_median, 2_500.0 * 500.0);
@@ -2075,7 +2099,7 @@ mod tests {
         assert_eq!(report.signals[0].key, "Work");
         assert_eq!(report.signals[0].correlation, Some(1.0));
         assert!(report.signals.iter().all(|s| !s.duplicates_latency));
-        assert!(report.signals.iter().all(|s| s.points.len() <= 330));
+        report.signals.iter().for_each(assert_density_sample_bound);
         assert_eq!(report.examples.len(), 8);
         let group = params("group_key=Mode&group_value=bulk")
             .selection()
@@ -2327,7 +2351,7 @@ mod tests {
         }
         let report = collector.report(&selection).unwrap();
         let signal = &report.signals[0];
-        assert!(signal.points.len() <= 330);
+        assert_density_sample_bound(signal);
         assert_eq!(signal.density.as_ref().unwrap().count, 10_000);
         assert_eq!(
             signal
@@ -2353,6 +2377,310 @@ mod tests {
                 [y * (signal.density.as_ref().unwrap().elapsed_edges_ms.len() - 1) + x],
             9_000
         );
+    }
+
+    fn assert_density_sample_bound(signal: &Signal) {
+        let density = signal.density.as_ref().unwrap();
+        let occupied_cells = density.counts.iter().filter(|count| **count > 0).count();
+        assert!(signal.points.len() <= 330 + occupied_cells);
+        assert!(signal.points.len() <= density.count);
+    }
+
+    fn assert_occupied_cells_have_samples(signal: &Signal) {
+        assert_density_sample_bound(signal);
+        let density = signal.density.as_ref().unwrap();
+        let elapsed_bins = density.elapsed_edges_ms.len() - 1;
+        let mut sampled = BTreeSet::new();
+        for (elapsed, value, example) in &signal.points {
+            assert!(!example.start_ns.is_empty());
+            assert!(!example.span_uid.is_empty());
+            let x = bin_index(&density.elapsed_edges_ms, *elapsed);
+            let y = bin_index(&density.value_edges, value * signal.value_axis.multiplier);
+            sampled.insert(y * elapsed_bins + x);
+        }
+        for (cell, count) in density.counts.iter().enumerate() {
+            if *count > 0 {
+                assert!(sampled.contains(&cell), "occupied cell {cell} has no span");
+            }
+        }
+    }
+
+    fn density_row(index: usize, elapsed_ns: i64, value: f64, unit: &str) -> SpanStatsRow {
+        let mut row = row(1);
+        row.elapsed_ns = elapsed_ns;
+        row.attributes = vec![("Work".into(), value.to_string())];
+        row.attribute_units = vec![("Work".into(), unit.into())];
+        let example = row.exemplar.as_mut().unwrap();
+        example.span_uid = index.to_string();
+        example.start_ns = index as i64 * 10_000_000_000 + 1;
+        example.end_ns = example.start_ns + elapsed_ns;
+        example.elapsed_ns = elapsed_ns;
+        row
+    }
+
+    #[test]
+    fn occupied_density_cell_retains_a_span_missed_by_both_rank_samples() {
+        let selection = params("").selection().unwrap();
+        let mut collector = Collector::default();
+        for index in 0..4096 {
+            let value = if index == 2 { 99.0 } else { 2.0 };
+            collector.push(
+                density_row(index, 10_000_000, value, "bytes"),
+                &selection,
+                0,
+                "/source",
+            );
+        }
+        let report = collector.report(&selection).unwrap();
+        assert_occupied_cells_have_samples(&report.signals[0]);
+        let (_, value, example) = report.signals[0]
+            .points
+            .iter()
+            .find(|(_, _, example)| example.span_uid == "2")
+            .unwrap();
+        assert_eq!(*value, 99.0);
+        assert_eq!(example.start_ns, "20000000001");
+        assert_eq!(report.signals[0].density.as_ref().unwrap().count, 4096);
+        assert_eq!(report.slow_count, 4096);
+        assert_eq!(report.median_ms, 10.0);
+        let mut expected: BTreeSet<_> = sample_indices(4096, 250).into_iter().collect();
+        expected.extend(sample_indices(4096, 80));
+        assert!(expected.insert(2));
+        assert_eq!(
+            report.signals[0]
+                .points
+                .iter()
+                .map(|(_, _, example)| example.span_uid.parse::<usize>().unwrap())
+                .collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[rstest]
+    #[case("", 2368)]
+    #[case("min_span_ns=100000000&max_span_ns=1000000000", 2368)]
+    #[case("group_key=Mode&group_value=chosen", 1184)]
+    #[case("group_key=Mode&group_value=chosen&min_span_ns=100000000", 1184)]
+    fn occupied_density_cells_exceed_the_old_point_limit_without_losing_scope(
+        #[case] query: &str,
+        #[case] expected_count: usize,
+    ) {
+        let selection = params(query).selection().unwrap();
+        let mut collector = Collector::default();
+        // One row in every positive elapsed/value combination, repeated in
+        // another group. This occupies more cells than either old rank sample.
+        for elapsed_bin in 0..37 {
+            let elapsed_ns = if elapsed_bin == 0 {
+                0
+            } else {
+                (1e6 * 10.0_f64.powf((elapsed_bin as f64 - 0.5) / 12.0)).round() as i64
+            };
+            for value_bin in 0..32 {
+                for group in ["chosen", "other"] {
+                    let index = collector.rows.len();
+                    let mut row = density_row(index, elapsed_ns, value_bin as f64 + 0.5, "bytes");
+                    row.attributes.push(("Mode".into(), group.into()));
+                    // Retain explicit extrema so the full shared value range
+                    // keeps all 32 interior values in different cells.
+                    if value_bin == 0 {
+                        row.attributes[0].1 = "0".into();
+                    } else if value_bin == 31 {
+                        row.attributes[0].1 = "32".into();
+                    }
+                    collector.push(row, &selection, 0, "/source");
+                }
+            }
+        }
+        let report = collector.report(&selection).unwrap();
+        let signal = &report.signals[0];
+        let density = signal.density.as_ref().unwrap();
+        assert_eq!(report.count, expected_count);
+        assert_eq!(density.count, expected_count);
+        assert_eq!(density.counts.iter().sum::<usize>(), expected_count);
+        assert!(density.counts.iter().filter(|count| **count > 0).count() > 330);
+        assert_occupied_cells_have_samples(signal);
+        assert!(signal.points.windows(2).all(|pair| {
+            pair[0].0 < pair[1].0
+                || (pair[0].0 == pair[1].0
+                    && pair[0].2.span_uid.parse::<usize>().unwrap()
+                        < pair[1].2.span_uid.parse::<usize>().unwrap())
+        }));
+        if selection.group.is_some() {
+            assert!(
+                signal
+                    .points
+                    .iter()
+                    .all(|(_, _, example)| { example.span_uid.parse::<usize>().unwrap() % 2 == 0 })
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&report.signals).unwrap(),
+            serde_json::to_value(collector.report(&selection).unwrap().signals).unwrap()
+        );
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(10_000_000)]
+    fn density_cell_sampling_handles_zero_or_constant_elapsed_and_missing_values(
+        #[case] elapsed_ns: i64,
+    ) {
+        let selection = params("min_span_ns=0&max_span_ns=0").selection().unwrap();
+        let mut collector = Collector::default();
+        for index in 0..4096 {
+            let mut row = density_row(
+                index,
+                elapsed_ns,
+                if index == 2 { 32.0 } else { 1.0 },
+                "bytes",
+            );
+            if index % 2 == 1 {
+                row.attributes.clear();
+            }
+            collector.push(row, &selection, 0, "/source");
+        }
+        let report = collector.report(&selection).unwrap();
+        let signal = &report.signals[0];
+        assert_occupied_cells_have_samples(signal);
+        assert_eq!(signal.density.as_ref().unwrap().count, 2048);
+        assert_eq!(report.count, 4096);
+        assert_eq!(report.slow_count, if elapsed_ns == 0 { 4096 } else { 0 });
+        assert!(
+            signal
+                .points
+                .iter()
+                .all(|(_, _, example)| { example.span_uid.parse::<usize>().unwrap() % 2 == 0 })
+        );
+    }
+
+    #[test]
+    fn density_cell_sampling_uses_final_shared_axes_and_original_time_units() {
+        let selection = params("").selection().unwrap();
+        let mut collector = Collector::default();
+        for index in 0..4096 {
+            let value_ns = if index == 2 { 9_900_000.0 } else { 100_000.0 };
+            let mut row = density_row(index, 20_000_000, value_ns, "ns");
+            row.attributes.extend([
+                (
+                    "Other".into(),
+                    if index % 2 == 0 { "0.001" } else { "0.1" }.into(),
+                ),
+                (
+                    "Duration".into(),
+                    if index == 3 { "0.09" } else { "0.001" }.into(),
+                ),
+            ]);
+            row.attribute_units.extend([
+                ("Other".into(), "s".into()),
+                ("Duration".into(), "s".into()),
+            ]);
+            collector.push(row, &selection, 0, "/source");
+        }
+        let report = collector.report(&selection).unwrap();
+        assert_eq!(report.signals.len(), 3);
+        for signal in &report.signals {
+            assert_eq!(signal.value_axis.unit.as_deref(), Some("ms"));
+            assert_eq!(signal.value_axis.maximum, 100.0);
+            assert_occupied_cells_have_samples(signal);
+        }
+        let work = report
+            .signals
+            .iter()
+            .find(|signal| signal.key == "Work")
+            .unwrap();
+        assert!(
+            work.points
+                .iter()
+                .any(|(_, value, example)| { *value == 9_900_000.0 && example.span_uid == "2" })
+        );
+        let duration = report
+            .signals
+            .iter()
+            .find(|signal| signal.key == "Duration")
+            .unwrap();
+        assert!(
+            duration
+                .points
+                .iter()
+                .any(|(_, value, example)| { *value == 0.09 && example.span_uid == "3" })
+        );
+    }
+
+    #[test]
+    fn occupied_cell_prefers_a_real_source_row_and_keeps_count_only_cells_honest() {
+        let selection = params("").selection().unwrap();
+        let mut collector = Collector::default();
+        for index in 0..4096 {
+            let value = match index {
+                2 | 3 => 16.0,
+                5 => 32.0,
+                _ => 1.0,
+            };
+            let mut row = density_row(index, 10_000_000, value, "bytes");
+            if index == 2 || index == 5 {
+                row.exemplar = None;
+            }
+            collector.push(row, &selection, 0, "/source");
+        }
+        let report = collector.report(&selection).unwrap();
+        let signal = &report.signals[0];
+        assert!(
+            signal
+                .points
+                .iter()
+                .any(|(_, value, example)| *value == 16.0 && example.span_uid == "3")
+        );
+        assert!(
+            signal
+                .points
+                .iter()
+                .all(|(_, value, example)| *value != 32.0 && !example.start_ns.is_empty())
+        );
+        let density = signal.density.as_ref().unwrap();
+        assert_eq!(density.count, 4096);
+        assert_eq!(density.counts.iter().filter(|count| **count > 0).count(), 3);
+    }
+
+    #[rstest]
+    #[case("ns", 1e-6)]
+    #[case("s", 1000.0)]
+    #[case("bytes", 1.0)]
+    fn density_samples_and_counts_share_internal_and_inclusive_final_boundaries(
+        #[case] unit: &str,
+        #[case] multiplier: f64,
+    ) {
+        let selection = params("").selection().unwrap();
+        let mut collector = Collector::default();
+        for (index, (elapsed, value)) in [(0, 0.0), (1, 1.0), (2, 2.0), (2, 0.0)]
+            .into_iter()
+            .enumerate()
+        {
+            collector.push(
+                density_row(index, elapsed * 1_000_000, value / multiplier, unit),
+                &selection,
+                0,
+                "/source",
+            );
+        }
+        let all: Vec<_> = collector
+            .rows
+            .iter()
+            .map(|row| (row, row.numeric["Work"]))
+            .collect();
+        let axis = ValueAxis {
+            unit: Some("normalized".into()),
+            multiplier,
+            minimum: 0.0,
+            maximum: 2.0,
+        };
+        let mut indices = BTreeSet::from([0, 2]);
+        let density = numeric_density(&all, &[0.0, 1.0, 2.0], &axis, &mut indices);
+        assert_eq!(indices, BTreeSet::from([0, 1, 2, 3]));
+        assert_eq!(density.counts[0], 1); // (0, 0)
+        assert_eq!(density.counts[1], 1); // (inclusive final X, 0)
+        assert_eq!(density.counts[16 * 2 + 1], 1); // both internal edges
+        assert_eq!(density.counts[31 * 2 + 1], 1); // both inclusive final edges
+        assert_eq!(density.counts.iter().sum::<usize>(), 4);
     }
 
     #[test]
@@ -3160,7 +3488,7 @@ mod tests {
                     &[
                         FieldValue::Varint(started),
                         FieldValue::String("fixture-operation".into()),
-                        FieldValue::Varint(latency / 2),
+                        FieldValue::Varint(if index == 1 { 750 } else { latency / 2 }),
                         FieldValue::Varint(latency),
                         FieldValue::String(if index < 1_000 { "fast" } else { "slow" }.into()),
                         FieldValue::String(if index % 2 == 0 { "a" } else { "b" }.into()),
@@ -3229,6 +3557,19 @@ mod tests {
         assert_eq!(response.fields_truncated, folded.fields_truncated);
         assert_eq!(response.report.signals.len(), 1);
         assert_eq!(response.report.signals[0].key, "Work");
+        assert_occupied_cells_have_samples(&response.report.signals[0]);
+        assert!(
+            response.report.signals[0]
+                .points
+                .iter()
+                .any(|(_, value, example)| {
+                    *value == 750.0
+                        && example
+                            .attributes
+                            .as_ref()
+                            .is_some_and(|pairs| pairs.contains(&("Work".into(), "750".into())))
+                })
+        );
         assert!(
             response.report.signals[0]
                 .points
