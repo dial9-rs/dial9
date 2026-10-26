@@ -1728,9 +1728,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-core"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -1949,7 +1949,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-destinations-s3"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "assert2",
  "async-trait",
@@ -1973,7 +1973,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-macro"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dial9",
  "insta",
@@ -1986,7 +1986,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-metrique"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "criterion 0.7.0",
  "dial9-core",
@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "blazesym",
  "bon",
@@ -2031,7 +2031,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2065,6 +2065,7 @@ dependencies = [
  "shuttle",
  "smallvec",
  "tempfile",
+ "tikv-jemallocator",
  "time",
  "tokio",
  "tokio-util",
@@ -2074,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "ahash",
  "dial9-trace-format",
@@ -2089,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format-derive"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "insta",
  "prettyplease",
@@ -2101,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-utils"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "axum 0.7.9",
  "axum 0.8.9",
@@ -2130,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4590,9 +4591,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -5328,6 +5329,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tikv-jemalloc-sys"
+version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd8aa5b2ab86a2cefa406d889139c162cbb230092f7d1d7cbc1716405d852a3b"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359b4327f954e0567e69fb191cf1436617748813819c94b8cd4a431422d053a"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

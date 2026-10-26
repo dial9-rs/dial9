@@ -424,8 +424,8 @@ If this is misconfigured, `MemoryProfiler::install()` runs a self-test and retur
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
 use dial9::Dial9Handle;
 
-// Install as the global allocator. Zero-cost passthrough until
-// MemoryProfiler::install() is called.
+// Install as the global allocator. Checks profiler state and forwards to
+// the underlying allocator until MemoryProfiler::install() is called.
 #[global_allocator]
 static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
@@ -452,20 +452,45 @@ The `sample_rate_bytes` controls how frequently allocations are sampled. At the 
 
 #### Liveset tracking and leak detection
 
-When `track_liveset(true)` is set, dial9 records every deallocation so it can determine which sampled allocations are still live at any point in the trace. This is how you find memory leaks: allocations that appear in the liveset and grow over time without being freed.
+When `track_liveset(true)` is set, dial9 checks each deallocation and records frees of sampled allocations so it can determine which sampled allocations are still live at any point in the trace. This is how you find memory leaks: allocations that appear in the liveset and grow over time without being freed.
 
 > **Caveat:** At very high deallocation rates the free queue can overflow. When a free event is dropped, the corresponding allocation remains in the liveset even if it was actually freed. The viewer and agent skills will flag when overflow is detected in the trace; if you see suspicious liveset growth in a high-throughput service, check for overflow warnings before concluding you have a real leak.
 
 #### Performance
 
-| Path | Overhead per call |
-| --- | --- |
-| Unsampled allocation (~99.9%) | ~5 ns |
-| Sampled allocation (~0.1%) | ~1 µs (stack capture) |
-| Every deallocation (liveset on) | ~200 ns |
-| Before `install()` | ~1 ns (null check) |
+Until a memory profiler is installed, allocator calls check profiler state
+and forward without reserving the profiling stack frame. After installation,
+allocations check a per-thread counter; stack capture and event emission run
+only when a sample fires. Frees skip the profiling hook when liveset tracking
+is off. Installation is permanent: pausing recording does not uninstall the
+profiler.
 
-Without liveset tracking, the profiler adds negligible overhead. With liveset tracking, the ~200 ns per free is the dominant cost — budget accordingly for allocation-heavy services.
+Measured **extra nanoseconds per call over the plain allocator with no
+profiler**, October 23, 2026:
+
+| Allocator | Operation | Wrapper, sampling off | Sampling on | Sampling + liveset |
+| --- | --- | ---: | ---: | ---: |
+| jemalloc | `alloc`, 64 B | +0.00 | +2.31 | +2.27 |
+| jemalloc | `alloc_zeroed`, 64 B | −0.37 | +2.02 | +1.73 |
+| jemalloc | `dealloc`, 64 B | +0.23 | +0.47 | +8.87 |
+| jemalloc | `realloc`, 64 → 128 B | +0.26 | +4.89 | +32.50 |
+| System | `alloc`, 64 B | +0.05 | +3.72 | +3.68 |
+| System | `alloc_zeroed`, 64 B | +0.35 | +2.60 | +2.60 |
+| System | `dealloc`, 64 B | +0.29 | +0.25 | +7.83 |
+| System | `realloc`, 64 → 128 B | +0.16 | +4.82 | +30.72 |
+
+These are medians of three randomized rounds on a shared AMD EPYC 9R14
+x86_64 host with Rust 1.98 and frame pointers enabled. The benchmark times
+batches of up to 1,024 individual calls, with setup and cleanup outside
+timing. Sampling uses the default 512 KiB mean interval; active costs average
+sample hits and misses, rather than measuring one captured sample.
+Differences near zero, including negative values, reflect measurement,
+allocator state, and generated-code layout effects. `+0.00` is a rounded
+observation, not a zero-cost guarantee. Allocation size, pattern, allocator,
+compiler, and sampling rate affect the results; budget against your workload.
+
+See the [allocator benchmarks](https://github.com/dial9-rs/dial9/blob/main/dial9-tokio-telemetry/benches/allocator_workload/README.md)
+for plain-allocator timings, application results, and reproduction commands.
 
 `dial9::recorder_from_env` can install the profiler when `DIAL9_MEMORY_PROFILE_ENABLED=true`, but your binary must still declare `Dial9Allocator` as shown above so allocations pass through dial9's hook.
 

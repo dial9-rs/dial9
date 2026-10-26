@@ -133,7 +133,7 @@ jobs:
           cache-after-prepare: true
           envs: "RUST_BACKTRACE RUSTFLAGS"
           prepare: |
-            pkg install -y rustup-init
+            pkg install -y rustup-init gmake
             rustup-init -y --profile minimal --default-toolchain "${{ env.STABLE_TOOLCHAIN }}"
             . "$HOME/.cargo/env"
           run: |

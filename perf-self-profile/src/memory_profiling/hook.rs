@@ -87,6 +87,13 @@ fn ensure_initialized(state: &mut SamplingState, inner: &MemoryProfilerInner) {
     if state.initialized {
         return;
     }
+    initialize_sampling_state(state, inner);
+}
+
+// First use on each thread; keep clock/PRNG setup out of the sampling check.
+#[cold]
+#[inline(never)]
+fn initialize_sampling_state(state: &mut SamplingState, inner: &MemoryProfilerInner) {
     let nonce = current_tid() as u64;
     let seed = match inner.rng_seed {
         Some(s) => s.wrapping_add(nonce),
@@ -153,99 +160,111 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
             return;
         }
 
-        // Sampled this allocation. Draw the gap to the next sample.
-        //
-        // We deliberately do NOT loop to "consume" the deficit when a
-        // single allocation overshoots the counter by more than one
-        // draw. Each `RawAlloc` carries its own `size` field, so
-        // downstream rate estimators weight samples by allocation
-        // size — burning one PRNG draw vs. many doesn't change
-        // per-allocation sampling probability over the long run, and
-        // looping was a footgun: at `sample_rate_bytes = 1` and a
-        // 1 GiB allocation, a `while next <= 0 { next += draw(1); }`
-        // loop ran ~1 billion times inside the allocator hook. A
-        // single fresh draw avoids the pathological case while
-        // preserving unbiasedness of size-weighted rate estimates.
-        //
-        // `next_gap` short-circuits the draw entirely when
-        // `sample_rate_bytes == 1` (the magic "sample every
-        // allocation" value), so that mode never touches the PRNG.
-        // `0` is rejected at config build time.
-        state.next_sample_bytes = next_gap(&mut state.rng, inner.sample_rate_bytes);
+        record_sample(&mut state, inner, ptr, size);
+    });
+}
 
-        let timestamp_ns = clock_monotonic_ns();
+// The caller holds SAMPLE_STATE borrowed across capture and liveset insertion.
+#[cold]
+#[inline(never)]
+fn record_sample(
+    state: &mut SamplingState,
+    inner: &MemoryProfilerInner,
+    ptr: *mut u8,
+    size: usize,
+) {
+    // Sampled this allocation. Draw the gap to the next sample.
+    //
+    // We deliberately do NOT loop to "consume" the deficit when a
+    // single allocation overshoots the counter by more than one
+    // draw. Each `RawAlloc` carries its own `size` field, so
+    // downstream rate estimators weight samples by allocation
+    // size — burning one PRNG draw vs. many doesn't change
+    // per-allocation sampling probability over the long run, and
+    // looping was a footgun: at `sample_rate_bytes = 1` and a
+    // 1 GiB allocation, a `while next <= 0 { next += draw(1); }`
+    // loop ran ~1 billion times inside the allocator hook. A
+    // single fresh draw avoids the pathological case while
+    // preserving unbiasedness of size-weighted rate estimates.
+    //
+    // `next_gap` short-circuits the draw entirely when
+    // `sample_rate_bytes == 1` (the magic "sample every
+    // allocation" value), so that mode never touches the PRNG.
+    // `0` is rejected at config build time.
+    state.next_sample_bytes = next_gap(&mut state.rng, inner.sample_rate_bytes);
 
-        // Stack capture into a stack-resident buffer. The `RefMut`
-        // is intentionally held across `capture` and the queue push:
-        // if those somehow allocated (they shouldn't — see module
-        // docs), the reentrancy guard would correctly trip.
-        // SAFETY: `Unwinder::install` was called and succeeded in
-        // `MemoryProfiler::install` before `inner` was published via
-        // `OnceLock::set`. The unwinder's SIGSEGV handler is installed.
-        // This is safe because:
-        // 1. We're not inside a signal handler (allocator hooks are not
-        //    signal-safe, so this is guaranteed by the allocator contract).
-        // 2. The stack is valid (normal allocation path, not corrupted).
-        let mut frames = [0u64; DEFAULT_MAX_FRAMES];
-        let result = unsafe { inner.unwinder.capture(&mut frames) };
+    let timestamp_ns = clock_monotonic_ns();
 
-        let sample = RawAlloc {
-            tid: current_tid(),
-            size: size as u64,
-            addr: ptr as u64,
-            ts_ns: timestamp_ns,
-            frames,
-            frame_count: result.frames_written.min(DEFAULT_MAX_FRAMES) as u8,
-        };
+    // Stack capture into a stack-resident buffer. The `RefMut`
+    // is intentionally held across `capture` and the queue push:
+    // if those somehow allocated (they shouldn't — see module
+    // docs), the reentrancy guard would correctly trip.
+    // SAFETY: `Unwinder::install` was called and succeeded in
+    // `MemoryProfiler::install` before `inner` was published via
+    // `OnceLock::set`. The unwinder's SIGSEGV handler is installed.
+    // This is safe because:
+    // 1. We're not inside a signal handler (allocator hooks are not
+    //    signal-safe, so this is guaranteed by the allocator contract).
+    // 2. The stack is valid (normal allocation path, not corrupted).
+    let mut frames = [0u64; DEFAULT_MAX_FRAMES];
+    let result = unsafe { inner.unwinder.capture(&mut frames) };
 
-        inner.rings.push_alloc(sample);
+    let sample = RawAlloc {
+        tid: current_tid(),
+        size: size as u64,
+        addr: ptr as u64,
+        ts_ns: timestamp_ns,
+        frames,
+        frame_count: result.frames_written.min(DEFAULT_MAX_FRAMES) as u8,
+    };
 
-        // Insert into the producer-side liveset OUTSIDE the RefCell borrow.
-        // The borrow is still held (we're inside the try_with closure), but
-        // scc::HashIndex::insert_sync is allocation-free on the hot path (it uses
-        // epoch-based reclamation internally with no heap allocation per insert
-        // on the common path).
-        //
-        // **Stale-entry handling.** `scc::HashIndex::insert_sync` returns `Err` and
-        // does NOT overwrite when the key already exists. The address space is
-        // reused by the OS allocator, so a stale entry can land here in two
-        // cases:
-        //   1. The matching dealloc was skipped during thread-teardown by the
-        //      OPT_OUT sentinel (see `opt_out.rs`).
-        //   2. The matching dealloc's `RawFree` was dropped because the free
-        //      queue was full (`MemoryProfileOverflowEvent` was emitted).
-        // In both cases we'd otherwise emit a `FreeEvent` later carrying the
-        // *old* allocation's `(size, ts_ns)` — wrong data. Detect the failure
-        // and fall through to the `entry()` API to atomically overwrite (or
-        // insert, if a concurrent dealloc cleared the entry between our
-        // `insert` and `entry`). The hot path stays on the cheap lock-free
-        // `insert`; only the rare stale case pays the bucket-lock cost.
-        //
-        // **OPT_OUT init ordering invariant.** `check_shutdown()` MUST be
-        // called before any `liveset` op on this thread. It initialises
-        // `sdd`'s collector before `LIFETIME_GUARD`, so the guard flips
-        // `IS_SHUTTING_DOWN = true` before sdd's destructor frees memory. If
-        // anyone moves the `liveset.insert_sync` call site, `check_shutdown` must
-        // be called first on every code path that touches the liveset, or
-        // we'll panic in `sdd::Collector::current()` during teardown.
-        if let Some(liveset) = &inner.liveset
-            && !crate::memory_profiling::opt_out::check_shutdown()
-        {
-            let key = ptr as u64;
-            let val = (size as u64, timestamp_ns);
-            if let Err((k, v)) = liveset.insert_sync(key, val) {
-                use scc::hash_index::Entry;
-                match liveset.entry_sync(k) {
-                    Entry::Occupied(mut o) => o.update(v),
-                    Entry::Vacant(ve) => {
-                        // Concurrent dealloc removed the stale entry between our
-                        // `insert` and `entry` — treat as fresh insert.
-                        let _ = ve.insert_entry(v);
-                    }
+    inner.rings.push_alloc(sample);
+
+    // Insert into the producer-side liveset while the RefCell borrow is held.
+    // The caller still holds the sampling borrow;
+    // scc::HashIndex::insert_sync is allocation-free on the hot path (it uses
+    // epoch-based reclamation internally with no heap allocation per insert
+    // on the common path).
+    //
+    // **Stale-entry handling.** `scc::HashIndex::insert_sync` returns `Err` and
+    // does NOT overwrite when the key already exists. The address space is
+    // reused by the OS allocator, so a stale entry can land here in two
+    // cases:
+    //   1. The matching dealloc was skipped during thread-teardown by the
+    //      OPT_OUT sentinel (see `opt_out.rs`).
+    //   2. The matching dealloc's `RawFree` was dropped because the free
+    //      queue was full (`MemoryProfileOverflowEvent` was emitted).
+    // In both cases we'd otherwise emit a `FreeEvent` later carrying the
+    // *old* allocation's `(size, ts_ns)` — wrong data. Detect the failure
+    // and fall through to the `entry()` API to atomically overwrite (or
+    // insert, if a concurrent dealloc cleared the entry between our
+    // `insert` and `entry`). The hot path stays on the cheap lock-free
+    // `insert`; only the rare stale case pays the bucket-lock cost.
+    //
+    // **OPT_OUT init ordering invariant.** `check_shutdown()` MUST be
+    // called before any `liveset` op on this thread. It initialises
+    // `sdd`'s collector before `LIFETIME_GUARD`, so the guard flips
+    // `IS_SHUTTING_DOWN = true` before sdd's destructor frees memory. If
+    // anyone moves the `liveset.insert_sync` call site, `check_shutdown` must
+    // be called first on every code path that touches the liveset, or
+    // we'll panic in `sdd::Collector::current()` during teardown.
+    if let Some(liveset) = &inner.liveset
+        && !crate::memory_profiling::opt_out::check_shutdown()
+    {
+        let key = ptr as u64;
+        let val = (size as u64, timestamp_ns);
+        if let Err((k, v)) = liveset.insert_sync(key, val) {
+            use scc::hash_index::Entry;
+            match liveset.entry_sync(k) {
+                Entry::Occupied(mut o) => o.update(v),
+                Entry::Vacant(ve) => {
+                    // Concurrent dealloc removed the stale entry between our
+                    // `insert` and `entry` — treat as fresh insert.
+                    let _ = ve.insert_entry(v);
                 }
             }
         }
-    });
+    }
 }
 
 /// Allocator hook for dealloc. With the producer-side liveset, only pushes
@@ -287,20 +306,7 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
     };
     let addr = ptr as u64;
     if crate::memory_profiling::opt_out::check_shutdown() {
-        // Shutdown drain: producer can't touch scc here. Push a flagged
-        // RawFree and let the consolidator do the lookup. `size` and
-        // `alloc_ts_ns` are placeholders (0); the consolidator fills them
-        // in from its own peek_with. This is allocation-free and only
-        // touches the queue. Intentionally outside the SAMPLE_STATE
-        // borrow guard — see the function doc.
-        inner.rings.push_free(RawFree {
-            tid: current_tid(),
-            addr,
-            ts_ns: clock_monotonic_ns(),
-            size: 0,
-            alloc_ts_ns: 0,
-            shutdown: true,
-        });
+        record_shutdown_free(inner, addr);
         return;
     }
     // Non-shutdown branch: take the SAMPLE_STATE borrow as a re-entrancy
@@ -314,17 +320,42 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
             return;
         };
         if let Some((size, alloc_ts_ns)) = take_liveset_entry(liveset, addr) {
-            let sample = RawFree {
-                tid: current_tid(),
-                addr,
-                ts_ns: clock_monotonic_ns(),
-                size,
-                alloc_ts_ns,
-                shutdown: false,
-            };
-            inner.rings.push_free(sample);
+            record_free(inner, addr, size, alloc_ts_ns);
         }
     });
+}
+
+#[cold]
+#[inline(never)]
+fn record_shutdown_free(inner: &MemoryProfilerInner, addr: u64) {
+    // Shutdown drain: producer can't touch scc here. Push a flagged
+    // RawFree and let the consolidator do the lookup. `size` and
+    // `alloc_ts_ns` are placeholders (0); the consolidator fills them
+    // in from its own peek_with. This is allocation-free and only
+    // touches the queue. Intentionally outside the SAMPLE_STATE
+    // borrow guard — see the function doc.
+    inner.rings.push_free(RawFree {
+        tid: current_tid(),
+        addr,
+        ts_ns: clock_monotonic_ns(),
+        size: 0,
+        alloc_ts_ns: 0,
+        shutdown: true,
+    });
+}
+
+#[cold]
+#[inline(never)]
+fn record_free(inner: &MemoryProfilerInner, addr: u64, size: u64, alloc_ts_ns: u64) {
+    let sample = RawFree {
+        tid: current_tid(),
+        addr,
+        ts_ns: clock_monotonic_ns(),
+        size,
+        alloc_ts_ns,
+        shutdown: false,
+    };
+    inner.rings.push_free(sample);
 }
 
 /// Atomically read and remove the liveset entry for `addr`, returning its
@@ -365,6 +396,13 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
 #[inline]
 fn take_liveset_entry(liveset: &Liveset, addr: u64) -> Option<(u64, u64)> {
     liveset.peek_with(&addr, |_, _| ())?;
+    take_sampled_liveset_entry(liveset, addr)
+}
+
+// The lock-free peek filtered the common miss; only sampled addresses get here.
+#[cold]
+#[inline(never)]
+fn take_sampled_liveset_entry(liveset: &Liveset, addr: u64) -> Option<(u64, u64)> {
     use scc::hash_index::Entry;
     if let Entry::Occupied(o) = liveset.entry_sync(addr) {
         let val = *o.get();
@@ -477,6 +515,15 @@ pub(crate) fn on_realloc_success(
     new_ptr: *mut u8,
     new_size: usize,
 ) {
+    if state.shutdown || state.taken.is_some() {
+        record_realloc_free(inner, old_ptr, &state);
+    }
+    on_alloc(inner, new_ptr, new_size);
+}
+
+#[cold]
+#[inline(never)]
+fn record_realloc_free(inner: &MemoryProfilerInner, old_ptr: *mut u8, state: &ReallocState) {
     if let Some(ts_ns) = state.ts_ns {
         if state.shutdown {
             // Shutdown drain: the producer could not touch scc, so push a
@@ -501,7 +548,6 @@ pub(crate) fn on_realloc_success(
             });
         }
     }
-    on_alloc(inner, new_ptr, new_size);
 }
 
 /// Allocator hook run after a **failed** inner `realloc`. The old block is
@@ -522,6 +568,12 @@ pub(crate) fn on_realloc_failed(
     let Some(val) = state.taken else {
         return;
     };
+    restore_realloc_entry(inner, old_ptr, val);
+}
+
+#[cold]
+#[inline(never)]
+fn restore_realloc_entry(inner: &MemoryProfilerInner, old_ptr: *mut u8, val: (u64, u64)) {
     // `taken` is only ever `Some` when the liveset is on and we were not
     // shutting down, but re-check the shutdown flag: `on_realloc_before` and
     // this call straddle the inner realloc, and the thread could have entered
