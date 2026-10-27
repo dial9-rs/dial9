@@ -1,13 +1,21 @@
-//! Sampler-owned preparation and coordination around the application entry point.
+//! Sampler-owned roster selection and coordination around the application entry point.
 use dial9::{Dial9HandleTokioExt, MemoryBuffer, RecorderS3ClientExt, TokioAttachOptions};
 use dial9_sampling::{Sampling, SamplingStatus, StartupFailure, s3::S3SamplingStore};
 use std::{io, time::Duration};
 
+fn optional_env(name: &str) -> io::Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(io::Error::other(error)),
+    }
+}
+
 fn run_application(status: SamplingStatus, bucket: &str) -> io::Result<()> {
-    let seconds = std::env::var("DIAL9_SMOKE_SECONDS")
-        .unwrap_or_else(|_| "30".into())
-        .parse::<u64>()
-        .map_err(io::Error::other)?;
+    let seconds = match optional_env("DIAL9_SMOKE_SECONDS")? {
+        Some(value) => value.parse::<u64>().map_err(io::Error::other)?,
+        None => 30,
+    };
     let SamplingStatus { enabled, .. } = status;
     let recorder = if enabled {
         let s3 = dial9::s3::S3Config::builder()
@@ -57,16 +65,24 @@ fn main() -> io::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let bucket = std::env::var("DIAL9_S3_BUCKET").map_err(io::Error::other)?;
     let scope = std::env::var("DIAL9_SAMPLING_SCOPE").map_err(io::Error::other)?;
-    let target = std::env::var("DIAL9_SAMPLING_TARGET")
-        .unwrap_or_else(|_| "2".into())
-        .parse::<u32>()
-        .map_err(io::Error::other)?;
+    let target = match optional_env("DIAL9_SAMPLING_TARGET")? {
+        Some(value) => value.parse::<u32>().map_err(io::Error::other)?,
+        None => 2,
+    };
+    let host_id = optional_env("DIAL9_SAMPLING_HOST_ID")?;
+    let if_failed = match optional_env("DIAL9_SAMPLING_ASSUME_POPULATION")? {
+        Some(value) => {
+            StartupFailure::assume_population(value.parse::<u64>().map_err(io::Error::other)?)
+        }
+        None => StartupFailure::disabled(),
+    };
     Sampling::builder()
         .scope(scope)
         .add_dimension("architecture", std::env::consts::ARCH)
-        .exact_target(target)
+        .target(target)
+        .maybe_host_id(host_id)
         .startup_timeout(Duration::from_secs(5))
-        .if_failed(StartupFailure::disabled())
+        .if_failed(if_failed)
         .build()
         .with_backend(async {
             // Initialization and refresh tasks use the sampler's long-lived runtime.

@@ -9,9 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 ///
 /// Supply an SDK client and bucket. The prefix defaults to `_dial9_sampling/`
 /// and can be overridden; an explicit prefix is used verbatim and should end
-/// in `/`. Its lifecycle and IAM rules must preserve live leases and shared
-/// configuration while permitting GET, conditional PUT, LIST and membership
-/// DELETE.
+/// in `/`. Its lifecycle and IAM rules must preserve the shared roster while
+/// permitting GET, conditional PUT, LIST and membership DELETE. Unordered
+/// directory-bucket listings are supported.
 #[derive(Clone, Debug, bon::Builder)]
 pub struct S3SamplingStore {
     client: aws_sdk_s3::Client,
@@ -72,11 +72,11 @@ impl SamplingStore for S3SamplingStore {
                     return Err(StoreError::new(kind, error));
                 }
             };
-            let version = VersionToken::new(
-                object
-                    .e_tag()
-                    .ok_or_else(|| invalid("S3 GET omitted ETag"))?,
-            );
+            let etag = object
+                .e_tag()
+                .filter(|etag| !etag.is_empty())
+                .ok_or_else(|| invalid("S3 GET omitted a nonempty ETag"))?;
+            let version = VersionToken::new(etag);
             let modified = timestamp(
                 object
                     .last_modified()
@@ -114,9 +114,8 @@ impl SamplingStore for S3SamplingStore {
                 WriteCondition::Matches { version, .. } => put.if_match(version.as_str()),
             };
             // A retry after a committed write with a lost response can return
-            // 412. Reporting that as a definitive failed claim would let the
-            // engine probe another slot or skip cleanup of its own allocation.
-            // Surface each attempt so the engine can reconcile unknown writes.
+            // 412. Reporting that as a definitive failed publication could hide
+            // the new roster version. Surface each attempt for reconciliation.
             let retry = self
                 .client
                 .config()
@@ -131,12 +130,15 @@ impl SamplingStore for S3SamplingStore {
                 .await
             {
                 Ok(result) => Ok(PutOutcome::stored(VersionToken::new(
-                    result.e_tag().ok_or_else(|| {
-                        StoreError::new(
-                            StoreErrorKind::write_outcome_unknown(),
-                            "S3 PUT succeeded without ETag; reconcile ownership",
-                        )
-                    })?,
+                    result
+                        .e_tag()
+                        .filter(|etag| !etag.is_empty())
+                        .ok_or_else(|| {
+                            StoreError::new(
+                                StoreErrorKind::write_outcome_unknown(),
+                                "S3 PUT succeeded without ETag; reconcile ownership",
+                            )
+                        })?,
                 ))),
                 Err(error) => {
                     let status = error
@@ -195,12 +197,6 @@ impl SamplingStore for S3SamplingStore {
                 let key = full
                     .strip_prefix(&self.prefix)
                     .ok_or_else(|| invalid("S3 list key outside sampling namespace"))?;
-                if objects
-                    .last()
-                    .is_some_and(|previous: &ListedObject| previous.key() >= key)
-                {
-                    return Err(invalid("S3 list keys are not strictly ordered"));
-                }
                 let modified = timestamp(
                     object
                         .last_modified()
@@ -214,12 +210,24 @@ impl SamplingStore for S3SamplingStore {
                         .build(),
                 );
             }
-            if result.is_truncated() == Some(true) && result.next_continuation_token().is_none() {
-                return Err(invalid("truncated S3 list omitted continuation token"));
-            }
+            let truncated = result
+                .is_truncated()
+                .ok_or_else(|| invalid("S3 list omitted IsTruncated"))?;
+            let continuation = match (truncated, result.next_continuation_token()) {
+                (true, Some(token)) if !token.is_empty() => Some(ContinuationToken::new(token)),
+                (true, _) => {
+                    return Err(invalid(
+                        "truncated S3 list omitted a nonempty continuation token",
+                    ));
+                }
+                (false, Some(_)) => {
+                    return Err(invalid("complete S3 list returned a continuation token"));
+                }
+                (false, None) => None,
+            };
             Ok(ListPage::builder()
                 .objects(objects)
-                .maybe_continuation(result.next_continuation_token().map(ContinuationToken::new))
+                .maybe_continuation(continuation)
                 .build())
         })
     }

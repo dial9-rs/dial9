@@ -8,10 +8,12 @@ pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>>
 
 /// Strong per-key reads and atomic conditional writes are required.
 ///
-/// Lists must be lexicographically ordered and include completed writes, but
-/// need not be an atomic fleet snapshot. Versions identify the observed body.
-/// Cancellation never proves that a write did not commit. Shared leases are
-/// released with conditional tombstones; delete is only for unique membership.
+/// Lists include completed writes, but neither page order nor an atomic fleet
+/// snapshot is required. Continuation cursors must permit complete enumeration.
+/// Versions identify the observed body and may repeat if the body is repeated;
+/// shared roster revisions therefore include a fresh nonce on every write.
+/// Cancellation never proves that a write did not commit. Delete is only for
+/// unique process membership; shared rosters are never deleted.
 /// A precondition failure must mean no attempt in that call committed.
 /// Backends must not hide an uncertain earlier attempt behind a retry's
 /// precondition failure; return an unknown write outcome for reconciliation.
@@ -37,12 +39,12 @@ pub trait SamplingStore: Send + Sync + 'static {
     /// [`StoreErrorKind::WriteOutcomeUnknown`]; a definitive precondition failure
     /// is a [`PutOutcome::PreconditionFailed`], rather than an error.
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome>;
-    /// Lists an ordered page including completed writes, with an opaque continuation cursor.
+    /// Lists a page including completed writes, with an opaque continuation cursor.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] if listing fails or the response cannot satisfy
-    /// the ordering, pagination or modification-time contract.
+    /// the namespace, pagination or modification-time contract.
     fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage>;
     /// Deletes a process's unique membership object; deleting an absent object succeeds.
     ///
@@ -67,7 +69,7 @@ impl VersionToken {
     }
 }
 #[derive(Clone, Debug)]
-/// Opaque backend cursor for continuing an ordered listing.
+/// Opaque backend cursor for continuing a listing.
 pub struct ContinuationToken(String);
 impl ContinuationToken {
     /// Wraps the backend's opaque listing cursor.
@@ -98,7 +100,7 @@ pub enum WriteCondition {
     },
 }
 impl WriteCondition {
-    /// Allows replacing any value; shared policy and lease writes use stricter conditions.
+    /// Allows replacing any value; shared roster writes use stricter conditions.
     pub fn unconditional() -> Self {
         Self::Unconditional {}
     }
@@ -189,7 +191,7 @@ impl StoredObject {
     }
 }
 #[derive(Clone, Debug, bon::Builder)]
-/// Prefix, page size and optional continuation cursor for an ordered listing.
+/// Prefix, page size and optional continuation cursor for a listing.
 pub struct ListRequest {
     #[builder(into)]
     prefix: String,
@@ -206,7 +208,7 @@ impl ListRequest {
     pub fn page_size(&self) -> usize {
         self.page_size
     }
-    /// Returns the opaque cursor for continuing this ordered listing, if present.
+    /// Returns the opaque cursor for continuing this listing, if present.
     pub fn continuation(&self) -> Option<&ContinuationToken> {
         self.continuation.as_ref()
     }
@@ -229,18 +231,18 @@ impl ListedObject {
     }
 }
 #[derive(Clone, Debug, bon::Builder)]
-/// One ordered listing page and an optional cursor for the next page.
+/// One listing page, in any order, and an optional cursor for the next page.
 pub struct ListPage {
     #[builder(default)]
     objects: Vec<ListedObject>,
     continuation: Option<ContinuationToken>,
 }
 impl ListPage {
-    /// Returns the objects in this ordered page.
+    /// Returns the objects in this page, without an ordering guarantee.
     pub fn objects(&self) -> &[ListedObject] {
         &self.objects
     }
-    /// Returns the opaque cursor for continuing this ordered listing, if present.
+    /// Returns the opaque cursor for continuing this listing, if present.
     pub fn continuation(&self) -> Option<&ContinuationToken> {
         self.continuation.as_ref()
     }

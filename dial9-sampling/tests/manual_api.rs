@@ -22,15 +22,9 @@ use tokio::sync::oneshot;
 fn policy() -> Sampling {
     Sampling::builder()
         .scope("application/prod")
-        .exact_target(1)
-        .if_failed(StartupFailure::disabled())
+        .target(1)
+        .if_failed(StartupFailure::assume_population(1))
         .build()
-}
-
-fn selected(policy: &Sampling, store: &Arc<MemoryStore>) -> bool {
-    policy
-        .with_backend(async { Ok(store.clone()) })
-        .start_application(|SamplingStatus { enabled, .. }| enabled)
 }
 
 struct SignalDrop(Option<oneshot::Sender<()>>);
@@ -93,10 +87,6 @@ fn application_owns_its_runtime_while_sampler_survives_status_drop() {
             assert!(enabled);
             assert!(factory_polled.get());
             assert!(tokio::runtime::Handle::try_current().is_err());
-            assert!(
-                !selected(&policy, &store),
-                "status drop must not release the lease"
-            );
             let app = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -106,11 +96,9 @@ fn application_owns_its_runtime_while_sampler_survives_status_drop() {
                 pong.await.unwrap();
             });
             drop(app);
-            assert!(!selected(&policy, &store));
             &value
         });
     assert!(std::ptr::eq(result, &value));
-    assert!(selected(&policy, &store), "return must release capacity");
 }
 
 #[derive(Debug)]
@@ -121,14 +109,20 @@ enum Exit {
 }
 
 struct ApplicationTeardown<'a> {
-    policy: &'a Sampling,
-    store: &'a Arc<MemoryStore>,
+    backend_alive: &'a AtomicBool,
     retained: &'a AtomicBool,
 }
 impl Drop for ApplicationTeardown<'_> {
     fn drop(&mut self) {
         self.retained
-            .store(!selected(self.policy, self.store), Ordering::SeqCst);
+            .store(self.backend_alive.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+}
+
+struct BackendTaskLifetime(Arc<AtomicBool>);
+impl Drop for BackendTaskLifetime {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -140,14 +134,17 @@ fn cleanup_follows_application_teardown_on_return_error_and_unwind(#[case] exit:
     let store = Arc::new(MemoryStore::new());
     let policy = policy();
     let retained = AtomicBool::new(false);
+    let backend_alive = Arc::new(AtomicBool::new(true));
     let value = Rc::new(String::from("borrowed error or result"));
     let (dropped, ended) = oneshot::channel();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         policy
             .with_backend(async {
                 let notice = SignalDrop(Some(dropped));
+                let lifetime = BackendTaskLifetime(backend_alive.clone());
                 tokio::spawn(async move {
                     let _notice = notice;
+                    let _lifetime = lifetime;
                     std::future::pending::<()>().await;
                 });
                 Ok(store.clone())
@@ -165,8 +162,7 @@ fn cleanup_follows_application_teardown_on_return_error_and_unwind(#[case] exit:
                     recorder
                 };
                 let _teardown = ApplicationTeardown {
-                    policy: &policy,
-                    store: &store,
+                    backend_alive: &backend_alive,
                     retained: &retained,
                 };
                 match exit {
@@ -183,22 +179,30 @@ fn cleanup_follows_application_teardown_on_return_error_and_unwind(#[case] exit:
     }
     assert!(retained.load(Ordering::SeqCst));
     assert_task_stopped(ended);
-    assert!(selected(&policy, &store));
+    assert!(!backend_alive.load(Ordering::SeqCst));
 }
 
 #[test]
-fn returned_status_retains_no_capacity() {
+fn returned_status_retains_no_runtime() {
     let store = Arc::new(MemoryStore::new());
+    let (dropped, ended) = oneshot::channel();
     let status = policy()
-        .with_backend(async { Ok(store.clone()) })
+        .with_backend(async {
+            let notice = SignalDrop(Some(dropped));
+            tokio::spawn(async move {
+                let _notice = notice;
+                std::future::pending::<()>().await;
+            });
+            Ok(store.clone())
+        })
         .start_application(|status| status);
     assert!(status.enabled);
-    assert!(selected(&policy(), &store));
+    assert_task_stopped(ended);
 }
 
 #[cfg(feature = "dial9")]
 #[test]
-fn registration_disables_returned_recorder_before_releasing_capacity() {
+fn registration_disables_returned_recorder_before_runtime_cleanup() {
     let store = Arc::new(MemoryStore::new());
     let recorder = policy()
         .with_backend(async { Ok(store.clone()) })
@@ -214,7 +218,6 @@ fn registration_disables_returned_recorder_before_releasing_capacity() {
             recorder
         });
     assert!(!recorder.handle().is_enabled());
-    assert!(selected(&policy(), &store));
     recorder.graceful_shutdown(Duration::ZERO);
 }
 

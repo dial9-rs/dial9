@@ -12,12 +12,16 @@ use aws_smithy_runtime_api::{
 use aws_smithy_types::body::SdkBody;
 use dial9_sampling::backend::*;
 use dial9_sampling::s3::S3SamplingStore;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Debug, Clone)]
 struct ResponseFixture {
     status: u16,
     body: String,
-    etag: bool,
+    etag: Option<&'static str>,
     modified: Option<&'static str>,
     broken_body: bool,
 }
@@ -29,8 +33,8 @@ impl HttpConnector for ResponseFixture {
             SdkBody::from(self.body.clone())
         };
         let mut response = HttpResponse::new(StatusCode::try_from(self.status).unwrap(), body);
-        if self.etag {
-            response.headers_mut().insert("etag", "\"fixture\"");
+        if let Some(etag) = self.etag {
+            response.headers_mut().insert("etag", etag);
         }
         if let Some(modified) = self.modified {
             response.headers_mut().insert("last-modified", modified);
@@ -39,7 +43,11 @@ impl HttpConnector for ResponseFixture {
     }
 }
 fn store(fixture: ResponseFixture) -> S3SamplingStore {
-    let http = http_client_fn(move |_, _| SharedHttpConnector::new(fixture.clone()));
+    store_with_connector(fixture, 1)
+}
+fn store_with_connector(connector: impl HttpConnector + 'static, attempts: u32) -> S3SamplingStore {
+    let connector = SharedHttpConnector::new(connector);
+    let http = http_client_fn(move |_, _| connector.clone());
     let client = aws_sdk_s3::Client::from_conf(
         aws_sdk_s3::Config::builder()
             .behavior_version_latest()
@@ -47,7 +55,9 @@ fn store(fixture: ResponseFixture) -> S3SamplingStore {
                 "test", "test", None, None, "test",
             ))
             .region(aws_sdk_s3::config::Region::new("us-east-1"))
-            .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1))
+            .retry_config(
+                aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(attempts),
+            )
             .http_client(http)
             .force_path_style(true)
             .build(),
@@ -58,11 +68,46 @@ fn store(fixture: ResponseFixture) -> S3SamplingStore {
         .prefix("coord/")
         .build()
 }
+#[derive(Debug)]
+struct ObservedRequest {
+    method: String,
+    if_match: Option<String>,
+    if_none_match: Option<String>,
+}
+#[derive(Debug, Clone)]
+struct RecordingFixture {
+    responses: Arc<Mutex<VecDeque<ResponseFixture>>>,
+    requests: Arc<Mutex<Vec<ObservedRequest>>>,
+}
+impl RecordingFixture {
+    fn new(responses: impl IntoIterator<Item = ResponseFixture>) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+impl HttpConnector for RecordingFixture {
+    fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
+        self.requests.lock().unwrap().push(ObservedRequest {
+            method: request.method().into(),
+            if_match: request.headers().get("if-match").map(String::from),
+            if_none_match: request.headers().get("if-none-match").map(String::from),
+        });
+        let response = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected SDK retry");
+        response.call(request)
+    }
+}
 fn response(status: u16) -> ResponseFixture {
     ResponseFixture {
         status,
         body: String::new(),
-        etag: true,
+        etag: Some("\"fixture\""),
         modified: Some("Sun, 01 Jan 2023 00:00:00 GMT"),
         broken_body: false,
     }
@@ -130,6 +175,7 @@ async fn conditional_conflicts_are_classified(#[case] status: u16, #[case] uncer
 }
 #[rstest::rstest]
 #[case("etag", "invalid")]
+#[case("empty-etag", "invalid")]
 #[case("modified", "invalid")]
 #[case("negative-time", "invalid")]
 #[case("body", "unavailable")]
@@ -137,7 +183,8 @@ async fn conditional_conflicts_are_classified(#[case] status: u16, #[case] uncer
 async fn malformed_get_is_not_a_missing_object(#[case] field: &str, #[case] expected: &str) {
     let mut fixture = response(200);
     match field {
-        "etag" => fixture.etag = false,
+        "etag" => fixture.etag = None,
+        "empty-etag" => fixture.etag = Some(""),
         "modified" => fixture.modified = None,
         "negative-time" => fixture.modified = Some("Fri, 01 Jan 1960 00:00:00 GMT"),
         "body" => fixture.broken_body = true,
@@ -158,7 +205,7 @@ async fn missing_object_and_missing_put_ack_are_distinct() {
             .is_none()
     );
     let mut fixture = response(200);
-    fixture.etag = false;
+    fixture.etag = None;
     let error = store(fixture)
         .put(PutRequest::builder().key("a").body("data".into()).build())
         .await
@@ -173,12 +220,10 @@ async fn missing_object_and_missing_put_ack_are_distinct() {
 )]
 #[case("<Contents><Key>coord/z</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>")]
 #[case("<IsTruncated>true</IsTruncated>")]
-#[case(
-    "<Contents><Key>coord/a2</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents><Contents><Key>coord/a1</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>"
-)]
-#[case(
-    "<Contents><Key>coord/a1</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents><Contents><Key>coord/a1</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>"
-)]
+#[case("<IsTruncated>true</IsTruncated><NextContinuationToken></NextContinuationToken>")]
+#[case("<IsTruncated>false</IsTruncated><NextContinuationToken>next</NextContinuationToken>")]
+#[case("")]
+#[case("<Contents><Key>coord/a</Key><LastModified>1960-01-01T00:00:00Z</LastModified></Contents>")]
 #[tokio::test(start_paused = true)]
 async fn malformed_list_cannot_become_a_fleet_count(#[case] contents: &str) {
     let mut fixture = response(200);
@@ -188,4 +233,90 @@ async fn malformed_list_cannot_become_a_fleet_count(#[case] contents: &str) {
         .await
         .unwrap_err();
     assert_eq!(kind(&error), "invalid");
+}
+
+#[rstest::rstest]
+#[case("a2", "a1")]
+#[case("a1", "a1")]
+#[tokio::test(start_paused = true)]
+async fn unordered_and_duplicate_list_entries_reach_the_census(
+    #[case] first: &str,
+    #[case] second: &str,
+) {
+    let mut fixture = response(200);
+    fixture.body = format!(
+        "<ListBucketResult><IsTruncated>false</IsTruncated>\
+         <Contents><Key>coord/{first}</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>\
+         <Contents><Key>coord/{second}</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>\
+         </ListBucketResult>"
+    );
+    let page = store(fixture)
+        .list(ListRequest::builder().prefix("a").build())
+        .await
+        .unwrap();
+    assert_eq!(
+        page.objects()
+            .iter()
+            .map(ListedObject::key)
+            .collect::<Vec<_>>(),
+        [first, second]
+    );
+    assert!(page.continuation().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn uncertain_put_is_not_hidden_by_a_retry_precondition_failure() {
+    // The first attempt may commit while its acknowledgement is lost. A retry
+    // would observe the changed version and return 412, hiding that commit.
+    let fixture = RecordingFixture::new([response(500), response(412)]);
+    let error = store_with_connector(fixture.clone(), 5)
+        .put(
+            PutRequest::builder()
+                .key("v2/pools/pool/roster.json")
+                .body("new-roster".into())
+                .condition(WriteCondition::matching(VersionToken::new("\"old\"")))
+                .build(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(kind(&error), "unknown");
+    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+    assert_eq!(fixture.responses.lock().unwrap().len(), 1);
+}
+
+#[rstest::rstest]
+#[case(WriteCondition::absent(), None, Some("*"))]
+#[case(
+    WriteCondition::matching(VersionToken::new("\"old\"")),
+    Some("\"old\""),
+    None
+)]
+#[case(WriteCondition::unconditional(), None, None)]
+#[tokio::test(start_paused = true)]
+async fn requested_write_condition_is_preserved_on_the_wire(
+    #[case] condition: WriteCondition,
+    #[case] if_match: Option<&str>,
+    #[case] if_none_match: Option<&str>,
+) {
+    let fixture = RecordingFixture::new([response(200)]);
+    let key = match &condition {
+        WriteCondition::Unconditional { .. } => "v2/members/pool/000001/process-incarnation",
+        _ => "v2/pools/pool/roster.json",
+    };
+    let result = store_with_connector(fixture.clone(), 5)
+        .put(
+            PutRequest::builder()
+                .key(key)
+                .body("roster".into())
+                .condition(condition)
+                .build(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, PutOutcome::Stored { .. }));
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "PUT");
+    assert_eq!(requests[0].if_match.as_deref(), if_match);
+    assert_eq!(requests[0].if_none_match.as_deref(), if_none_match);
 }

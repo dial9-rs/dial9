@@ -65,34 +65,44 @@ impl Sampling {
         }
     }
 }
-use crate::protocol::simulation::MemoryStore;
+use crate::test_store::MemoryStore;
 use std::{io, sync::Arc, time::Duration};
 
-fn policy() -> Sampling {
-    Sampling::builder()
-        .scope("manual/prod")
-        .add_dimension("az", "a")
-        .exact_target(1)
-        .if_failed(StartupFailure::disabled())
-        .build()
-}
-
+#[rstest::rstest]
+#[case(Duration::from_millis(100))]
+#[case(Duration::from_secs(3))]
 #[tokio::test(start_paused = true)]
-async fn guard_owns_capacity_until_explicit_shutdown() {
+async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_interval: Duration) {
     let store = Arc::new(MemoryStore::new());
-    let first = policy()
+    let sampling = Sampling::builder()
+        .scope("cold")
+        .target(1)
+        .poll_interval(poll_interval)
+        .bucket_width(Duration::from_secs(30))
+        .max_clock_skew(Duration::ZERO)
+        .if_failed(StartupFailure::disabled())
+        .build();
+    let session = sampling
         .prepare_on_executor(async { Ok(store.clone()) })
         .await;
-    assert!(first.enabled());
-    let full = policy()
+    assert!(!session.enabled());
+    session.stopped().await;
+    for _ in 0..400 {
+        tokio::time::advance(Duration::from_millis(50)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+    let future_startup = sampling
         .prepare_on_executor(async { Ok(store.clone()) })
         .await;
-    assert!(!full.enabled());
-    full.stopped().await;
-    first.shutdown(Duration::from_secs(1)).await;
-    let replacement = policy().prepare_on_executor(async { Ok(store) }).await;
-    assert!(replacement.enabled());
-    replacement.shutdown(Duration::from_secs(1)).await;
+    assert!(
+        future_startup.enabled(),
+        "a settled small-pool roster enables future startups"
+    );
+    assert!(!session.enabled(), "an unarmed process never enables later");
+    future_startup.shutdown(Duration::from_secs(1)).await;
+    session.shutdown(Duration::from_secs(1)).await;
 }
 
 #[rstest::rstest]
@@ -177,17 +187,13 @@ async fn disabled_or_invalid_configuration_never_polls_backend(
     session.shutdown(Duration::ZERO).await;
 }
 
-#[rstest::rstest]
-#[case(false)]
-#[case(true)]
 #[tokio::test(start_paused = true)]
-async fn lease_loss_stop_is_owned_and_opt_in(#[case] strict: bool) {
+async fn storage_outage_preserves_active_state() {
     let store = Arc::new(MemoryStore::new());
     let session = Sampling::builder()
         .scope("outage")
-        .exact_target(1)
-        .if_failed(StartupFailure::disabled())
-        .stop_on_lease_loss(strict)
+        .target(1)
+        .if_failed(StartupFailure::assume_population(1))
         .build()
         .prepare_on_executor(async { Ok(store.clone()) })
         .await;
@@ -198,29 +204,21 @@ async fn lease_loss_stop_is_owned_and_opt_in(#[case] strict: bool) {
     for _ in 0..16 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(stopped.is_finished(), strict);
+    assert!(!stopped.is_finished());
     store.set_unavailable(false);
     tokio::time::advance(Duration::from_secs(600)).await;
     for _ in 0..16 {
         tokio::task::yield_now().await;
     }
     assert!(session.enabled(), "the startup choice is immutable");
-    if strict {
-        stopped.await.unwrap();
-    } else {
-        stopped.abort();
-    }
+    assert!(!stopped.is_finished());
+    stopped.abort();
     session.shutdown(Duration::from_secs(1)).await;
 }
 
 #[cfg(feature = "dial9")]
-#[rstest::rstest]
-#[case(false)]
-#[case(true)]
 #[tokio::test(start_paused = true)]
-async fn registered_recorder_stops_after_status_drop_without_application_monitor(
-    #[case] strict: bool,
-) {
+async fn registered_recorder_survives_outage_then_stops_at_cleanup_after_status_drop() {
     let store = Arc::new(MemoryStore::new());
     let TestSession {
         status,
@@ -228,9 +226,8 @@ async fn registered_recorder_stops_after_status_drop_without_application_monitor
         registration,
     } = Sampling::builder()
         .scope("registered-outage")
-        .exact_target(1)
-        .if_failed(StartupFailure::disabled())
-        .stop_on_lease_loss(strict)
+        .target(1)
+        .if_failed(StartupFailure::assume_population(1))
         .build()
         .prepare_on_executor(async { Ok(store.clone()) })
         .await;
@@ -245,19 +242,97 @@ async fn registered_recorder_stops_after_status_drop_without_application_monitor
     for _ in 0..16 {
         tokio::task::yield_now().await;
     }
-    if strict {
-        registration.wait_for_stops().await;
-    }
-    assert_eq!(recorder.handle().is_enabled(), !strict);
+    assert!(recorder.handle().is_enabled());
     store.set_unavailable(false);
     tokio::time::advance(Duration::from_secs(600)).await;
     for _ in 0..16 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(recorder.handle().is_enabled(), !strict);
+    assert!(recorder.handle().is_enabled());
     registration.stop();
     assert!(!recorder.handle().is_enabled());
     maintenance.unwrap().shutdown(Duration::from_secs(1)).await;
+}
+
+#[cfg(feature = "dial9")]
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test(start_paused = true)]
+async fn automatic_recorder_stop_survives_status_drop(#[case] maintenance_ended: bool) {
+    let (recording, changes) = tokio::sync::watch::channel(true);
+    let registration = Arc::new(registration::RecorderRegistrations::new(Some(
+        tokio::runtime::Handle::current(),
+    )));
+    let status = SamplingStatus {
+        enabled: true,
+        changes: Some(changes),
+        registration: Arc::downgrade(&registration),
+    };
+    let recorder =
+        dial9_core::recorder::recorder(dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap())
+            .build();
+    status.register_recorder(&recorder);
+    drop(status);
+    assert!(recorder.handle().is_enabled());
+    if maintenance_ended {
+        drop(recording);
+    } else {
+        recording.send(false).unwrap();
+    }
+    registration.wait_for_stops().await;
+    assert!(!recorder.handle().is_enabled());
+    registration.stop();
+}
+
+#[cfg(feature = "dial9")]
+#[tokio::test(start_paused = true)]
+async fn roster_trim_disables_registered_recorders_without_application_tasks() {
+    let store = Arc::new(MemoryStore::new());
+    let mut invocations = Vec::new();
+    for host in ["host-a", "host-b", "host-c"] {
+        let TestSession {
+            status,
+            maintenance,
+            registration,
+        } = Sampling::builder()
+            .scope("automatic-roster-trim")
+            .host_id(host)
+            .target(1)
+            .max_overshoot(0)
+            .poll_interval(Duration::from_secs(3))
+            .bucket_width(Duration::from_secs(30))
+            .max_clock_skew(Duration::ZERO)
+            .if_failed(StartupFailure::assume_population(1))
+            .build()
+            .prepare_on_executor(async { Ok(store.clone()) })
+            .await;
+        assert!(status.enabled);
+        let recorder =
+            dial9_core::recorder::recorder(dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap())
+                .build();
+        status.register_recorder(&recorder);
+        drop(status);
+        invocations.push((maintenance.unwrap(), registration, recorder));
+    }
+    for _ in 0..20 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+    }
+    assert_eq!(
+        invocations
+            .iter()
+            .filter(|(_, _, recorder)| recorder.handle().is_enabled())
+            .count(),
+        1
+    );
+    for (maintenance, registration, recorder) in invocations {
+        registration.stop();
+        assert!(!recorder.handle().is_enabled());
+        maintenance.shutdown(Duration::from_secs(1)).await;
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -281,19 +356,20 @@ async fn backend_initialization_and_storage_share_one_deadline() {
     assert!(!session.enabled());
     store.set_latency(Duration::ZERO);
     session.shutdown(Duration::from_secs(1)).await;
-    let next = policy.prepare_on_executor(async { Ok(store) }).await;
+    let mut retry_policy = policy;
+    retry_policy.if_failed = StartupFailure::assume_population(1);
+    let next = retry_policy.prepare_on_executor(async { Ok(store) }).await;
     assert!(next.enabled());
     next.shutdown(Duration::from_secs(1)).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn storage_failure_fallback_remains_on_in_optional_stop_mode() {
+async fn storage_failure_fallback_participates_without_enabling_again() {
     let store = Arc::new(MemoryStore::new());
     store.set_unavailable(true);
     let session = Sampling::builder()
         .scope("fallback-stop")
         .exact_target(1)
-        .stop_on_lease_loss(true)
         .if_failed(StartupFailure::enable_with_fixed_probability(1.0))
         .build()
         .prepare_on_executor(async { Ok(store.clone()) })
@@ -349,4 +425,66 @@ fn exhausted_startup_budget_never_polls_backend() {
         })
         .start_application(|SamplingStatus { enabled, .. }| enabled);
     assert!(!enabled);
+}
+
+#[rstest::rstest]
+#[case(0, 0)]
+#[case(1, u64::MAX)]
+#[test]
+fn zero_or_untracked_startup_builds_no_runtime_and_polls_no_backend(
+    #[case] target: u32,
+    #[case] minimum_population: u64,
+) {
+    let sampling = Sampling::builder()
+        .scope("preflight")
+        .host_id("untracked-process")
+        .target(target)
+        .minimum_population(minimum_population)
+        .if_failed(StartupFailure::assume_population(1))
+        .build();
+    assert!(target == 0 || !sampling.policy().tracked());
+    let enabled = sampling
+        .with_backend(async {
+            panic!("preflight must not initialize the backend");
+            #[allow(unreachable_code)]
+            Ok(MemoryStore::new())
+        })
+        .start_application_with_runtime(
+            |SamplingStatus { enabled, .. }| enabled,
+            || panic!("preflight must not construct the runtime"),
+        );
+    assert!(!enabled);
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_startup_budget_is_one_second() {
+    let before = tokio::time::Instant::now();
+    let session = Sampling::builder()
+        .scope("default-budget")
+        .target(1)
+        .if_failed(StartupFailure::disabled())
+        .build()
+        .prepare_on_executor(async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Ok(MemoryStore::new())
+        })
+        .await;
+    assert_eq!(before.elapsed(), Duration::from_millis(1000));
+    assert!(!session.enabled());
+    session.shutdown(Duration::ZERO).await;
+}
+
+#[test]
+fn target_and_compatibility_setter_match() {
+    let preferred = Sampling::builder()
+        .scope("setter")
+        .target(15)
+        .if_failed(StartupFailure::disabled())
+        .build();
+    let compatibility = Sampling::builder()
+        .scope("setter")
+        .exact_target(15)
+        .if_failed(StartupFailure::disabled())
+        .build();
+    assert_eq!(preferred.exact_target, compatibility.exact_target);
 }

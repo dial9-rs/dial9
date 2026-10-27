@@ -1,87 +1,113 @@
-# Startup sampling review and validation
+# Roster validation evidence — October 27, 2026
 
-The sampler is independent of recording and owns a private coordination runtime.
-Its lazy `with_backend(backend).start_application(callback)` entry point resolves
-profiling before creating the instrumented runtime. The callback receives a
-non-exhaustive `SamplingStatus` with a public `enabled` field and optional
-`register_recorder` integration. The sampler owns the terminal-stop monitor and
-retains only weak recording references. The runner retains coordination through callback teardown
-and performs bounded cleanup after return or unwinding. Default continuity and fixed-probability fallback can exceed the target.
+The slot allocator and bottom-k estimator have been replaced. This evidence
+checks the roster/elected-leader protocol; old slot-model results do not apply.
 
-## Correctness checks
+## Finite models
 
-- Conditional S3 writes use one SDK attempt. A lost committed response remains
-  an unknown outcome for owner-checked reconciliation, instead of becoming a
-  precondition failure hidden behind an SDK retry.
-- Definitive conflicts retry the same slot within the startup budget. Unknown
-  writes fence that slot and cannot allocate another one.
-- Reuse includes backend modification-time uncertainty. Native S3 declares one
-  second, delaying reuse even with zero additional clock skew.
-- Maintenance panic/abort invalidates coordination and internal estimates. A
-  registered recorder stops on strict lease loss or monitor closure. The sampler
-  never re-enables it. Default continuity preserves the original profiling choice.
-- Cleanup checks the known slot's owner; uncertain admissions use a bounded scan.
-- Membership scans retain completed-page progress, heartbeat previous members
-  before scanning and invalidate estimates after failed/invalid refreshes.
-- Startup timeout includes runtime/backend construction and admission. Exhausted
-  budgets apply fallback before polling the backend or entering admission.
-- Preparation and maintenance use one runtime for the complete application
-  invocation. The callback runs outside its entered context, allowing normal
-  application runtime construction, `block_on` and destruction.
-- Cleanup follows callback-local application teardown on success, errors and
-  unwinding. Status destruction or return cannot release or retain a lease.
-- Registered recorders are disabled before lease release, even if returned from
-  the callback. Registration through an ended invocation immediately disables
-  recording. Weak stop callbacks do not retain recorder resources.
-- Entered-runtime invocation is rejected before backend or application execution.
-  Initialization panic shuts down spawned tasks without entering the application.
+All thirteen checks completed with their expected outcome using Java 17 and TLC
+2026.10.23.135453. Four positive configurations completed without invariant
+violations; nine deliberately broken controls violated their named invariant.
 
-## Test scope
+| Configuration | Distinct states | Expected result |
+| --- | ---: | --- |
+| leader | 3194 | No violation |
+| lifecycle | 4096 | No violation |
+| boundary | 144 | No violation |
+| terminal-registry | 5 | No violation |
+| negative-split-objects | 456 | FencedPublication |
+| negative-incomplete-list | 34 | CompletePassOnly |
+| negative-reused-key | 111 | IncarnationIsolation |
+| negative-late-enable | 8 | NoLateEnable |
+| negative-terminal-trim | 43 | TerminalTrim |
+| negative-off-by-one | Initial state | DesiredCount |
+| negative-boundary | 14 | GuardedCensus |
+| negative-empty-arm | 31 | NonemptyArm |
+| negative-bucket-first | 5 | TerminalClassification |
 
-Paused-time tests exercise deadline composition, fallback, partitions, unknown
-writes, stale membership, clock precision, policy refresh and storage lifecycle.
-Real-runtime tests use channels to check lazy preparation, initialization panic,
-borrowed non-Send factories and callbacks, sampler/application executor separation,
-status destructuring, application teardown and release. Runtime creation failures
-and exhausted startup budgets have focused fallback regressions.
-Manual integration uses separate SDK clients against one local S3 server and
-decodes an uploaded trace marker; denied admission allocates no trace writer.
-The S3 adapter tests its default `_dial9_sampling/` namespace, explicit overrides
-including the empty prefix, conditional writes and sorted pagination. The backend
-API is defined in `backend.rs`; in-memory stores and fleet simulations are private
-test support.
+The full output, state totals and expected violations are in
+`model-results.json`. Positive checks cover combined-object CAS fencing with
+unknown acknowledgements, frozen startup, terminal carrier transitions,
+incarnation cleanup, complete-pass gating and guarded start/finish/rollover.
+They are finite safety checks, not unbounded Rust refinement or liveness proofs.
 
-The retained heavy qualifications cover three 100,000-process fleet layouts,
-512 estimator trials and a bounded-capacity cold start. They are ignored in the
-ordinary suite. Run explicitly:
+## Seeded distribution experiments
 
-```sh
-cargo test --release -p dial9-sampling --lib qualification \
-  -- --ignored --nocapture --test-threads=1
-```
+Seed 20261027; N=100,000; 50,000 trials per target/tracking policy.
+Below are independent next-cohort results before terminal trimming. The JSON
+also contains same-census-cohort distributions, histograms and exact references.
 
-Shuttle exercises concurrent claims, late writes/cleanup, unknown acknowledgements,
-one-shot recorder stops, registration racing cleanup and the recorder's existing
-finalization races. It samples schedules; it does not exhaust every
-ordering of 100,000 real threads. Run the separate suites:
+| Target | Tracking fraction | Mean count | Count SD | Empirical central 95% | Above default reconciliation limit |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 15 | 1 | 15.006 | 3.870 | 8–23 | 0.178% |
+| 15 | 0.0078125 | 15.017 | 3.906 | 8–23 | 0.190% |
+| 500 | 1 | 499.973 | 22.278 | 457–545 | 0.128% |
+| 500 | 0.25 | 499.997 | 22.408 | 457–544 | 0.120% |
 
-```sh
-./scripts/test-shuttle.sh
-```
+For target 15 and f=1/128, the population estimate had relative SD 3.561%,
+central 95% error -6.816% to +7.136%, and 99.514% of trials were within ±10%.
+For target 500 and f=1/4, population relative SD was 0.545% and central 95%
+error -1.072% to +1.076%. Full tracking has no hash-census noise in this
+complete-membership model. Empirical percentages carry Monte Carlo error.
 
-The bounded TLA+ continuity and strict models check frozen choices, terminal
-stops and conditional slot ownership. Continuity's actual-profiler-cap variant
-intentionally has a counterexample. The model is not a refinement proof of Rust
-and assumes timely local stop enforcement for strict actual-cap checks.
+## Adversarial behavior
 
-## Limits
+The discrete-event model passed these assertions:
 
-The simulations do not qualify production S3 throughput or an arbitrary fleet's
-startup latency. Virtual lifecycle tests do not establish a production retention
-soak. Estimator bounds require stable, complete participation and the bottom-k
-rank assumptions in [estimation.md](estimation.md). Unknown small pools, churn
-and partitions have no universal total-fleet bound.
+- Cold Disabled remained off after census settlement; AssumePopulation recorded.
+- Stable restart selected the same identities; delayed old cleanup left fresh keys.
+- Older-bucket carrier state defeated a delayed newer-bucket active key for the
+  same incarnation. Short polling intervals bounded both election and warm cadence.
+- Overlapping restarts counted both process incarnations, not one logical host.
+- A paused old leader was rejected after takeover; committed unknown claim reconciled.
+- Takeover cleared stale keep; a fresh server lease could not authorize trim from
+  a census older than its permitted age. Disabling that age check stopped an
+  entire new cohort in the corresponding negative control.
+- Failed/incomplete/repeated-token LISTs did not publish census.
+- A partition allowed 58 active against limit 27; recovery trimmed to 27 active
+  processes, with 31 terminal carriers. This demonstrates why the cap is conditional.
+- Crash members remained during bucket visibility and dropped after rollover.
+- Guarded future-bucket startup stayed on explicit fallback: 21 active after another
+  1,000 starts. Disabling guard/zero-count protection reproduced 1,017 active.
+- A LIST crossing a bucket did not establish a usable arm; failed cleanup left
+  isolated stale memberships.
 
-Line coverage is not branch coverage, and the suite does not claim every possible
-backend, OS/runtime or scheduling failure is covered. Explicit error regressions
-and ownership/race checks supplement statistical and bounded-model evidence.
+Growth and shrink scenarios also preserved frozen choices; shrink could not
+backfill missing profilers. All outputs are in `simulation-results.json`.
+
+## Storage work and practical recommendation
+
+One synchronized 100,000-process cold start selected 16 processes, an acceptable
+outcome for target 15. The first twenty seconds had these operation counts:
+
+| Operation | Full tracking, R=100,000 | f=1/128, R=791 |
+| --- | ---: | ---: |
+| startup_get | 100,000 | 791 |
+| member_put | 100,000 | 791 |
+| background_get | 100,000 | 791 |
+| election_recheck_get | 100,000 | 791 |
+| election_cas | 50 | 2 |
+| failed_election_cas | 49 | 1 |
+| list_page | 404 | 8 |
+| publication_cas | 5 | 5 |
+
+Slot probes were zero. Approximate steady operation rates are 120,201/minute
+for full tracking and 952/minute for this sparse sample. Election uses one
+re-read after backoff and an illustrative 1ms GET-to-CAS gap. Other operations
+are instantaneous and unbounded concurrency is assumed: these are request
+counts, not measured S3 capacity or latency. Adversarial concurrency can still
+produce one losing election CAS per tracked contender; no constant-CAS bound
+is claimed. Background election reads are separate from the one startup GET.
+
+Use the count-derived arm and accept ordinary count variation. A target of 15
+has an exact complete-census 95% reference interval of 8–23; 16 is harmless.
+Use optional sparse tracking only with a credible per-pool lower population
+bound, since it greatly reduces storage work while adding little count noise.
+Use an explicit population fallback for required cold-pool coverage. Monitor
+count/cutoff timestamps, slice warnings, leader errors and carrier counts;
+a plateau does not certify participation. Outages and reused stale cutoffs
+remain outside universal count bounds.
+
+Rust lifecycle, storage adapter, deadline, clock and concurrency tests are
+additional implementation evidence; this independent model does not execute
+Rust or qualify production throughput. See [proofs.md](proofs.md) for assumptions.

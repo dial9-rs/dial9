@@ -1,6 +1,6 @@
 //! Sticky startup admission around a synchronous application entry point.
 //!
-//! The sampler drives preparation on its own runtime and keeps coordination
+//! The sampler reads the roster on its own runtime and keeps coordination
 //! alive until your application returns. Register the recorder for automatic
 //! stop handling; your application owns its normal runtime/recorder shutdown.
 //!
@@ -15,7 +15,7 @@
 //!     .scope("checkout/production")
 //!     .add_dimension("instance-type", "m7i.large")
 //!     .add_dimension("az", "us-east-1a")
-//!     .exact_target(15)
+//!     .target(15)
 //!     .startup_timeout(Duration::from_secs(5))
 //!     .if_failed(StartupFailure::disabled())
 //!     .build();
@@ -80,13 +80,13 @@ use tokio::runtime::Runtime;
 
 /// Startup admission for one complete caller-provided dimension tuple.
 ///
-/// The failure policy is required. Defaults are a 1000ms startup budget and
-/// keeping profiling enabled after lease loss. There is no periodic rotation.
-/// Fixed-probability failure fallback can exceed the requested target.
+/// The target is an expected count, not a reservation of exactly that many
+/// profilers. The failure policy is required. Defaults are a 1000ms startup
+/// budget and tracking every process. There is no periodic rotation.
 ///
 /// ```compile_fail
 /// use dial9_sampling::Sampling;
-/// Sampling::builder().scope("checkout").exact_target(15).build();
+/// Sampling::builder().scope("checkout").target(15).build();
 /// ```
 #[derive(Clone, Debug, bon::Builder)]
 pub struct Sampling {
@@ -95,20 +95,54 @@ pub struct Sampling {
     /// Service/environment namespace separating unrelated fleets.
     #[builder(into)]
     scope: String,
-    /// Desired profilers for each complete combination of dimension values.
+    /// Expected profilers for each complete combination of dimension values.
+    /// `exact_target` is the compatibility spelling; prefer `target`.
     exact_target: u32,
     /// Required behavior on storage failure or timeout.
     if_failed: StartupFailure,
     /// Cooperative budget covering runtime setup, backend construction and admission; defaults to 1000ms.
     #[builder(default = Duration::from_millis(1000))]
     startup_timeout: Duration,
-    /// Request one permanent stop on lease loss; defaults to false for continuity.
-    /// Register the recorder with `SamplingStatus::register_recorder` (`dial9` feature).
+    /// Stable identity for sticky rank across restarts; defaults to a fresh identity per invocation.
+    /// Distinct simultaneously live processes should have distinct identities.
+    /// Must be nonblank and must not contain `/`.
+    #[builder(into)]
+    host_id: Option<String>,
+    /// Conservative lower bound on the population; zero tracks every process.
+    /// A positive bound reduces membership traffic. Exceeding the real population
+    /// weakens coverage, especially for small pools.
     #[builder(default)]
-    stop_on_lease_loss: bool,
+    minimum_population: u64,
+    /// Additional active profilers tolerated before permanent trimming.
+    /// Defaults to the ceiling of three times the square root of the target.
+    max_overshoot: Option<u32>,
+    /// Background roster polling interval; defaults to one minute.
+    /// Must be between 100ms and eight hours, using whole milliseconds.
+    #[builder(default = Duration::from_secs(60))]
+    poll_interval: Duration,
+    /// Membership bucket width; defaults to five minutes.
+    /// Must cover two polls plus twice the clock skew, and be at most one day.
+    /// Use whole milliseconds.
+    #[builder(default = Duration::from_secs(300))]
+    bucket_width: Duration,
+    /// Assumed maximum wall-clock skew; defaults to five seconds.
+    /// Use whole milliseconds.
+    #[builder(default = Duration::from_secs(5))]
+    max_clock_skew: Duration,
 }
 
 impl<S: sampling_builder::State> SamplingBuilder<S> {
+    /// Sets the expected profiler count for the complete scope and dimension tuple.
+    ///
+    /// This is equivalent to the compatibility setter `exact_target`; the
+    /// sampler provides an expected count and eventual trimming, not exact capacity.
+    pub fn target(self, target: u32) -> SamplingBuilder<sampling_builder::SetExactTarget<S>>
+    where
+        S::ExactTarget: sampling_builder::IsUnset,
+    {
+        self.exact_target(target)
+    }
+
     /// Adds a dimension. Names must be unique; names and values must be nonblank.
     pub fn add_dimension(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.dimensions.push((name.into(), value.into()));
@@ -140,11 +174,12 @@ impl Sampling {
             .scope(&self.scope)
             .exact_target(self.exact_target)
             .if_failed(self.if_failed.clone())
-            .lease_loss(if self.stop_on_lease_loss {
-                protocol::LeaseLoss::stop_profiling()
-            } else {
-                protocol::LeaseLoss::keep_profiling()
-            });
+            .maybe_host_id(self.host_id.clone())
+            .minimum_population(self.minimum_population)
+            .maybe_max_overshoot(self.max_overshoot)
+            .poll_interval(self.poll_interval)
+            .bucket_width(self.bucket_width)
+            .max_clock_skew(self.max_clock_skew);
         for (name, value) in &self.dimensions {
             builder = builder.add_dimension(name, value);
         }
@@ -159,6 +194,10 @@ impl Sampling {
             )),
             Ok(()) if self.exact_target == 0 => Some(protocol::PreparedSampling::disabled(
                 protocol::DecisionReason::target_zero(),
+                false,
+            )),
+            Ok(()) if !policy.tracked() => Some(protocol::PreparedSampling::disabled(
+                protocol::DecisionReason::untracked(),
                 false,
             )),
             Ok(())
@@ -195,12 +234,6 @@ impl Sampling {
             Some(deadline) => match tokio::time::timeout_at(deadline, backend).await {
                 Ok(Ok(store)) => {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if remaining.is_zero() {
-                        return protocol::PreparedSampling::disabled(
-                            protocol::DecisionReason::timeout(),
-                            policy.failure_decision(draw),
-                        );
-                    }
                     policy
                         .prepare_with_timeout_and_draw(Arc::new(store), remaining, draw)
                         .await
@@ -226,9 +259,7 @@ impl Sampling {
         SamplingStatus {
             enabled: initial.recording(),
             #[cfg(any(test, feature = "dial9"))]
-            changes: _maintenance
-                .filter(|_| self.stop_on_lease_loss && initial.coordinated)
-                .map(protocol::SamplingSession::recording_changes),
+            changes: _maintenance.map(protocol::SamplingSession::recording_changes),
             #[cfg(feature = "dial9")]
             registration: std::sync::Weak::new(),
         }
@@ -263,7 +294,7 @@ impl<F> SamplingStartup<F> {
     ///
     /// Preparation uses the configured startup budget. Cleanup has a separate
     /// 500ms cooperative budget, including when the callback unwinds. Abrupt
-    /// process exit or failed cleanup still relies on lease expiry.
+    /// process exit or failed cleanup still relies on membership bucket expiry.
     ///
     /// # Panics
     ///
@@ -352,7 +383,7 @@ impl<F> SamplingStartup<F> {
 /// Sampling status supplied to the application, without coordination ownership.
 ///
 /// Destructure public fields with `..` so future fields remain compatible.
-/// Dropping this value does not stop lease maintenance or release capacity.
+/// Dropping this value does not stop roster maintenance or withdraw membership.
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct SamplingStatus {
@@ -367,9 +398,10 @@ pub struct SamplingStatus {
 impl SamplingStatus {
     /// Registers automatic recorder stop handling for this application invocation.
     ///
-    /// An initially disabled choice disables the recorder immediately. With
-    /// `stop_on_lease_loss`, the sampler's runtime disables it on lease loss or
-    /// maintenance termination. The sampler never re-enables it.
+    /// An initially disabled choice disables the recorder immediately. The
+    /// sampler's runtime disables active recorders when a roster permanently
+    /// trims this process. Storage failures preserve the current state.
+    /// The sampler never re-enables recording.
     ///
     /// All registered recorders are disabled before sampling cleanup when the
     /// application returns or unwinds. Registration holds only a weak recording
@@ -397,9 +429,9 @@ impl SamplingStatus {
 
     /// An owned future completing when profiling should stop. It never resumes.
     ///
-    /// An initially disabled application completes immediately. Default continuity
-    /// and enabled failure fallback never complete. With `stop_on_lease_loss`,
-    /// lease loss or maintenance termination completes this future permanently.
+    /// An initially disabled application completes immediately. A permanent
+    /// roster trim or maintenance termination completes this future permanently.
+    /// A fallback without a constructed backend keeps recording until cleanup.
     /// The future does not borrow the status and can be spawned.
     #[cfg(any(test, feature = "dial9"))]
     fn stopped(&self) -> impl Future<Output = ()> + Send + 'static {
