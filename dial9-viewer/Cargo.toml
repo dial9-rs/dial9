@@ -104,8 +104,8 @@ tempfile = { version = "3", optional = true }
 
 # Aggregator dependencies
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
-arrow = { version = "59.2", default-features = false }
-parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"] }
+arrow = { version = "60", default-features = false }
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
 blake3 = "1"
 lasso = "0.7"
 rustc-hash = "2"
