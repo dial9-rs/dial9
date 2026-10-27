@@ -22,6 +22,8 @@ For more information see [Analyzing Trace Files](#analyzing-trace-files)
 
 If you are integrating dial9 into a production service, see the [`production_use` example](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/production_use.rs).
 
+For a fleet where only some processes should record, see [Startup sampling](#startup-sampling).
+
 You can also find a full [example service](https://github.com/dial9-rs/dial9/blob/HEAD/examples).
 
 dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime: poll spans, task spawn and terminate, and per-worker queue depth. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder. These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
@@ -190,6 +192,20 @@ such as `dial9::spawn`):
 See [Task dumps](#task-dumps-linux-only) for setup and usage details.
 
 Missing variables use defaults. Blank, invalid, or non-Unicode values emit a warning and are treated as missing. Some numeric defaults come from the underlying config builders and are listed here as the current `recorder_from_env` behavior.
+
+## Startup sampling
+
+Use `dial9-sampling` to choose which processes profile at startup. Prepare a
+sampling session, branch on its choice before allocating a writer, and retain
+it with `recorder.attach_object(sampler)`. The session owns its coordination
+runtime and cleanup. Construct the instrumented application runtime after the
+choice is resolved, and drop that runtime before shutting down the recorder.
+
+See the [standalone guide](../dial9-sampling/README.md), the
+[plain main example](examples/manual_sampling.rs), and the
+[generic async macro example](examples/sampling_smoke.rs). Selected processes
+use separate S3 clients for coordination and trace upload. The generic
+`#[dial9::main(config_async = configure)]` callback supports this setup.
 
 ## Why dial9?
 

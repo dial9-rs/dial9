@@ -46,6 +46,7 @@ pub struct Recorder {
     sole_recorder: Option<SoleRecorderGuard>,
     #[cfg(feature = "pipeline")]
     worker: Option<WorkerHandle>,
+    attached_objects: Vec<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl std::fmt::Debug for Recorder {
@@ -71,6 +72,7 @@ impl Recorder {
             sole_recorder: None,
             #[cfg(feature = "pipeline")]
             worker: None,
+            attached_objects: Vec::new(),
         }
     }
 
@@ -130,6 +132,21 @@ impl Recorder {
         &self.handle
     }
 
+    /// Retains an object until this recorder is destroyed.
+    ///
+    /// Objects are dropped after recording is finalized and worker shutdown is
+    /// requested. [`graceful_shutdown`](Self::graceful_shutdown) also waits for
+    /// the worker to drain before dropping them. Their destructors run separately
+    /// from the worker's drain timeout.
+    ///
+    /// Use this for auxiliary state such as a sampling session. Drop the
+    /// instrumented application runtime before shutting down the recorder so
+    /// its worker threads can flush their final events.
+    pub fn attach_object(mut self, object: impl Send + Sync + 'static) -> Self {
+        self.attached_objects.push(Box::new(object));
+        self
+    }
+
     /// Publish this recorder's handle as the process-global one.
     ///
     /// When set, [`Dial9Handle::current`] resolves on every thread in the
@@ -186,6 +203,8 @@ impl Recorder {
     }
 
     /// Enable recording.
+    ///
+    /// A live recorder can resume after a stop. A disconnected recorder remains disabled.
     pub fn enable(&self) {
         self.handle.enable();
         if !self.handle.is_enabled() {
@@ -256,7 +275,6 @@ impl Recorder {
     ///
     /// Failures during draining are logged.
     pub fn graceful_shutdown(mut self, timeout: Duration) {
-        // `timeout` only bounds the worker drain, which exists under `pipeline`.
         #[cfg(not(feature = "pipeline"))]
         let _ = timeout;
 
@@ -802,5 +820,127 @@ mod tests {
             "expected exactly one warning per source (rate limit should suppress repeats \
              within the 60s window), got {warned_sources:?}"
         );
+    }
+}
+
+#[cfg(all(test, not(shuttle)))]
+mod attachment_tests {
+    use super::*;
+    use crate::buffer::MemoryBuffer;
+    use crate::recorder::{recorder, recorder_disabled};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct ObservedDrop {
+        handle: Dial9Handle,
+        drops: Arc<AtomicUsize>,
+        drained: Option<Arc<AtomicBool>>,
+    }
+    impl Drop for ObservedDrop {
+        fn drop(&mut self) {
+            assert!(!self.handle.is_enabled());
+            self.handle.enable();
+            assert!(
+                !self.handle.is_enabled(),
+                "finalized recorder must not resume"
+            );
+            if let Some(drained) = &self.drained {
+                assert!(drained.load(Ordering::SeqCst));
+            }
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(false, false)]
+    #[case(false, true)]
+    #[case(true, false)]
+    #[case(true, true)]
+    fn objects_outlive_finalization_and_drop_once(#[case] enabled: bool, #[case] graceful: bool) {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Recorder>();
+        let recorder = if enabled {
+            recorder(MemoryBuffer::new(1 << 20).unwrap()).build()
+        } else {
+            recorder_disabled()
+        };
+        let drops = Arc::new(AtomicUsize::new(0));
+        let first = ObservedDrop {
+            handle: recorder.handle().clone(),
+            drops: drops.clone(),
+            drained: None,
+        };
+        let second = ObservedDrop {
+            handle: recorder.handle().clone(),
+            drops: drops.clone(),
+            drained: None,
+        };
+        let recorder = recorder.attach_object(first).attach_object(second);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        if graceful {
+            recorder.graceful_shutdown(Duration::ZERO);
+        } else {
+            drop(recorder);
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "pipeline")]
+    #[test]
+    fn graceful_worker_drain_finishes_before_attached_object_drops() {
+        let mut recorder = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
+        let (shutdown, requested) = tokio::sync::oneshot::channel();
+        let drained = Arc::new(AtomicBool::new(false));
+        let completion = drained.clone();
+        let worker = crate::primitives::thread::spawn(move || {
+            assert_eq!(requested.blocking_recv().unwrap(), Duration::from_secs(1));
+            completion.store(true, Ordering::SeqCst);
+        });
+        recorder.attach_worker(WorkerHandle::new(shutdown, worker));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let attached = ObservedDrop {
+            handle: recorder.handle().clone(),
+            drops: drops.clone(),
+            drained: Some(drained),
+        };
+        recorder
+            .attach_object(attached)
+            .graceful_shutdown(Duration::from_secs(1));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(all(test, shuttle))]
+mod attachment_shuttle_tests {
+    use super::*;
+    use crate::buffer::MemoryBuffer;
+    use crate::primitives::sync::atomic::{AtomicUsize, Ordering};
+    use crate::recorder::recorder;
+
+    struct ObservedDrop(Dial9Handle, Arc<AtomicUsize>);
+    impl Drop for ObservedDrop {
+        fn drop(&mut self) {
+            assert!(!self.0.is_enabled());
+            self.0.enable();
+            assert!(!self.0.is_enabled());
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    crate::shuttle_test! {
+        default;
+        fn shuttle_attachment_drops_after_concurrent_handle_activity_and_finalization() {
+            let recorder = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
+            let handle = recorder.handle().clone();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let recorder = recorder.attach_object(ObservedDrop(handle.clone(), drops.clone()));
+            let other = crate::primitives::thread::spawn(move || {
+                handle.disable();
+                handle.enable();
+                handle.disable();
+            });
+            drop(recorder);
+            other.join().unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
     }
 }

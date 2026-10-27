@@ -142,6 +142,10 @@ linux-socket = [
 ]
 
 [dev-dependencies]
+dial9-sampling = { workspace = true, features = ["s3", "simulation"] }
+s3s = "0.14.1"
+s3s-fs = "0.14.1"
+s3s-aws = "0.14.1"
 dial9 = { path = ".", features = [
     "tokio",
     "analysis",
@@ -162,8 +166,10 @@ tokio = { version = "1", features = [
     "io-util",
     "time",
     "test-util",
+    "signal",
 ] }
 tempfile = "3"
+rstest = "0.26"
 flate2 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 metrique = { version = "0.1.29", features = ["local-format"] }
@@ -227,6 +233,14 @@ required-features = ["tokio"]
 [[example]]
 name = "production_use"
 required-features = ["tokio", "cpu-profiling", "worker-s3"]
+
+[[example]]
+name = "manual_sampling"
+required-features = ["worker-s3"]
+
+[[example]]
+name = "sampling_smoke"
+required-features = ["worker-s3"]
 
 [[example]]
 name = "multi_runtime"

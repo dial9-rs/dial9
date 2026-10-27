@@ -112,6 +112,40 @@ mod env_config;
 #[cfg(feature = "tokio")]
 pub use env_config::{recorder_from_env, recorder_from_env_with};
 
+#[doc(hidden)]
+#[cfg(feature = "tokio")]
+pub mod __private {
+    #[derive(Debug)]
+    pub struct ConfigurationRuntime(Option<tokio::runtime::Runtime>);
+
+    impl Drop for ConfigurationRuntime {
+        fn drop(&mut self) {
+            if let Some(runtime) = self.0.take() {
+                runtime.shutdown_background();
+            }
+        }
+    }
+
+    pub fn bootstrap_config_async(
+        future: impl std::future::Future<Output = std::io::Result<crate::AttachedRuntime>>,
+    ) -> std::io::Result<(crate::AttachedRuntime, ConfigurationRuntime)> {
+        // A retained current-thread runtime would leave spawned tasks stalled.
+        let runtime = ConfigurationRuntime(Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("dial9-config")
+                .enable_all()
+                .build()?,
+        ));
+        let attached = runtime
+            .0
+            .as_ref()
+            .expect("configuration runtime")
+            .block_on(future)?;
+        Ok((attached, runtime))
+    }
+}
+
 // One-call `.with_*` source sugar on the recorder builder. Available whenever a
 // perf source is compiled in.
 #[cfg(any(

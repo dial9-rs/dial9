@@ -1,0 +1,46 @@
+[package]
+name = "dial9-sampling"
+version = "0.5.5"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sticky startup profiling admission through pluggable object storage"
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+s3 = ["dep:aws-sdk-s3"]
+simulation = []
+
+[dependencies]
+bon = "3"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", default-features = false, features = ["sync", "time", "rt-multi-thread", "net", "macros"] }
+tokio-util = "0.7"
+tracing = "0.1"
+ulid = "1"
+
+aws-sdk-s3 = { version = "1.145", optional = true, default-features = false, features = ["behavior-version-latest", "sigv4a", "rt-tokio", "default-https-client"] }
+
+[dev-dependencies]
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-smithy-runtime-api = { version = "1", features = ["client"] }
+aws-smithy-types = "1"
+s3s = "0.14.1"
+s3s-fs = "0.14.1"
+s3s-aws = "0.14.1"
+tempfile = "3"
+dial9-core = { workspace = true, features = ["_shuttle"] }
+tokio = { version = "1", features = ["macros", "test-util", "rt-multi-thread"] }
+rstest = "0.26"
+shuttle = "0.9.1"
+
+[lints.rust]
+missing_debug_implementations = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
