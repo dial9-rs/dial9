@@ -18,7 +18,7 @@ run_shuttle_tests() {
 
 run_shuttle_tests dial9-sampling \
   env RUSTFLAGS="--cfg shuttle" \
-  cargo test -p dial9-sampling --lib -- shuttle "$@"
+  cargo test -p dial9-sampling --lib --features dial9 -- shuttle "$@"
 
 run_shuttle_tests dial9-core \
   env RUSTFLAGS="--cfg shuttle" \

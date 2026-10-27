@@ -1,4 +1,5 @@
-//! Backend primitives. A failed or cancelled write may have committed.
+//! Storage primitives for implementing a custom sampling backend.
+//! A failed or cancelled write may have committed.
 use bytes::Bytes;
 use std::{future::Future, pin::Pin, time::SystemTime};
 

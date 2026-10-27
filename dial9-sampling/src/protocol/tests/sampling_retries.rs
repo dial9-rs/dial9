@@ -1,4 +1,5 @@
 #![cfg(feature = "s3")]
+use crate::backend::{ListRequest, SamplingStore};
 use crate::protocol::*;
 use crate::s3::S3SamplingStore;
 use aws_smithy_runtime_api::client::{

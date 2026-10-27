@@ -1,4 +1,8 @@
 #![cfg(not(shuttle))]
+use crate::backend::{
+    ContinuationToken, ListPage, ListRequest, PutOutcome, PutRequest, SamplingStore, StoreError,
+    StoreErrorKind, StoreFuture, StoredObject, WriteCondition,
+};
 use crate::protocol::{
     simulation::{self, MemoryStore},
     *,

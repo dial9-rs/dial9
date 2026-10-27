@@ -1,19 +1,23 @@
 //! Native S3 conditional operations, independent of upload circuit breaking.
-use crate::backend::*;
+use crate::backend::{
+    ContinuationToken, ListPage, ListRequest, ListedObject, PutOutcome, PutRequest, SamplingStore,
+    StoreError, StoreErrorKind, StoreFuture, StoredObject, VersionToken, WriteCondition,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Native S3 implementation of the sampler's conditional storage primitives.
 ///
-/// Supply an SDK client, bucket and optional prefix ending in `/`. The prefix
-/// is used verbatim, so its lifecycle and IAM rules must preserve live leases
-/// and shared configuration while permitting GET, conditional PUT, LIST and
-/// membership DELETE.
+/// Supply an SDK client and bucket. The prefix defaults to `_dial9_sampling/`
+/// and can be overridden; an explicit prefix is used verbatim and should end
+/// in `/`. Its lifecycle and IAM rules must preserve live leases and shared
+/// configuration while permitting GET, conditional PUT, LIST and membership
+/// DELETE.
 #[derive(Clone, Debug, bon::Builder)]
 pub struct S3SamplingStore {
     client: aws_sdk_s3::Client,
     #[builder(into)]
     bucket: String,
-    #[builder(default, into)]
+    #[builder(default = "_dial9_sampling/".to_string(), into)]
     prefix: String,
 }
 impl S3SamplingStore {

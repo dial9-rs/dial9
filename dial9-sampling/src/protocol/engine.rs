@@ -1,4 +1,10 @@
 use super::*;
+use crate::backend::{
+    ContinuationToken, ListRequest, PutOutcome, PutRequest, SamplingStore, StoreError,
+    StoreErrorKind, StoredObject, WriteCondition,
+};
+#[cfg(test)]
+use crate::backend::{ListPage, StoreFuture};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{

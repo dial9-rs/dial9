@@ -142,7 +142,7 @@ linux-socket = [
 ]
 
 [dev-dependencies]
-dial9-sampling = { workspace = true, features = ["s3", "simulation"] }
+dial9-sampling = { workspace = true, features = ["s3", "dial9"] }
 s3s = "0.14.1"
 s3s-fs = "0.14.1"
 s3s-aws = "0.14.1"
@@ -236,10 +236,6 @@ required-features = ["tokio", "cpu-profiling", "worker-s3"]
 
 [[example]]
 name = "manual_sampling"
-required-features = ["worker-s3"]
-
-[[example]]
-name = "sampling_smoke"
 required-features = ["worker-s3"]
 
 [[example]]

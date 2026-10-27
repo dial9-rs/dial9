@@ -1,257 +1,305 @@
-#![cfg(feature = "simulation")]
-use dial9_sampling::{
-    Sampling, StartupFailure,
-    backend::{
-        ListPage, ListRequest, PutOutcome, PutRequest, SamplingStore, StoreFuture, StoredObject,
+use dial9_sampling::{Sampling, SamplingStartup, SamplingStatus, StartupFailure, backend};
+// Fault injection is covered by the sampler's unit tests.
+#[allow(dead_code)]
+#[path = "../src/test_store.rs"]
+mod test_store;
+use std::{
+    cell::Cell,
+    panic::{AssertUnwindSafe, catch_unwind},
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     },
-    simulation::MemoryStore,
+    time::Duration,
 };
-use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
-use tokio::sync::{Semaphore, oneshot};
+use test_store::MemoryStore;
+use tokio::sync::oneshot;
 
 fn policy() -> Sampling {
     Sampling::builder()
-        .scope("manual/prod")
+        .scope("application/prod")
         .exact_target(1)
         .if_failed(StartupFailure::disabled())
         .build()
 }
 
-fn bootstrap() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
+fn selected(policy: &Sampling, store: &Arc<MemoryStore>) -> bool {
+    policy
+        .with_backend(async { Ok(store.clone()) })
+        .start_application(|SamplingStatus { enabled, .. }| enabled)
+}
+
+struct SignalDrop(Option<oneshot::Sender<()>>);
+
+impl Drop for SignalDrop {
+    fn drop(&mut self) {
+        let _ = self.0.take().unwrap().send(());
+    }
+}
+
+fn assert_task_stopped(ended: oneshot::Receiver<()>) {
+    let verifier = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap()
-}
-
-#[test]
-fn session_owns_executor_and_sync_drop_releases_capacity() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<dial9_sampling::SamplingSession>();
-    let store = Arc::new(MemoryStore::new());
-    let (ping, request) = oneshot::channel();
-    let (reply, pong) = oneshot::channel();
-    // A borrowed non-Send factory remains supported.
-    let factory_polled = Rc::new(Cell::new(false));
-    let sampler = {
-        let bootstrap = bootstrap();
-        bootstrap.block_on(async {
-            let sampler = policy()
-                .prepare(async {
-                    factory_polled.set(true);
-                    assert_eq!(
-                        tokio::runtime::Handle::current().runtime_flavor(),
-                        tokio::runtime::RuntimeFlavor::MultiThread
-                    );
-                    tokio::spawn(async move {
-                        request.await.unwrap();
-                        reply.send(()).unwrap();
-                    });
-                    Ok(store.clone())
-                })
-                .await;
-            assert_eq!(
-                tokio::runtime::Handle::current().runtime_flavor(),
-                tokio::runtime::RuntimeFlavor::CurrentThread
-            );
-            sampler
-        })
-    };
-    assert!(factory_polled.get());
-    assert!(sampler.enabled());
-    ping.send(()).unwrap();
-    pong.blocking_recv().unwrap(); // Factory-spawned work survives bootstrap teardown.
-    drop(sampler); // Synchronous Drop waits for bounded cleanup on the private executor.
-    let bootstrap = bootstrap();
-    let replacement = bootstrap.block_on(policy().prepare(async { Ok(store) }));
-    assert!(replacement.enabled());
-    drop(replacement);
-}
-
-#[derive(Debug)]
-struct GatedRelease {
-    store: MemoryStore,
-    started: Semaphore,
-    allow: Semaphore,
-    finished: Semaphore,
-}
-impl GatedRelease {
-    fn new() -> Self {
-        Self {
-            store: MemoryStore::new(),
-            started: Semaphore::new(0),
-            allow: Semaphore::new(0),
-            finished: Semaphore::new(0),
-        }
-    }
-}
-impl SamplingStore for GatedRelease {
-    fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
-        self.store.get(key)
-    }
-    fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
-        Box::pin(async move {
-            let release = request.key().contains("/slots/")
-                && serde_json::from_slice::<serde_json::Value>(request.body()).unwrap()["owner"]
-                    .is_null();
-            if release {
-                self.started.add_permits(1);
-                self.allow.acquire().await.unwrap().forget();
-            }
-            let result = self.store.put(request).await;
-            if release {
-                self.finished.add_permits(1);
-            }
-            result
-        })
-    }
-    fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
-        self.store.list(request)
-    }
-    fn delete(&self, key: String) -> StoreFuture<'_, ()> {
-        self.store.delete(key)
-    }
-}
-
-#[test]
-fn async_drop_cleanup_survives_caller_executor_teardown() {
-    let store = Arc::new(GatedRelease::new());
-    {
-        let bootstrap = bootstrap();
-        bootstrap.block_on(async {
-            let sampler = policy().prepare(async { Ok(store.clone()) }).await;
-            assert!(sampler.enabled());
-            drop(sampler);
-            // Cleanup is pending, so Drop demonstrably didn't block the caller.
-            tokio::time::timeout(Duration::from_secs(5), store.started.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
-        });
-    }
-    store.allow.add_permits(1);
-    let bootstrap = bootstrap();
-    bootstrap.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), store.finished.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
-        let replacement = policy().prepare(async { Ok(store.clone()) }).await;
-        assert!(replacement.enabled());
-        store.allow.add_permits(1);
-        replacement.shutdown(Duration::from_secs(1)).await;
-    });
-}
-
-#[tokio::test]
-async fn canceling_explicit_shutdown_does_not_cancel_release() {
-    let store = Arc::new(GatedRelease::new());
-    let sampler = policy().prepare(async { Ok(store.clone()) }).await;
-    assert!(sampler.enabled());
-    let shutdown = tokio::spawn(sampler.shutdown(Duration::from_secs(5)));
-    tokio::time::timeout(Duration::from_secs(5), store.started.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-    shutdown.abort();
-    assert!(shutdown.await.unwrap_err().is_cancelled());
-    store.allow.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(5), store.finished.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-    let replacement = policy().prepare(async { Ok(store.clone()) }).await;
-    assert!(replacement.enabled());
-    store.allow.add_permits(1);
-    replacement.shutdown(Duration::from_secs(1)).await;
-}
-
-#[rstest::rstest]
-#[case(false)]
-#[case(true)]
-#[tokio::test]
-async fn canceled_or_panicking_factory_shuts_down_private_runtime(#[case] panic: bool) {
-    struct SignalDrop(Option<oneshot::Sender<()>>);
-    impl Drop for SignalDrop {
-        fn drop(&mut self) {
-            let _ = self.0.take().unwrap().send(());
-        }
-    }
-    let (started, ready) = oneshot::channel();
-    let (dropped, ended) = oneshot::channel();
-    let preparation = tokio::spawn(async move {
-        policy()
-            .prepare(async {
-                let signal = SignalDrop(Some(dropped));
-                tokio::spawn(async move {
-                    let _signal = signal;
-                    std::future::pending::<()>().await;
-                });
-                started.send(()).unwrap();
-                assert!(!panic, "factory panic");
-                std::future::pending::<()>().await;
-                Ok::<_, std::io::Error>(MemoryStore::new())
-            })
-            .await
-    });
-    ready.await.unwrap();
-    if !panic {
-        preparation.abort();
-    }
-    let error = preparation.await.unwrap_err();
-    assert_eq!(error.is_panic(), panic);
-    tokio::time::timeout(Duration::from_secs(5), ended)
-        .await
+        .unwrap();
+    verifier
+        .block_on(async { tokio::time::timeout(Duration::from_secs(5), ended).await })
         .unwrap()
         .unwrap();
 }
 
 #[test]
-fn dropping_sampler_on_its_own_single_worker_does_not_block_cleanup() {
-    let store = Arc::new(GatedRelease::new());
-    let holder = Arc::new(std::sync::Mutex::new(
-        None::<dial9_sampling::SamplingSession>,
-    ));
-    let job_holder = holder.clone();
-    let (drop_request, requested) = oneshot::channel();
-    let (dropped, drop_completed) = oneshot::channel();
-    let bootstrap = bootstrap();
-    let sampler = bootstrap.block_on(policy().prepare(async {
-        tokio::spawn(async move {
-            requested.await.unwrap();
-            let sampler = job_holder.lock().unwrap().take().unwrap();
-            drop(sampler);
-            dropped.send(()).unwrap();
-        });
-        Ok(store.clone())
-    }));
-    assert!(sampler.enabled());
-    *holder.lock().unwrap() = Some(sampler);
-    drop_request.send(()).unwrap();
-    bootstrap.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), drop_completed)
-            .await
-            .unwrap()
-            .unwrap();
-        // The sole worker is available to drive cleanup after dropping its owner.
-        tokio::time::timeout(Duration::from_secs(5), store.started.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
-        store.allow.add_permits(1);
-        tokio::time::timeout(Duration::from_secs(5), store.finished.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
-        let replacement = policy().prepare(async { Ok(store.clone()) }).await;
-        assert!(replacement.enabled());
-        store.allow.add_permits(1);
-        replacement.shutdown(Duration::from_secs(1)).await;
+fn unused_startup_never_polls_factory() {
+    let polled = Cell::new(false);
+    let startup: SamplingStartup<_> = policy().with_backend(async {
+        polled.set(true);
+        Ok(MemoryStore::new())
     });
+    assert!(!polled.get());
+    drop(startup);
+    assert!(!polled.get());
+}
+
+#[test]
+fn application_owns_its_runtime_while_sampler_survives_status_drop() {
+    let store = Arc::new(MemoryStore::new());
+    let factory_polled = Rc::new(Cell::new(false));
+    let (ping, request) = oneshot::channel();
+    let (reply, pong) = oneshot::channel();
+    let policy = policy();
+    let value = String::from("borrowed result");
+    let result = policy
+        .with_backend(async {
+            factory_polled.set(true);
+            assert_eq!(
+                tokio::runtime::Handle::current().runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            );
+            tokio::spawn(async move {
+                request.await.unwrap();
+                reply.send(()).unwrap();
+            });
+            // A timer and spawned future are driven by the sampler's runtime.
+            tokio::time::sleep(Duration::ZERO).await;
+            Ok(store.clone())
+        })
+        .start_application(|SamplingStatus { enabled, .. }| {
+            assert!(enabled);
+            assert!(factory_polled.get());
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            assert!(
+                !selected(&policy, &store),
+                "status drop must not release the lease"
+            );
+            let app = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            app.block_on(async {
+                ping.send(()).unwrap();
+                pong.await.unwrap();
+            });
+            drop(app);
+            assert!(!selected(&policy, &store));
+            &value
+        });
+    assert!(std::ptr::eq(result, &value));
+    assert!(selected(&policy, &store), "return must release capacity");
+}
+
+#[derive(Debug)]
+enum Exit {
+    Success,
+    Error,
+    Panic,
+}
+
+struct ApplicationTeardown<'a> {
+    policy: &'a Sampling,
+    store: &'a Arc<MemoryStore>,
+    retained: &'a AtomicBool,
+}
+impl Drop for ApplicationTeardown<'_> {
+    fn drop(&mut self) {
+        self.retained
+            .store(!selected(self.policy, self.store), Ordering::SeqCst);
+    }
+}
+
+#[rstest::rstest]
+#[case(Exit::Success)]
+#[case(Exit::Error)]
+#[case(Exit::Panic)]
+fn cleanup_follows_application_teardown_on_return_error_and_unwind(#[case] exit: Exit) {
+    let store = Arc::new(MemoryStore::new());
+    let policy = policy();
+    let retained = AtomicBool::new(false);
+    let value = Rc::new(String::from("borrowed error or result"));
+    let (dropped, ended) = oneshot::channel();
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        policy
+            .with_backend(async {
+                let notice = SignalDrop(Some(dropped));
+                tokio::spawn(async move {
+                    let _notice = notice;
+                    std::future::pending::<()>().await;
+                });
+                Ok(store.clone())
+            })
+            .start_application(|status| {
+                let SamplingStatus { enabled, .. } = status;
+                assert!(enabled);
+                #[cfg(feature = "dial9")]
+                let _recorder = {
+                    let recorder = dial9_core::recorder::recorder(
+                        dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+                    )
+                    .build();
+                    status.register_recorder(&recorder);
+                    recorder
+                };
+                let _teardown = ApplicationTeardown {
+                    policy: &policy,
+                    store: &store,
+                    retained: &retained,
+                };
+                match exit {
+                    Exit::Success => Ok(&value),
+                    Exit::Error => Err(&value),
+                    Exit::Panic => panic!("application panic"),
+                }
+            })
+    }));
+    match exit {
+        Exit::Success => assert!(std::ptr::eq(outcome.unwrap().unwrap(), &value)),
+        Exit::Error => assert!(std::ptr::eq(outcome.unwrap().unwrap_err(), &value)),
+        Exit::Panic => assert!(outcome.is_err()),
+    }
+    assert!(retained.load(Ordering::SeqCst));
+    assert_task_stopped(ended);
+    assert!(selected(&policy, &store));
+}
+
+#[test]
+fn returned_status_retains_no_capacity() {
+    let store = Arc::new(MemoryStore::new());
+    let status = policy()
+        .with_backend(async { Ok(store.clone()) })
+        .start_application(|status| status);
+    assert!(status.enabled);
+    assert!(selected(&policy(), &store));
+}
+
+#[cfg(feature = "dial9")]
+#[test]
+fn registration_disables_returned_recorder_before_releasing_capacity() {
+    let store = Arc::new(MemoryStore::new());
+    let recorder = policy()
+        .with_backend(async { Ok(store.clone()) })
+        .start_application(|status| {
+            assert!(status.enabled);
+            let recorder = dial9_core::recorder::recorder(
+                dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+            )
+            .build();
+            status.register_recorder(&recorder);
+            drop(status);
+            assert!(recorder.handle().is_enabled());
+            recorder
+        });
+    assert!(!recorder.handle().is_enabled());
+    assert!(selected(&policy(), &store));
+    recorder.graceful_shutdown(Duration::ZERO);
+}
+
+#[cfg(feature = "dial9")]
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn registration_rejects_disabled_or_ended_invocation(#[case] ended: bool) {
+    let recorder =
+        dial9_core::recorder::recorder(dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap())
+            .build();
+    let sampling = policy();
+    if ended {
+        let status = sampling
+            .with_backend(async { Ok(MemoryStore::new()) })
+            .start_application(|status| status);
+        assert!(status.enabled);
+        status.register_recorder(&recorder);
+    } else {
+        Sampling::builder()
+            .scope("disabled-registration")
+            .exact_target(0)
+            .if_failed(StartupFailure::disabled())
+            .build()
+            .with_backend(async { Ok(MemoryStore::new()) })
+            .start_application(|status| {
+                assert!(!status.enabled);
+                status.register_recorder(&recorder);
+                assert!(!recorder.handle().is_enabled());
+            });
+    }
+    assert!(!recorder.handle().is_enabled());
+}
+
+#[test]
+fn panicking_factory_shuts_down_its_spawned_tasks_without_starting_application() {
+    let (dropped, ended) = oneshot::channel();
+    let application_called = Cell::new(false);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        policy()
+            .with_backend(async {
+                let signal = SignalDrop(Some(dropped));
+                tokio::spawn(async move {
+                    let _signal = signal;
+                    std::future::pending::<()>().await;
+                });
+                panic!("factory panic");
+                #[allow(unreachable_code)]
+                Ok(MemoryStore::new())
+            })
+            .start_application(|_| application_called.set(true))
+    }));
+    assert!(outcome.is_err());
+    assert!(!application_called.get());
+    assert_task_stopped(ended);
+}
+
+#[tokio::test]
+async fn entered_runtime_is_rejected_before_polling_or_application() {
+    let factory_called = Cell::new(false);
+    let application_called = Cell::new(false);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        policy()
+            .with_backend(async {
+                factory_called.set(true);
+                Ok(MemoryStore::new())
+            })
+            .start_application(|_| application_called.set(true))
+    }));
+    assert!(outcome.is_err());
+    assert!(!factory_called.get());
+    assert!(!application_called.get());
+}
+
+#[rstest::rstest]
+#[case(0.0, false)]
+#[case(1.0, true)]
+fn backend_error_still_starts_application_with_fallback(
+    #[case] probability: f64,
+    #[case] expected: bool,
+) {
+    let enabled = Sampling::builder()
+        .scope("failure")
+        .exact_target(1)
+        .if_failed(StartupFailure::enable_with_fixed_probability(probability))
+        .build()
+        .with_backend(async { Err::<MemoryStore, _>(std::io::Error::other("backend failed")) })
+        .start_application(|SamplingStatus { enabled, .. }| {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            enabled
+        });
+    assert_eq!(enabled, expected);
 }

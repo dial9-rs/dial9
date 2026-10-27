@@ -15,7 +15,6 @@ enum ConfigSource {
 struct MainArgs {
     /// Zero-argument function/closure returning `io::Result<dial9::AttachedRuntime>`.
     config: ConfigSource,
-    config_async: bool,
     /// Graceful-shutdown deadline (a `Duration` expression). Defaults to 1s.
     graceful_shutdown: Option<Expr>,
     /// Skip the graceful drain entirely.
@@ -87,7 +86,6 @@ impl Parse for MainArgs {
         }
 
         let mut config = None;
-        let mut config_async = None;
         let mut graceful_shutdown = None;
         let mut disable_graceful_shutdown = None;
 
@@ -99,12 +97,6 @@ impl Parse for MainArgs {
                 .map(syn::Ident::to_string)
                 .unwrap_or_default();
             match name.as_str() {
-                "config_async" => set_once(
-                    &mut config_async,
-                    config_from_expr(require_value(&meta, "config_async")?)?,
-                    "config_async",
-                    span,
-                )?,
                 "config" => set_once(
                     &mut config,
                     config_from_expr(require_value(&meta, "config")?)?,
@@ -135,7 +127,7 @@ impl Parse for MainArgs {
                     return Err(syn::Error::new(
                         meta.path().span(),
                         format!(
-                            "unknown `#[dial9::main]` argument `{other}`; expected `config`, `config_async`, \
+                            "unknown `#[dial9::main]` argument `{other}`; expected `config`, \
                              `graceful_shutdown`, or `disable_graceful_shutdown`"
                         ),
                     ));
@@ -143,14 +135,7 @@ impl Parse for MainArgs {
             }
         }
 
-        if config.is_some() && config_async.is_some() {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "`config` and `config_async` cannot both be set",
-            ));
-        }
-        let asynchronous = config_async.is_some();
-        let Some(config) = config.or(config_async) else {
+        let Some(config) = config else {
             return Err(syn::Error::new(Span::call_site(), MISSING_CONFIG_HELP));
         };
         if let (Some(gs), Some(())) = (&graceful_shutdown, &disable_graceful_shutdown) {
@@ -161,7 +146,6 @@ impl Parse for MainArgs {
         }
         Ok(MainArgs {
             config,
-            config_async: asynchronous,
             graceful_shutdown,
             disable_graceful_shutdown: disable_graceful_shutdown.is_some(),
         })
@@ -201,21 +185,6 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
         ConfigSource::Path(p) => quote! { #p() },
         ConfigSource::Closure(c) => quote! { (#c)() },
     };
-    let config_init = if args.config_async {
-        quote! {
-            // Declared first so it also outlives the app and recorder on unwind.
-            let (__dial9_config_result, __dial9_configuration_runtime) =
-                match ::dial9::__private::bootstrap_config_async(#config_call) {
-                    Ok((__dial9_attached, __dial9_guard)) =>
-                        (Ok(__dial9_attached), Some(__dial9_guard)),
-                    Err(__dial9_error) => (Err(__dial9_error), None),
-                };
-        }
-    } else {
-        quote! {
-            let __dial9_config_result: ::std::io::Result<::dial9::AttachedRuntime> = #config_call;
-        }
-    };
 
     let shutdown_stmt = if args.disable_graceful_shutdown {
         quote! { drop(__dial9_recorder); }
@@ -242,7 +211,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
-            #config_init
+            let __dial9_config_result: ::std::io::Result<::dial9::AttachedRuntime> = #config_call;
             let (__dial9_recorder, __dial9_rt) =
                 __dial9_config_result.expect("dial9::main: config failed");
             let __dial9_out = ::dial9::block_on(&__dial9_rt, async move { #(#body_stmts)* });
@@ -273,11 +242,6 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///   The macro panics if it is an `Err`. Use [`dial9::recorder_from_env`](../dial9/fn.recorder_from_env.html) for
 ///   the env-driven setup. Required.
 /// * `graceful_shutdown` — the drain deadline (a `Duration`); defaults to 1s.
-/// * `config_async` — a zero-argument config callback returning a future of
-///   `std::io::Result<dial9::AttachedRuntime>`, mutually exclusive with `config`.
-///   Runs on an uninstrumented executor retained through application execution
-///   and recorder shutdown, including spawned tasks. Resolve startup sampling
-///   before constructing the instrumented application runtime.
 /// * `disable_graceful_shutdown` — skip the drain; the recorder is just dropped.
 ///
 /// # Graceful shutdown
@@ -514,33 +478,6 @@ mod tests {
         assert!(
             msg.contains("missing required `config`"),
             "unexpected error: {msg}"
-        );
-    }
-
-    #[test]
-    fn async_config_bootstraps_before_application() {
-        let output = expand(
-            quote! { config_async = my_config },
-            quote! { async fn main() {} },
-        );
-        let compact: String = output
-            .chars()
-            .filter(|c| !c.is_whitespace() && *c != ',')
-            .collect();
-        assert!(
-            compact.contains("bootstrap_config_async(my_config())"),
-            "{output}"
-        );
-        assert!(
-            output.find("bootstrap_config_async").unwrap()
-                < output.find("::dial9::block_on").unwrap()
-        );
-    }
-
-    #[test]
-    fn sync_and_async_config_are_mutually_exclusive() {
-        assert!(
-            parse_args_err(quote! { config = a, config_async = b }).contains("cannot both be set")
         );
     }
 

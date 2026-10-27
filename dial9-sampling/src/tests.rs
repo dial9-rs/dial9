@@ -1,4 +1,70 @@
 use super::*;
+
+struct TestSession {
+    status: SamplingStatus,
+    maintenance: Option<protocol::SamplingSession>,
+    #[cfg(feature = "dial9")]
+    registration: Arc<registration::RecorderRegistrations>,
+}
+
+impl TestSession {
+    fn enabled(&self) -> bool {
+        self.status.enabled
+    }
+
+    fn stopped(&self) -> impl Future<Output = ()> + Send + 'static {
+        self.status.stopped()
+    }
+
+    async fn shutdown(self, timeout: Duration) {
+        #[cfg(feature = "dial9")]
+        self.registration.stop();
+        if let Some(session) = self.maintenance {
+            session.shutdown(timeout).await;
+        }
+    }
+}
+
+impl Sampling {
+    // Paused-time tests drive admission on their test executor; public callers
+    // exercise the owned runtime through start_application.
+    async fn prepare_on_executor<S: SamplingStore>(
+        &self,
+        backend: impl Future<Output = io::Result<S>>,
+    ) -> TestSession {
+        let policy = self.policy();
+        let prepared = match self.preflight(&policy) {
+            Some(prepared) => prepared,
+            None => {
+                Self::admit(
+                    &policy,
+                    backend,
+                    self.startup_timeout,
+                    protocol::startup_draw(),
+                )
+                .await
+            }
+        };
+        let initial = prepared.snapshot();
+        let maintenance = prepared.into_session();
+        #[allow(unused_mut)]
+        let mut status = self.status(initial, maintenance.as_ref());
+        #[cfg(feature = "dial9")]
+        let registration = {
+            let registration = Arc::new(registration::RecorderRegistrations::new(Some(
+                tokio::runtime::Handle::current(),
+            )));
+            status.registration = Arc::downgrade(&registration);
+            registration
+        };
+        TestSession {
+            status,
+            maintenance,
+            #[cfg(feature = "dial9")]
+            registration,
+        }
+    }
+}
 use crate::protocol::simulation::MemoryStore;
 use std::{io, sync::Arc, time::Duration};
 
@@ -40,6 +106,7 @@ async fn deadline_includes_backend_initialization_and_never_revisits_fallback(
     let policy = Sampling::builder()
         .scope("timeout")
         .exact_target(1)
+        .startup_timeout(Duration::from_millis(500))
         .if_failed(StartupFailure::enable_with_fixed_probability(probability))
         .build();
     let before = tokio::time::Instant::now();
@@ -146,12 +213,65 @@ async fn lease_loss_stop_is_owned_and_opt_in(#[case] strict: bool) {
     session.shutdown(Duration::from_secs(1)).await;
 }
 
+#[cfg(feature = "dial9")]
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test(start_paused = true)]
+async fn registered_recorder_stops_after_status_drop_without_application_monitor(
+    #[case] strict: bool,
+) {
+    let store = Arc::new(MemoryStore::new());
+    let TestSession {
+        status,
+        maintenance,
+        registration,
+    } = Sampling::builder()
+        .scope("registered-outage")
+        .exact_target(1)
+        .if_failed(StartupFailure::disabled())
+        .stop_on_lease_loss(strict)
+        .build()
+        .prepare_on_executor(async { Ok(store.clone()) })
+        .await;
+    assert!(status.enabled);
+    let recorder =
+        dial9_core::recorder::recorder(dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap())
+            .build();
+    status.register_recorder(&recorder);
+    drop(status);
+    store.set_unavailable(true);
+    tokio::time::advance(Duration::from_secs(306)).await;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    if strict {
+        registration.wait_for_stops().await;
+    }
+    assert_eq!(recorder.handle().is_enabled(), !strict);
+    store.set_unavailable(false);
+    tokio::time::advance(Duration::from_secs(600)).await;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(recorder.handle().is_enabled(), !strict);
+    registration.stop();
+    assert!(!recorder.handle().is_enabled());
+    maintenance.unwrap().shutdown(Duration::from_secs(1)).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn backend_initialization_and_storage_share_one_deadline() {
     let store = Arc::new(MemoryStore::new());
     store.set_latency(Duration::from_millis(150));
+    let policy = Sampling::builder()
+        .scope("shared-deadline")
+        .exact_target(1)
+        .startup_timeout(Duration::from_millis(500))
+        .if_failed(StartupFailure::disabled())
+        .build();
     let before = tokio::time::Instant::now();
-    let session = policy()
+    let session = policy
         .prepare_on_executor(async {
             tokio::time::sleep(Duration::from_millis(400)).await;
             Ok(store.clone())
@@ -161,7 +281,7 @@ async fn backend_initialization_and_storage_share_one_deadline() {
     assert!(!session.enabled());
     store.set_latency(Duration::ZERO);
     session.shutdown(Duration::from_secs(1)).await;
-    let next = policy().prepare_on_executor(async { Ok(store) }).await;
+    let next = policy.prepare_on_executor(async { Ok(store) }).await;
     assert!(next.enabled());
     next.shutdown(Duration::from_secs(1)).await;
 }
@@ -192,43 +312,41 @@ async fn storage_failure_fallback_remains_on_in_optional_stop_mode() {
 #[rstest::rstest]
 #[case(0.0, false)]
 #[case(1.0, true)]
-#[tokio::test(start_paused = true)]
-async fn runtime_creation_failure_uses_required_failure_policy(
+#[test]
+fn runtime_creation_failure_uses_required_failure_policy(
     #[case] probability: f64,
     #[case] expected: bool,
 ) {
-    let sampler = Sampling::builder()
+    let enabled = Sampling::builder()
         .scope("runtime-error")
         .exact_target(1)
         .if_failed(StartupFailure::enable_with_fixed_probability(probability))
         .build()
-        .prepare_with_runtime(
-            async {
-                panic!("factory must not run if runtime creation fails");
-                #[allow(unreachable_code)]
-                Ok(MemoryStore::new())
-            },
+        .with_backend(async {
+            panic!("factory must not run if runtime creation fails");
+            #[allow(unreachable_code)]
+            Ok(MemoryStore::new())
+        })
+        .start_application_with_runtime(
+            |SamplingStatus { enabled, .. }| enabled,
             || Err(io::Error::other("thread creation failed")),
-        )
-        .await;
-    assert_eq!(sampler.enabled(), expected);
-    sampler.shutdown(Duration::ZERO).await;
+        );
+    assert_eq!(enabled, expected);
 }
 
-#[tokio::test(start_paused = true)]
-async fn exhausted_startup_budget_never_polls_backend() {
-    let sampler = Sampling::builder()
+#[test]
+fn exhausted_startup_budget_never_polls_backend() {
+    let enabled = Sampling::builder()
         .scope("runtime-budget")
         .exact_target(1)
         .startup_timeout(Duration::ZERO)
         .if_failed(StartupFailure::disabled())
         .build()
-        .prepare(async {
+        .with_backend(async {
             panic!("an exhausted budget must not poll the factory");
             #[allow(unreachable_code)]
             Ok(MemoryStore::new())
         })
-        .await;
-    assert!(!sampler.enabled());
-    sampler.shutdown(Duration::ZERO).await;
+        .start_application(|SamplingStatus { enabled, .. }| enabled);
+    assert!(!enabled);
 }

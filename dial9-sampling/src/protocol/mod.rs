@@ -5,13 +5,12 @@
 mod engine;
 #[cfg(all(test, not(shuttle)))]
 mod lifecycle_tests;
-#[cfg(any(test, feature = "simulation"))]
-pub mod simulation;
-pub(crate) mod store;
+#[cfg(test)]
+pub(crate) mod simulation;
+use crate::backend::SamplingStore;
 pub use engine::{
     DecisionReason, PreparedSampling, SamplingSession, SamplingSnapshot, startup_draw,
 };
-pub use store::*;
 
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
@@ -180,8 +179,7 @@ impl Config {
             serde_json::to_vec(&(&self.scope, dimensions)).expect("string tuple serializes");
         format!("v1/pools/{:x}/", Sha256::digest(canonical))
     }
-    /// Runs on the caller's executor; the recorder integration supplies its
-    /// long-lived I/O runtime. Preparation starts no profilers.
+    /// Prepares a test startup choice on the caller's executor without starting profilers.
     #[cfg(all(test, not(shuttle)))]
     pub async fn prepare(&self, store: Arc<dyn SamplingStore>) -> PreparedSampling {
         self.prepare_with_timeout(store, DEFAULT_PREPARE_TIMEOUT)

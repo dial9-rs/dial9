@@ -1,145 +1,169 @@
 # Startup sampling
 
-`dial9-sampling` makes a stable startup profiling choice through pluggable object
-storage. It owns coordination independently of the recorder. Use the recorder's
-generic `attach_object` hook to retain the session through recording shutdown.
-The native S3 adapter is enabled by the `s3` feature; custom stores implement
-`dial9_sampling::backend::SamplingStore`. In-memory simulation storage is opt-in.
+`dial9-sampling` makes one stable startup profiling choice through pluggable
+object storage. It prepares sampling on its own runtime, runs your application
+outside that runtime's entered context, then attempts lease cleanup. The same
+sampling runtime stays alive throughout the application.
+
+Enable the `s3` and `dial9` features for S3 coordination and automatic recorder
+registration. Without `dial9`, the sampler has no production recorder dependency.
 
 ```rust,ignore
-use dial9_sampling::{Sampling, StartupFailure, s3::S3SamplingStore};
+use dial9::{Dial9HandleTokioExt, MemoryBuffer, RecorderS3ClientExt, TokioAttachOptions};
+use dial9_sampling::{Sampling, SamplingStatus, StartupFailure, s3::S3SamplingStore};
 use std::time::Duration;
 
-let sampling = Sampling::builder()
-    .scope("checkout/production")
-    .add_dimension("instance-type", instance_type)
-    .add_dimension("az", az)
-    .exact_target(15)
-    .startup_timeout(Duration::from_secs(5))
-    .if_failed(StartupFailure::disabled())
-    .build();
-let sampler = sampling.prepare(async {
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    Ok(S3SamplingStore::builder()
-        .client(aws_sdk_s3::Client::new(&config))
-        .bucket(bucket)
-        .prefix("_dial9_sampling/checkout/")
-        .build())
-}).await;
-let recorder = if sampler.enabled() {
-    dial9::recorder(MemoryBuffer::new(16 * 1024 * 1024)?)
-        .with_s3_uploader_client_future(trace_config, async {
-            let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            aws_sdk_s3::Client::new(&config)
-        })
+fn main() -> std::io::Result<()> {
+    let bucket = "trace-bucket";
+    Sampling::builder()
+        .scope("checkout/production")
+        .add_dimension("instance-type", "m7i.large")
+        .add_dimension("az", "us-east-1a")
+        .exact_target(15)
+        .startup_timeout(Duration::from_secs(5))
+        .if_failed(StartupFailure::disabled())
         .build()
-} else {
-    dial9::recorder_disabled()
-}.attach_object(sampler);
-// Attach recorder hooks, then construct and run the application runtime.
-// Drop that runtime before draining the recorder.
-recorder.graceful_shutdown(Duration::from_secs(5));
+        .with_backend(async {
+            let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            Ok(S3SamplingStore::builder()
+                .client(aws_sdk_s3::Client::new(&config))
+                .bucket(bucket)
+                .build())
+        })
+        .start_application(|status| {
+            let SamplingStatus { enabled, .. } = status;
+            let recorder = if enabled {
+                let trace_config = dial9::s3::S3Config::builder()
+                    .bucket(bucket)
+                    .service_name("checkout")
+                    .prefix("dial9-traces")
+                    .build();
+                dial9::recorder(MemoryBuffer::new(16 * 1024 * 1024)?)
+                    .with_s3_uploader_client_future(trace_config, async {
+                        let config =
+                            aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+                        aws_sdk_s3::Client::new(&config)
+                    })
+                    .build()
+            } else {
+                dial9::recorder_disabled()
+            };
+            status.register_recorder(&recorder);
+            // Attach recorder hooks before constructing the application runtime.
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.enable_all();
+            let runtime = recorder
+                .handle()
+                .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+            dial9::block_on(&runtime, async {
+                dial9::spawn(async {
+                    // Run the application's async work here.
+                })
+                .await
+                .expect("application task");
+            });
+            drop(runtime);
+            recorder.graceful_shutdown(Duration::from_secs(5));
+            Ok(())
+        })
+}
 ```
 
-The sampler owns a private uninstrumented Tokio runtime with one worker. Its
-backend future is polled in that runtime's context, so SDK initialization,
-credential refresh and coordination tasks use the same executor. Construct
-runtime-dependent resources inside the supplied async block; externally created
-resources can still depend on their original executor. Trace upload uses the
-recorder's separate worker runtime and a second S3 client.
+Call this synchronous entry point from ordinary `main`, before entering Tokio.
+`with_backend` is lazy: it polls nothing and creates no runtime until
+`start_application` runs. Backend initialization and admission use one private,
+uninstrumented Tokio runtime with one worker. Construct executor-dependent
+resources inside the backend future so SDK initialization, credential refresh
+and coordination tasks all use that runtime. Trace upload uses the recorder's
+separate worker runtime and a second S3 client.
 
-`prepare` remains async and accepts borrowed, non-Send initialization futures.
-The bootstrap executor can disappear when preparation completes. Runtime setup,
-backend initialization and admission share the startup budget. Runtime creation
-and blocking code cannot be interrupted; the remaining cooperative budget is
-checked before admission. Label discovery and recorder/application runtime
-construction are outside this budget.
+Both the initialization future and application callback can borrow local values
+and need not be `Send` or `'static`. The callback's result is returned unchanged,
+including borrowed values and errors. See the [application entry-point
+example](../dial9/examples/manual_sampling.rs) for a complete integration.
 
-See [the plain main example](../dial9/examples/manual_sampling.rs) for local
-ownership, or [the macro example](../dial9/examples/sampling_smoke.rs) for
-`#[dial9::main(config_async = configure)]`. Both return the ordinary
-`(Recorder, Runtime)` pair. The generic configuration macro and recorder know
-nothing about sampling. No static guard, separate retained configuration runtime
-or explicit application shutdown callback is needed. `attach_object` accepts
-any `Send + Sync + 'static` value; no application lifecycle trait is required.
+The runner owns the live sampling session through callback return or unwinding.
+The application owns its usual runtime and recorder shutdown: drop the
+instrumented runtime and drain the recorder before returning, and keep those
+resources local so unwinding destroys them before sampling cleanup. Do not
+return live recording resources from the callback. Destructuring, dropping or
+returning `SamplingStatus` never retains or releases a lease. The status is
+`#[non_exhaustive]`, with a public `enabled` field; include `..` when destructuring
+so fields can be added later. Its initial choice is immutable.
 
-The application-facing API is `Sampling`, `StartupFailure`, and `SamplingSession`
-plus their generated builders. `prepare` returns the guard directly. The guard
-has `enabled()`, `stopped()`, and `shutdown(timeout)`; the initial choice is immutable.
-Detailed snapshots, population estimates, raw random draws, lease tuning and
-intermediate preparation types are private. Debug output and a tracing startup
-entry retain diagnostic reasons. Backend implementers still need the existing
-conditional-write, pagination and error types; placing those under `backend`
-organizes that public contract without claiming to eliminate it.
+Runtime setup, backend initialization and admission share the startup budget,
+which defaults to 1000ms. Runtime creation and blocking code cannot be interrupted;
+the remaining cooperative budget is checked before polling initialization and
+before admission. Label discovery and the application callback are outside that
+budget. Calling `start_application` from an entered Tokio runtime panics before
+initialization or the application callback runs.
 
-Default preparation is 500ms. Callers must explicitly choose `if_failed`; the
-recommended choice is disabled. Full pools, zero targets, invalid configuration
-and incompatible shared policies stay off. A fixed probability draws once on
-storage failure/timeout and can exceed the target. There is no later admission,
-rotation, or restart of stopped profiling.
+After the callback finishes, including errors and unwinding, cleanup attempts
+owner-checked release and membership withdrawal with a separate 500ms cooperative
+budget. The sampling executor is then shut down without waiting for arbitrary
+blocking tasks. Abrupt process exit, partitions and failed cleanup still rely on
+lease expiry. Failed writer/runtime construction follows the same cleanup path.
 
-A target applies independently to each complete scope/dimension tuple. The
-lease protocol is unchanged: five-minute leases, one-minute renewal, five-second
-clock-skew allowance, conditional ownership fencing, reconciliation of unknown
-writes, and sampled membership. Backend timestamps need the uncertainty declared
-by the trait. Mixed-target rollouts share slots and the largest target bounds
-coordinated ownership. Existing nondefault lease/skew policies cannot be configured
-through this smaller API; migrate those pools deliberately or retain advanced
-configuration before adopting this variant. Defaults favor profiling continuity after lease loss, so
-actual profilers can exceed the target.
+Callers must explicitly choose `if_failed`; the recommended choice is disabled.
+Full pools, zero targets, invalid configuration and incompatible shared policies
+stay off. A fixed probability draws once on storage failure/timeout and can exceed
+the target. There is no later admission, rotation, or restart of stopped profiling.
 
-Optional `.stop_on_lease_loss(true)` requires caller wiring. Create the owned
-stop future before moving the sampler into the recorder:
+A target applies independently to each complete scope/dimension tuple. The lease
+protocol uses five-minute leases, one-minute renewal, five-second clock-skew
+allowance, conditional ownership fencing, reconciliation of unknown writes, and
+sampled membership. Backend timestamps need the uncertainty declared by the
+trait. Mixed-target rollouts share slots and the largest target bounds coordinated
+ownership. Nondefault lease/skew policies require deliberate pool migration before
+adopting this smaller API. Default continuity after lease loss can leave actual
+profilers above the target.
+
+Optional `.stop_on_lease_loss(true)` disables registered recorders on lease loss
+or maintenance termination. Register the recorder after constructing it:
 
 ```rust,ignore
-let stopped = sampler.stopped(); // Owned future; does not borrow the guard.
-let handle = recorder.handle().clone();
-let recorder = recorder.attach_object(sampler);
-application_runtime.spawn(async move {
-    stopped.await;
-    handle.disable();
-});
+.start_application(|status| {
+    let SamplingStatus { enabled, .. } = status;
+    let (recorder, runtime) = configure_application(enabled)?;
+    status.register_recorder(&recorder);
+    // Run the application, drop its runtime and drain its recorder.
+})
 ```
 
-A strict stop is terminal for the sampler; it never asks to resume. Enforcement
-latency now depends on the caller's monitor and executor. Default continuity
-never issues a stop. Probability fallback has no confirmed lease and also never
-issues a stop. An initially disabled guard's stop future is immediately ready.
+A strict stop is terminal; the sampler never re-enables the recorder. The sampler
+owns the monitor on its private runtime, so the application does not spawn a task
+or observe a public stop future. Registration holds a weak recording reference.
+All registered recorders are disabled before lease cleanup at callback completion;
+normal recorder shutdown remains the application's responsibility. An initially
+disabled choice, or registration through a status from an ended invocation,
+disables recording immediately. Default continuity and enabled probability
+fallback keep recording until application completion. The application also owns
+its sampling metrics and `DIAL9_ENABLED` master switch.
 
-Stop actual profiling before releasing the guard. `attach_object(sampler)` keeps
-coordination alive through recording finalization and, on `graceful_shutdown`,
-through worker drain. Ordinary recorder drop requests worker shutdown before
-dropping attached values; it does not join that worker. The instrumented
-application runtime must still be dropped before the recorder finalizes, so its
-worker threads can flush their events.
+The native S3 adapter is enabled by the `s3` feature; custom stores implement
+`dial9_sampling::backend::SamplingStore`. In-memory simulation storage is private
+test support.
+Detailed population diagnostics, lease tuning and the maintenance session are
+private. The tracing startup entry preserves diagnostic reasons. Backend implementers
+retain the conditional-write, pagination and error contract.
 
-Sampler drop attempts owner-checked cleanup with a 500ms cooperative budget on
-its own runtime. Outside a Tokio context, drop waits for that attempt. Inside a
-Tokio context it schedules cleanup and returns without blocking; the private
-runtime stays alive until the attempt completes or times out. Explicit
-`sampler.shutdown(timeout).await` waits for the attempt in either context, and
-canceling that wait does not cancel cleanup. Sampler cleanup is separate from
-the recorder's worker drain timeout. Abrupt process exit, partitions and failed
-cleanup still rely on lease expiry. A raw attached Tokio runtime must have a safe
-destructor if its recorder can be dropped inside async code; the sampler handles
-this internally.
+The S3 prefix defaults to `_dial9_sampling/`; `.prefix(...)` overrides it verbatim.
+Existing pools keep their configured prefix. If a pool used the old empty default,
+set `.prefix("")` explicitly to keep using that pool. Changing the prefix creates
+a separate pool.
 
-Failed writer/runtime setup drops the sampler and triggers the same cleanup,
-including unwind paths. Automatic recorder sampling metrics and
-sampling-specific environment configuration helpers remain removed. The
-application owns metrics and its `DIAL9_ENABLED` master switch.
+Use the coordination prefix with existing days-based expiration. Live
+policy, leases and membership are refreshed; abandoned keys age out. Retention
+must comfortably exceed the fixed lease and refresh settings, so fourteen-day
+trace retention can also cover coordination. Lease deadlines determine slot reuse.
+Configure bucket lifecycle and IAM independently of the sampling client.
 
-Use a separate coordination prefix with existing days-based expiration. The
-protocol refreshes live policy, leases and membership; abandoned keys age out.
-Retention must comfortably exceed the fixed lease and refresh settings, so the
-previous fourteen-day trace retention can also cover coordination. Application
-lease deadlines still determine slot reuse. Configure bucket lifecycle and IAM
-independently of the sampling client.
-
-Protocol simulations, error regressions, timestamp-precision checks, estimator
-qualification, 100k fleets and Shuttle scenarios remain private unit tests. The
-shared admission tests use paused time for deadline composition, failure
-fallback and optional stops. Public API tests cover owned-executor teardown,
-async drop, canceled shutdown and initialization panic/cancellation; manual integration tests use two SDK clients against
-local S3 and decode an uploaded marker. Population estimates are internal
-diagnostics, not a public fleet-statistics API.
+Tests cover lazy initialization, caller and sampling runtime separation, borrowed
+non-Send factories/callbacks, public status destructuring, status-independent
+maintenance and cleanup on success/errors/unwinding. Paused-time admission tests
+cover deadline composition, fallback and automatic recorder stops after status
+drop. Shuttle checks one-shot stop callbacks and registration racing cleanup.
+Protocol simulations,
+S3 error/timestamp regressions, 100k fleet and estimator qualification, and Shuttle
+scenarios remain private unit tests. The integration regression uses separate SDK
+clients against local S3 and decodes an uploaded trace marker.

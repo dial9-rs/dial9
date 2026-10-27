@@ -216,6 +216,23 @@ impl Dial9Handle {
         }
     }
 
+    /// Returns a one-shot callback that disables recording if the state is still alive.
+    ///
+    /// The callback holds a weak reference, so an external stop listener does
+    /// not retain recorder buffers, sources or worker threads. A disabled handle
+    /// produces a no-op callback.
+    pub fn disable_callback(&self) -> impl FnOnce() + Send + 'static {
+        let shared = self
+            .inner
+            .as_ref()
+            .map(|inner| Arc::downgrade(&inner.shared));
+        move || {
+            if let Some(shared) = shared.and_then(|shared| shared.upgrade()) {
+                shared.disable();
+            }
+        }
+    }
+
     /// Profile the calling thread.
     ///
     /// Per-thread sources, such as the scheduler-event profiler, only sample
@@ -429,4 +446,30 @@ pub(crate) fn clear_global_handle_for(shared: &Arc<SharedState>) {
 /// process-global one. Equivalent to [`Dial9Handle::current`].
 pub fn current_handle() -> Dial9Handle {
     Dial9Handle::current()
+}
+
+#[cfg(all(test, not(shuttle)))]
+mod tests {
+    use super::*;
+    use crate::{buffer::MemoryBuffer, recorder::recorder};
+
+    #[test]
+    fn weak_disable_callback_controls_live_recording() {
+        let recorder = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
+        let disable = recorder.handle().disable_callback();
+        assert!(recorder.handle().is_enabled());
+        disable();
+        assert!(!recorder.handle().is_enabled());
+        Dial9Handle::disabled().disable_callback()();
+    }
+
+    #[test]
+    fn disable_callback_does_not_retain_recording_state() {
+        let recorder = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
+        let shared = Arc::downgrade(&recorder.handle().inner.as_ref().unwrap().shared);
+        let disable = recorder.handle().disable_callback();
+        drop(recorder);
+        assert!(shared.upgrade().is_none());
+        disable();
+    }
 }

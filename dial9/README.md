@@ -195,17 +195,18 @@ Missing variables use defaults. Blank, invalid, or non-Unicode values emit a war
 
 ## Startup sampling
 
-Use `dial9-sampling` to choose which processes profile at startup. Prepare a
-sampling session, branch on its choice before allocating a writer, and retain
-it with `recorder.attach_object(sampler)`. The session owns its coordination
-runtime and cleanup. Construct the instrumented application runtime after the
-choice is resolved, and drop that runtime before shutting down the recorder.
+Use `dial9-sampling` to choose which processes profile at startup:
+`sampling.with_backend(backend).start_application(|SamplingStatus { enabled, .. }| { ... })`.
+The runner owns preparation, lease maintenance and cleanup. Its callback runs
+outside Tokio's entered context, so it can branch before allocating a writer,
+construct the instrumented application runtime and run the application normally.
+With the sampler's `dial9` feature, call `status.register_recorder(&recorder)` for
+automatic stop handling on the sampler runtime.
+Drop that runtime and drain the recorder before returning from the callback.
 
-See the [standalone guide](../dial9-sampling/README.md), the
-[plain main example](examples/manual_sampling.rs), and the
-[generic async macro example](examples/sampling_smoke.rs). Selected processes
-use separate S3 clients for coordination and trace upload. The generic
-`#[dial9::main(config_async = configure)]` callback supports this setup.
+See the [standalone guide](../dial9-sampling/README.md) and the
+[application entry-point example](examples/manual_sampling.rs). Selected processes
+use separate S3 clients for coordination and trace upload.
 
 ## Why dial9?
 

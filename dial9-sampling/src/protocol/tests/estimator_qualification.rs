@@ -1,4 +1,5 @@
 #![cfg(not(shuttle))]
+use crate::backend::{PutRequest, SamplingStore};
 use crate::protocol::{simulation::MemoryStore, *};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
