@@ -35,20 +35,13 @@ impl Sampling {
         let policy = self.policy();
         let prepared = match self.preflight(&policy) {
             Some(prepared) => prepared,
-            None => {
-                Self::admit(
-                    &policy,
-                    backend,
-                    self.startup_timeout,
-                    protocol::startup_draw(),
-                )
-                .await
-            }
+            None => Self::admit(&policy, backend, self.startup_timeout).await,
         };
-        let initial = prepared.snapshot();
+        let enabled = prepared.enabled;
+        let reason = prepared.reason.clone();
         let maintenance = prepared.into_session();
         #[allow(unused_mut)]
-        let mut status = self.status(initial, maintenance.as_ref());
+        let mut status = self.status(enabled, &reason, maintenance.as_ref());
         #[cfg(feature = "dial9")]
         let registration = {
             let registration = Arc::new(registration::RecorderRegistrations::new(Some(
@@ -106,28 +99,41 @@ async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_i
 }
 
 #[rstest::rstest]
-#[case(0.0, false)]
-#[case(1.0, true)]
+#[case(None, 2000, 0, StartupFailure::disabled(), false)]
+#[case(Some(500), 5000, 0, StartupFailure::disabled(), false)]
+#[case(Some(500), 5000, 0, StartupFailure::assume_population(1), true)]
+#[case(Some(500), 400, 150, StartupFailure::disabled(), false)]
 #[tokio::test(start_paused = true)]
-async fn deadline_includes_backend_initialization_and_never_revisits_fallback(
-    #[case] probability: f64,
+async fn startup_budget_covers_initialization_and_get_without_revisiting_fallback(
+    #[case] timeout_ms: Option<u64>,
+    #[case] initialization_ms: u64,
+    #[case] storage_ms: u64,
+    #[case] fallback: StartupFailure,
     #[case] expected: bool,
 ) {
-    let policy = Sampling::builder()
+    let store = Arc::new(MemoryStore::new());
+    store.set_latency(Duration::from_millis(storage_ms));
+    let mut sampling = Sampling::builder()
         .scope("timeout")
-        .exact_target(1)
-        .startup_timeout(Duration::from_millis(500))
-        .if_failed(StartupFailure::enable_with_fixed_probability(probability))
+        .target(1)
+        .if_failed(fallback)
         .build();
+    if let Some(timeout) = timeout_ms {
+        sampling.startup_timeout = Duration::from_millis(timeout);
+    }
     let before = tokio::time::Instant::now();
-    let session = policy
+    let session = sampling
         .prepare_on_executor(async {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            Ok(MemoryStore::new())
+            tokio::time::sleep(Duration::from_millis(initialization_ms)).await;
+            Ok(store.clone())
         })
         .await;
-    assert_eq!(before.elapsed(), Duration::from_millis(500));
+    assert_eq!(
+        before.elapsed(),
+        Duration::from_millis(timeout_ms.unwrap_or(1000))
+    );
     assert_eq!(session.enabled(), expected);
+    store.set_latency(Duration::ZERO);
     tokio::time::advance(Duration::from_secs(600)).await;
     assert_eq!(session.enabled(), expected);
     if expected {
@@ -137,54 +143,7 @@ async fn deadline_includes_backend_initialization_and_never_revisits_fallback(
                 .is_err()
         );
     }
-    session.shutdown(Duration::ZERO).await;
-}
-
-#[rstest::rstest]
-#[case(0.0, false)]
-#[case(1.0, true)]
-#[tokio::test(start_paused = true)]
-async fn backend_construction_error_uses_explicit_failure_choice(
-    #[case] probability: f64,
-    #[case] expected: bool,
-) {
-    let session = Sampling::builder()
-        .scope("constructor-failure")
-        .exact_target(1)
-        .if_failed(StartupFailure::enable_with_fixed_probability(probability))
-        .build()
-        .prepare_on_executor(async {
-            Err::<MemoryStore, _>(io::Error::other("credentials unavailable"))
-        })
-        .await;
-    assert_eq!(session.enabled(), expected);
-    session.shutdown(Duration::ZERO).await;
-}
-
-#[rstest::rstest]
-#[case("valid", 0, Duration::from_millis(500))]
-#[case("", 1, Duration::from_millis(500))]
-#[case("valid", 1, Duration::MAX)]
-#[tokio::test(start_paused = true)]
-async fn disabled_or_invalid_configuration_never_polls_backend(
-    #[case] scope: &str,
-    #[case] target: u32,
-    #[case] timeout: Duration,
-) {
-    let session = Sampling::builder()
-        .scope(scope)
-        .exact_target(target)
-        .startup_timeout(timeout)
-        .if_failed(StartupFailure::enable_with_fixed_probability(1.0))
-        .build()
-        .prepare_on_executor(async {
-            panic!("backend must not be polled");
-            #[allow(unreachable_code)]
-            Ok(MemoryStore::new())
-        })
-        .await;
-    assert!(!session.enabled());
-    session.shutdown(Duration::ZERO).await;
+    session.shutdown(Duration::from_secs(1)).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -336,41 +295,13 @@ async fn roster_trim_disables_registered_recorders_without_application_tasks() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn backend_initialization_and_storage_share_one_deadline() {
-    let store = Arc::new(MemoryStore::new());
-    store.set_latency(Duration::from_millis(150));
-    let policy = Sampling::builder()
-        .scope("shared-deadline")
-        .exact_target(1)
-        .startup_timeout(Duration::from_millis(500))
-        .if_failed(StartupFailure::disabled())
-        .build();
-    let before = tokio::time::Instant::now();
-    let session = policy
-        .prepare_on_executor(async {
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            Ok(store.clone())
-        })
-        .await;
-    assert_eq!(before.elapsed(), Duration::from_millis(500));
-    assert!(!session.enabled());
-    store.set_latency(Duration::ZERO);
-    session.shutdown(Duration::from_secs(1)).await;
-    let mut retry_policy = policy;
-    retry_policy.if_failed = StartupFailure::assume_population(1);
-    let next = retry_policy.prepare_on_executor(async { Ok(store) }).await;
-    assert!(next.enabled());
-    next.shutdown(Duration::from_secs(1)).await;
-}
-
-#[tokio::test(start_paused = true)]
 async fn storage_failure_fallback_participates_without_enabling_again() {
     let store = Arc::new(MemoryStore::new());
     store.set_unavailable(true);
     let session = Sampling::builder()
         .scope("fallback-stop")
-        .exact_target(1)
-        .if_failed(StartupFailure::enable_with_fixed_probability(1.0))
+        .target(1)
+        .if_failed(StartupFailure::assume_population(1))
         .build()
         .prepare_on_executor(async { Ok(store.clone()) })
         .await;
@@ -386,17 +317,17 @@ async fn storage_failure_fallback_participates_without_enabling_again() {
 }
 
 #[rstest::rstest]
-#[case(0.0, false)]
-#[case(1.0, true)]
+#[case(StartupFailure::disabled(), false)]
+#[case(StartupFailure::assume_population(1), true)]
 #[test]
 fn runtime_creation_failure_uses_required_failure_policy(
-    #[case] probability: f64,
+    #[case] fallback: StartupFailure,
     #[case] expected: bool,
 ) {
     let enabled = Sampling::builder()
         .scope("runtime-error")
-        .exact_target(1)
-        .if_failed(StartupFailure::enable_with_fixed_probability(probability))
+        .target(1)
+        .if_failed(fallback)
         .build()
         .with_backend(async {
             panic!("factory must not run if runtime creation fails");
@@ -414,7 +345,7 @@ fn runtime_creation_failure_uses_required_failure_policy(
 fn exhausted_startup_budget_never_polls_backend() {
     let enabled = Sampling::builder()
         .scope("runtime-budget")
-        .exact_target(1)
+        .target(1)
         .startup_timeout(Duration::ZERO)
         .if_failed(StartupFailure::disabled())
         .build()
@@ -428,21 +359,25 @@ fn exhausted_startup_budget_never_polls_backend() {
 }
 
 #[rstest::rstest]
-#[case(0, 0)]
-#[case(1, u64::MAX)]
+#[case("valid", 0, 0, Duration::from_millis(1000))]
+#[case("valid", 1, u64::MAX, Duration::from_millis(1000))]
+#[case("", 1, 0, Duration::from_millis(1000))]
+#[case("valid", 1, 0, Duration::MAX)]
 #[test]
-fn zero_or_untracked_startup_builds_no_runtime_and_polls_no_backend(
+fn zero_untracked_or_invalid_startup_builds_no_runtime_and_polls_no_backend(
+    #[case] scope: &str,
     #[case] target: u32,
     #[case] minimum_population: u64,
+    #[case] timeout: Duration,
 ) {
     let sampling = Sampling::builder()
-        .scope("preflight")
+        .scope(scope)
         .host_id("untracked-process")
         .target(target)
         .minimum_population(minimum_population)
+        .startup_timeout(timeout)
         .if_failed(StartupFailure::assume_population(1))
         .build();
-    assert!(target == 0 || !sampling.policy().tracked());
     let enabled = sampling
         .with_backend(async {
             panic!("preflight must not initialize the backend");
@@ -454,37 +389,4 @@ fn zero_or_untracked_startup_builds_no_runtime_and_polls_no_backend(
             || panic!("preflight must not construct the runtime"),
         );
     assert!(!enabled);
-}
-
-#[tokio::test(start_paused = true)]
-async fn default_startup_budget_is_one_second() {
-    let before = tokio::time::Instant::now();
-    let session = Sampling::builder()
-        .scope("default-budget")
-        .target(1)
-        .if_failed(StartupFailure::disabled())
-        .build()
-        .prepare_on_executor(async {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            Ok(MemoryStore::new())
-        })
-        .await;
-    assert_eq!(before.elapsed(), Duration::from_millis(1000));
-    assert!(!session.enabled());
-    session.shutdown(Duration::ZERO).await;
-}
-
-#[test]
-fn target_and_compatibility_setter_match() {
-    let preferred = Sampling::builder()
-        .scope("setter")
-        .target(15)
-        .if_failed(StartupFailure::disabled())
-        .build();
-    let compatibility = Sampling::builder()
-        .scope("setter")
-        .exact_target(15)
-        .if_failed(StartupFailure::disabled())
-        .build();
-    assert_eq!(preferred.exact_target, compatibility.exact_target);
 }

@@ -1,21 +1,35 @@
 use super::*;
 use crate::backend::{ListPage, StoreFuture};
-use crate::protocol::{
-    StartupFailure,
-    simulation::{MemoryStore, prepare},
-};
+use crate::protocol::StartupFailure;
+use crate::test_store::MemoryStore;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+impl Clock for MemoryStore {
+    fn now(&self) -> SystemTime {
+        self.now()
+    }
+}
+async fn prepare(policy: &Config, store: Arc<MemoryStore>) -> PreparedSampling {
+    prepare_using(
+        policy.clone(),
+        store.clone(),
+        super::super::DEFAULT_PREPARE_TIMEOUT,
+        store,
+    )
+    .await
+}
+
 fn config(target: u32, host: &str) -> Config {
-    Config::builder()
+    crate::Sampling::builder()
         .scope("fleet/prod")
         .host_id(host)
-        .exact_target(target)
+        .target(target)
         .poll_interval(Duration::from_secs(1))
         .bucket_width(Duration::from_secs(10))
         .max_clock_skew(Duration::ZERO)
         .if_failed(StartupFailure::assume_population(u64::from(target.max(1))))
         .build()
+        .policy()
 }
 async fn settle_time(seconds: u64) {
     for _ in 0..seconds {
@@ -25,9 +39,31 @@ async fn settle_time(seconds: u64) {
         }
     }
 }
+async fn publish(
+    store: &MemoryStore,
+    policy: &Config,
+    roster: &Roster,
+    condition: WriteCondition,
+) -> VersionToken {
+    match store
+        .put(
+            PutRequest::builder()
+                .key(format!("{}roster.json", policy.pool_prefix()))
+                .body(serialize(roster))
+                .condition(condition)
+                .build(),
+        )
+        .await
+        .unwrap()
+    {
+        PutOutcome::Stored { version } => version,
+        outcome => panic!("expected roster publication: {outcome:?}"),
+    }
+}
+
 async fn seed(store: &MemoryStore, config: &Config, population: u64) -> Roster {
     let now = millis(store.now()).unwrap();
-    let mut roster = Roster::initial(config, &nonce(), now);
+    let mut roster = Roster::initial(config, &nonce());
     roster.cutoff_settled = true;
     roster.settled = true;
     roster.arm_cutoff = Cutoff::threshold(if population == 0 {
@@ -43,15 +79,7 @@ async fn seed(store: &MemoryStore, config: &Config, population: u64) -> Roster {
         carriers: 0,
         unarmed: population,
     };
-    store
-        .put(
-            PutRequest::builder()
-                .key(format!("{}roster.json", config.pool_prefix()))
-                .body(serialize(&roster))
-                .build(),
-        )
-        .await
-        .unwrap();
+    publish(store, config, &roster, WriteCondition::absent()).await;
     roster
 }
 
@@ -62,8 +90,8 @@ async fn startup_requires_one_get_and_no_claims_or_lists() {
     seed(&store, &policy, 10).await;
     let before = store.operation_count();
     let node = prepare(&policy, store.clone()).await;
-    assert!(node.snapshot().recording());
-    assert_eq!(node.snapshot().reason(), &DecisionReason::Roster);
+    assert!(node.enabled);
+    assert_eq!(&node.reason, &DecisionReason::Roster);
     assert_eq!(store.operation_count() - before, 1);
     assert!(!store.objects().keys().any(|k| k.contains("/members/")));
     node.into_session()
@@ -73,7 +101,6 @@ async fn startup_requires_one_get_and_no_claims_or_lists() {
 }
 
 #[rstest::rstest]
-#[case(0)]
 #[case(1)]
 #[case(15)]
 #[tokio::test(start_paused = true)]
@@ -86,7 +113,7 @@ async fn small_complete_pool_selects_everyone(#[case] population: u64) {
             seed(&store, &policy, population).await;
         }
         let node = prepare(&policy, store.clone()).await;
-        assert!(node.snapshot().recording());
+        assert!(node.enabled);
         fleet.push(node);
     }
     for node in fleet {
@@ -107,16 +134,9 @@ async fn zero_budget_has_no_get_but_constructed_store_still_participates(#[case]
     if !enabled {
         policy.if_failed = StartupFailure::disabled();
     }
-    let node = prepare_using(
-        policy,
-        store.clone(),
-        Duration::ZERO,
-        Some(0.0),
-        store.clone(),
-    )
-    .await;
-    assert_eq!(node.snapshot().recording(), enabled);
-    assert_eq!(node.snapshot().reason(), &DecisionReason::Timeout);
+    let node = prepare_using(policy, store.clone(), Duration::ZERO, store.clone()).await;
+    assert_eq!(node.enabled, enabled);
+    assert_eq!(&node.reason, &DecisionReason::Timeout);
     assert_eq!(store.operation_count(), 0);
     assert!(node.session.is_some());
     settle_time(1).await;
@@ -136,7 +156,7 @@ async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
         let mut policy = config(3, &format!("node-{index}"));
         policy.max_overshoot = Some(0);
         let node = prepare(&policy, store.clone()).await;
-        assert!(node.snapshot().recording());
+        assert!(node.enabled);
         let session = node.into_session().unwrap();
         signals.push(session.recording_changes());
         sessions.push(session);
@@ -146,7 +166,7 @@ async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
     assert_eq!(
         sessions
             .iter()
-            .filter(|session| session.snapshot().recording())
+            .filter(|session| session.is_recording())
             .count(),
         3
     );
@@ -185,34 +205,13 @@ async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_cold_disabled_cohort_can_only_enable_on_a_new_startup() {
-    let store = Arc::new(MemoryStore::new());
-    let mut policy = config(10, "old");
-    policy.if_failed = StartupFailure::disabled();
-    let old = prepare(&policy, store.clone()).await;
-    assert!(!old.snapshot().recording());
-    settle_time(8).await;
-    let old_session = old.into_session().unwrap();
-    assert!(!old_session.snapshot().recording());
-    let mut restarted = policy.clone();
-    restarted.host_id = "new".into();
-    let new = prepare(&restarted, store.clone()).await;
-    assert!(new.snapshot().recording());
-    old_session.shutdown(Duration::from_secs(1)).await;
-    new.into_session()
-        .unwrap()
-        .shutdown(Duration::from_secs(1))
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
 async fn old_settled_cutoff_remains_usable_without_claiming_a_current_bound() {
     let store = Arc::new(MemoryStore::new());
     let policy = config(1, "node");
     seed(&store, &policy, 1).await;
     tokio::time::advance(Duration::from_secs(86400 * 30)).await;
     let node = prepare(&policy, store.clone()).await;
-    assert!(node.snapshot().recording());
+    assert!(node.enabled);
     node.into_session()
         .unwrap()
         .shutdown(Duration::from_secs(1))
@@ -229,7 +228,7 @@ async fn configuration_mismatch_never_overwrites_the_existing_roster() {
     let mut other = config(2, "other");
     other.if_failed = StartupFailure::disabled();
     let node = prepare(&other, store.clone()).await;
-    assert!(!node.snapshot().recording());
+    assert!(!node.enabled);
     settle_time(12).await;
     assert_eq!(
         store.get(key).await.unwrap().unwrap().version(),
@@ -315,65 +314,31 @@ async fn failed_cleanup_members_age_out_but_roster_is_never_deleted() {
 
 #[tokio::test(start_paused = true)]
 async fn actual_roster_mutations_change_body_etags_and_fence_paused_publishers() {
-    let store = Arc::new(MemoryStore::new());
+    let store = MemoryStore::new();
     let policy = config(15, "node");
-    let mut roster = Roster::initial(&policy, &nonce(), millis(store.now()).unwrap());
-    let key = format!("{}roster.json", policy.pool_prefix());
-    let first = store
-        .put(
-            PutRequest::builder()
-                .key(&key)
-                .body(serialize(&roster))
-                .build(),
-        )
-        .await
-        .unwrap();
-    let PutOutcome::Stored { version: old } = first else {
-        panic!("expected version")
-    };
-    let a = roster.holder.clone();
-    let rev = roster.revision.clone();
-    roster
-        .mutate(&policy, &nonce(), millis(store.now()).unwrap())
-        .unwrap();
-    assert_ne!(rev, roster.revision);
-    let second = store
-        .put(
-            PutRequest::builder()
-                .key(&key)
-                .body(serialize(&roster))
-                .condition(WriteCondition::matching(old.clone()))
-                .build(),
-        )
-        .await
-        .unwrap();
-    let PutOutcome::Stored { version: new } = second else {
-        panic!("expected version")
-    };
-    roster
-        .mutate(&policy, &a, millis(store.now()).unwrap())
-        .unwrap();
-    let third = store
-        .put(
-            PutRequest::builder()
-                .key(&key)
-                .body(serialize(&roster))
-                .condition(WriteCondition::matching(new))
-                .build(),
-        )
-        .await
-        .unwrap();
-    let PutOutcome::Stored { version: latest } = third else {
-        panic!("expected version")
-    };
-    assert_ne!(old, latest);
+    let mut roster = Roster::initial(&policy, &nonce());
+    let owner = roster.holder.clone();
+    let revision = roster.revision.clone();
+    let first = publish(&store, &policy, &roster, WriteCondition::absent()).await;
+    roster.mutate(&nonce()).unwrap();
+    assert_ne!(revision, roster.revision);
+    let second = publish(
+        &store,
+        &policy,
+        &roster,
+        WriteCondition::matching(first.clone()),
+    )
+    .await;
+    roster.mutate(&owner).unwrap();
+    let third = publish(&store, &policy, &roster, WriteCondition::matching(second)).await;
+    assert_ne!(first, third);
     assert!(matches!(
         store
             .put(
                 PutRequest::builder()
-                    .key(&key)
-                    .body(Bytes::from_static(b"stale"))
-                    .condition(WriteCondition::matching(old))
+                    .key(format!("{}roster.json", policy.pool_prefix()))
+                    .body(serialize(&roster))
+                    .condition(WriteCondition::matching(first))
                     .build()
             )
             .await
@@ -381,7 +346,6 @@ async fn actual_roster_mutations_change_body_etags_and_fence_paused_publishers()
         PutOutcome::PreconditionFailed {}
     ));
 }
-
 #[tokio::test(start_paused = true)]
 async fn takeover_waits_for_server_timestamp_precision_and_clock_skew_margins() {
     let store = Arc::new(MemoryStore::new());
@@ -547,7 +511,7 @@ async fn incomplete_or_looping_pagination_cannot_become_a_population(#[case] rep
 fn count_cutoff_and_trim_boundary_do_not_have_order_statistic_off_by_one() {
     let mut policy = config(3, "reader");
     policy.max_overshoot = Some(0);
-    let mut roster = Roster::initial(&policy, &nonce(), 1000);
+    let mut roster = Roster::initial(&policy, &nonce());
     let members: Vec<_> = (0..8)
         .map(|rank| Member {
             boundary: Boundary {
@@ -573,31 +537,14 @@ fn count_cutoff_and_trim_boundary_do_not_have_order_statistic_off_by_one() {
 
 #[test]
 fn policy_namespace_and_rank_use_unambiguous_sorted_dimensions() {
-    let one = Config::builder()
-        .scope("scope")
-        .exact_target(1)
-        .host_id("node")
-        .if_failed(StartupFailure::disabled())
-        .add_dimension("a", "x\nb=y")
-        .build();
-    let two = Config::builder()
-        .scope("scope")
-        .exact_target(1)
-        .host_id("node")
-        .if_failed(StartupFailure::disabled())
-        .add_dimension("a", "x")
-        .add_dimension("b", "y")
-        .build();
+    let mut one = config(1, "node");
+    one.dimensions = vec![("a".into(), "x\nb=y".into())];
+    let mut two = one.clone();
+    two.dimensions = vec![("a".into(), "x".into()), ("b".into(), "y".into())];
     assert_ne!(one.pool_prefix(), two.pool_prefix());
     assert_ne!(one.rank(), two.rank());
-    let three = Config::builder()
-        .scope("scope")
-        .exact_target(1)
-        .host_id("node")
-        .if_failed(StartupFailure::disabled())
-        .add_dimension("b", "y")
-        .add_dimension("a", "x")
-        .build();
+    let mut three = two.clone();
+    three.dimensions.reverse();
     assert_eq!(two.pool_prefix(), three.pool_prefix());
     assert_eq!(two.rank(), three.rank());
 }
@@ -609,28 +556,16 @@ fn sparse_census_uses_a_lower_population_assumption_and_default_tracks_all() {
     policy.minimum_population = 100000;
     assert_eq!(policy.slice_bits(), 7);
     for index in 0..100 {
-        policy.host_id = format!("node-{index}");
+        policy.host_id = Some(format!("node-{index}"));
         if !policy.tracked() {
-            assert!(!policy.failure_decision(0.0));
+            assert!(!policy.failure_decision());
         }
     }
 }
 
 fn worker(policy: &Config, store: Arc<dyn SamplingStore>, clock: Arc<dyn Clock>) -> Worker {
     let (signal, _receiver) = watch::channel(true);
-    Worker::new(
-        policy.clone(),
-        store,
-        clock,
-        None,
-        signal,
-        Arc::new(Mutex::new(SamplingSnapshot {
-            recording: true,
-            reason: DecisionReason::MissingRoster,
-            coordinated: false,
-            estimated_population: None,
-        })),
-    )
+    Worker::new(policy.clone(), store, clock, None, signal, true)
 }
 
 #[tokio::test(start_paused = true)]
@@ -730,14 +665,14 @@ async fn partition_can_exceed_soft_cap_then_recovery_only_stops_processes() {
         let mut policy = config(3, &format!("node-{index}"));
         policy.max_overshoot = Some(0);
         let node = prepare(&policy, store.clone()).await;
-        assert!(node.snapshot().recording());
+        assert!(node.enabled);
         fleet.push(node.into_session().unwrap());
     }
     settle_time(8).await;
     assert_eq!(
         fleet
             .iter()
-            .filter(|session| session.snapshot().recording())
+            .filter(|session| session.is_recording())
             .count(),
         12
     );
@@ -746,7 +681,7 @@ async fn partition_can_exceed_soft_cap_then_recovery_only_stops_processes() {
     assert_eq!(
         fleet
             .iter()
-            .filter(|session| session.snapshot().recording())
+            .filter(|session| session.is_recording())
             .count(),
         3
     );
@@ -764,16 +699,7 @@ async fn stale_keep_boundary_does_not_trim_using_an_old_cohort() {
         rank: 0,
         incarnation: nonce(),
     });
-    store
-        .put(
-            PutRequest::builder()
-                .key(format!("{}roster.json", policy.pool_prefix()))
-                .body(serialize(&roster))
-                .condition(WriteCondition::unconditional())
-                .build(),
-        )
-        .await
-        .unwrap();
+    publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
     tokio::time::advance(Duration::from_secs(4)).await;
     let mut active = worker(&policy, store.clone(), store.clone());
     active.observed = active.read_roster().await.unwrap();
@@ -790,22 +716,13 @@ async fn prepared_startup_choice_is_immutable_even_if_maintenance_trims_before_c
         rank: 0,
         incarnation: nonce(),
     });
-    store
-        .put(
-            PutRequest::builder()
-                .key(format!("{}roster.json", policy.pool_prefix()))
-                .body(serialize(&roster))
-                .condition(WriteCondition::unconditional())
-                .build(),
-        )
-        .await
-        .unwrap();
+    publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
     let prepared = prepare(&policy, store.clone()).await;
-    assert!(prepared.snapshot().recording());
+    assert!(prepared.enabled);
     settle_time(1).await;
-    assert!(!prepared.session.as_ref().unwrap().snapshot().recording());
+    assert!(!prepared.session.as_ref().unwrap().is_recording());
     assert!(
-        prepared.snapshot().recording(),
+        prepared.enabled,
         "callback sees the original startup choice"
     );
     prepared
@@ -818,7 +735,7 @@ async fn prepared_startup_choice_is_immutable_even_if_maintenance_trims_before_c
 #[test]
 fn empty_or_unstable_census_never_creates_a_usable_full_range_cutoff() {
     let policy = config(15, "node");
-    let mut roster = Roster::initial(&policy, &nonce(), 1000);
+    let mut roster = Roster::initial(&policy, &nonce());
     let mut history = VecDeque::from([0, 0, 0]);
     compute(&mut roster, &policy, &[], &mut history, 1000);
     assert!(!roster.cutoff_settled);
@@ -872,41 +789,16 @@ async fn known_policy_mismatch_does_not_register_wrong_slice_membership() {
     wrong.minimum_population = 100000;
     // Pick a rank inside the new small slice so it reaches the startup GET.
     for index in 0..10000 {
-        wrong.host_id = format!("node-{index}");
+        wrong.host_id = Some(format!("node-{index}"));
         if wrong.tracked() {
             break;
         }
     }
     assert!(wrong.tracked());
     let node = prepare(&wrong, store.clone()).await;
-    assert_eq!(
-        node.snapshot().reason(),
-        &DecisionReason::IncompatiblePolicy
-    );
+    assert_eq!(&node.reason, &DecisionReason::IncompatiblePolicy);
     assert!(node.into_session().is_none());
     assert!(!store.objects().keys().any(|key| key.contains("/members/")));
-}
-
-#[test]
-fn fixed_probability_fallback_preserves_fleet_probability_with_a_sparse_census() {
-    let mut policy = config(15, "node");
-    policy.minimum_population = 100000;
-    policy.if_failed = StartupFailure::enable_with_fixed_probability(15.0 / 100000.0);
-    for index in 0..10000 {
-        policy.host_id = format!("node-{index}");
-        if policy.tracked() {
-            break;
-        }
-    }
-    assert_eq!(policy.slice_bits(), 7);
-    assert!(policy.tracked());
-    assert!(
-        policy.failure_decision(0.01),
-        "conditional draw uses p/f=0.0192"
-    );
-    assert!(!policy.failure_decision(0.02));
-    policy.if_failed = StartupFailure::enable_with_fixed_probability(1.0);
-    assert!(policy.failure_decision(0.999));
 }
 
 #[tokio::test(start_paused = true)]

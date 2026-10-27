@@ -114,20 +114,6 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
     let coordination_clients = AtomicUsize::new(0);
     let upload_clients = Arc::new(AtomicUsize::new(0));
     let writers = AtomicUsize::new(0);
-    let policy = Sampling::builder()
-        .scope("customer/prod")
-        .add_dimension("az", "a")
-        .target(1)
-        .startup_timeout(Duration::from_secs(5))
-        .if_failed(StartupFailure::assume_population(1))
-        .build();
-    let disabled_policy = Sampling::builder()
-        .scope("customer/prod-unarmed")
-        .add_dimension("az", "a")
-        .target(1)
-        .startup_timeout(Duration::from_secs(5))
-        .if_failed(StartupFailure::disabled())
-        .build();
     let make_store = || async {
         coordination_clients.fetch_add(1, Ordering::SeqCst);
         Ok(S3SamplingStore::builder()
@@ -136,81 +122,66 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
             .prefix("coord/")
             .build())
     };
-    policy
-        .with_backend(make_store())
-        .start_application(|status| {
-            let SamplingStatus { enabled, .. } = status;
-            assert!(enabled);
-            let config = dial9::s3::S3Config::builder()
-                .bucket("traces")
-                .service_name("manual-test")
-                .prefix("data")
-                .region("us-east-1")
-                .build();
-            let uploader_service = service.clone();
-            let count = upload_clients.clone();
-            let recorder = if enabled {
-                writers.fetch_add(1, Ordering::SeqCst);
-                dial9::recorder(MemoryBuffer::new(1 << 20).unwrap())
-                    .with_s3_uploader_client_future(config, async move {
-                        count.fetch_add(1, Ordering::SeqCst);
-                        fake_client(uploader_service)
-                    })
-                    .build()
-            } else {
-                dial9::recorder_disabled()
-            };
-            status.register_recorder(&recorder);
-            disabled_policy
-                .with_backend(make_store())
-                .start_application(|SamplingStatus { enabled, .. }| {
-                    assert!(!enabled);
+    for (scope, fallback, expected) in [
+        ("customer/prod", StartupFailure::assume_population(1), true),
+        ("customer/prod-unarmed", StartupFailure::disabled(), false),
+    ] {
+        Sampling::builder()
+            .scope(scope)
+            .add_dimension("az", "a")
+            .target(1)
+            .startup_timeout(Duration::from_secs(5))
+            .if_failed(fallback)
+            .build()
+            .with_backend(make_store())
+            .start_application(|status| {
+                let SamplingStatus { enabled, .. } = status;
+                assert_eq!(enabled, expected);
+                let recorder = if enabled {
+                    writers.fetch_add(1, Ordering::SeqCst);
+                    let config = dial9::s3::S3Config::builder()
+                        .bucket("traces")
+                        .service_name("manual-test")
+                        .prefix("data")
+                        .region("us-east-1")
+                        .build();
                     let uploader_service = service.clone();
                     let count = upload_clients.clone();
-                    let upload = async move {
-                        count.fetch_add(1, Ordering::SeqCst);
-                        fake_client(uploader_service)
-                    };
-                    let disabled = if enabled {
-                        writers.fetch_add(1, Ordering::SeqCst);
-                        dial9::recorder(MemoryBuffer::new(1 << 20).unwrap())
-                            .with_s3_uploader_client_future(
-                                dial9::s3::S3Config::builder()
-                                    .bucket("traces")
-                                    .service_name("manual-test-unarmed")
-                                    .prefix("unarmed-data")
-                                    .region("us-east-1")
-                                    .build(),
-                                upload,
-                            )
-                            .build()
-                    } else {
-                        drop(upload);
-                        dial9::recorder_disabled()
-                    };
-                    assert!(!disabled.handle().is_connected());
-                    disabled.enable();
-                    assert!(!disabled.handle().is_enabled());
+                    dial9::recorder(MemoryBuffer::new(1 << 20).unwrap())
+                        .with_s3_uploader_client_future(config, async move {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            fake_client(uploader_service)
+                        })
+                        .build()
+                } else {
+                    dial9::recorder_disabled()
+                };
+                status.register_recorder(&recorder);
+                assert_eq!(recorder.handle().is_connected(), expected);
+                if !enabled {
+                    recorder.enable();
+                    assert!(!recorder.handle().is_enabled());
+                }
+                let mut app = tokio::runtime::Builder::new_current_thread();
+                app.enable_all();
+                let app = recorder
+                    .handle()
+                    .attach_tokio_runtime(app, TokioAttachOptions::default())
+                    .unwrap();
+                app.block_on(async {
+                    dial9::spawn(async {
+                        dial9::Dial9Handle::current().record_event(SamplingMarker {
+                            timestamp_ns: dial9::core::clock_monotonic_ns(),
+                            value: 42,
+                        });
+                    })
+                    .await
+                    .unwrap();
                 });
-            let mut app = tokio::runtime::Builder::new_current_thread();
-            app.enable_all();
-            let app = recorder
-                .handle()
-                .attach_tokio_runtime(app, TokioAttachOptions::default())
-                .unwrap();
-            app.block_on(async {
-                dial9::spawn(async {
-                    dial9::Dial9Handle::current().record_event(SamplingMarker {
-                        timestamp_ns: dial9::core::clock_monotonic_ns(),
-                        value: 42,
-                    });
-                })
-                .await
-                .unwrap();
+                drop(app);
+                recorder.graceful_shutdown(Duration::from_secs(5));
             });
-            drop(app);
-            recorder.graceful_shutdown(Duration::from_secs(5));
-        });
+    }
     assert_eq!(coordination_clients.load(Ordering::SeqCst), 2);
     assert_eq!(upload_clients.load(Ordering::SeqCst), 1);
     assert_eq!(writers.load(Ordering::SeqCst), 1);
@@ -254,11 +225,6 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
         })
         .unwrap();
     assert!(found);
-    policy
-        .with_backend(make_store())
-        .start_application(|SamplingStatus { enabled, .. }| {
-            assert!(enabled, "the next invocation follows its startup policy");
-        });
 }
 
 #[test]

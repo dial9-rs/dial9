@@ -35,10 +35,6 @@ dial9-tokio-telemetry = { workspace = true, features = ["_shuttle"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-smithy-runtime-api = { version = "1", features = ["client"] }
 aws-smithy-types = "1"
-s3s = "0.14.1"
-s3s-fs = "0.14.1"
-s3s-aws = "0.14.1"
-tempfile = "3"
 dial9-core = { workspace = true, features = ["_shuttle"] }
 tokio = { version = "1", features = ["macros", "test-util", "rt-multi-thread"] }
 rstest = "0.26"

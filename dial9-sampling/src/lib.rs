@@ -96,8 +96,7 @@ pub struct Sampling {
     #[builder(into)]
     scope: String,
     /// Expected profilers for each complete combination of dimension values.
-    /// `exact_target` is the compatibility spelling; prefer `target`.
-    exact_target: u32,
+    target: u32,
     /// Required behavior on storage failure or timeout.
     if_failed: StartupFailure,
     /// Cooperative budget covering runtime setup, backend construction and admission; defaults to 1000ms.
@@ -132,17 +131,6 @@ pub struct Sampling {
 }
 
 impl<S: sampling_builder::State> SamplingBuilder<S> {
-    /// Sets the expected profiler count for the complete scope and dimension tuple.
-    ///
-    /// This is equivalent to the compatibility setter `exact_target`; the
-    /// sampler provides an expected count and eventual trimming, not exact capacity.
-    pub fn target(self, target: u32) -> SamplingBuilder<sampling_builder::SetExactTarget<S>>
-    where
-        S::ExactTarget: sampling_builder::IsUnset,
-    {
-        self.exact_target(target)
-    }
-
     /// Adds a dimension. Names must be unique; names and values must be nonblank.
     pub fn add_dimension(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.dimensions.push((name.into(), value.into()));
@@ -170,20 +158,12 @@ impl Sampling {
     }
 
     fn policy(&self) -> protocol::Config {
-        let mut builder = protocol::Config::builder()
-            .scope(&self.scope)
-            .exact_target(self.exact_target)
-            .if_failed(self.if_failed.clone())
-            .maybe_host_id(self.host_id.clone())
-            .minimum_population(self.minimum_population)
-            .maybe_max_overshoot(self.max_overshoot)
-            .poll_interval(self.poll_interval)
-            .bucket_width(self.bucket_width)
-            .max_clock_skew(self.max_clock_skew);
-        for (name, value) in &self.dimensions {
-            builder = builder.add_dimension(name, value);
-        }
-        builder.build()
+        let mut policy = self.clone();
+        // Each invocation gets a fresh rank unless the caller supplies an identity.
+        policy
+            .host_id
+            .get_or_insert_with(|| ulid::Ulid::new().to_string());
+        policy
     }
 
     fn preflight(&self, policy: &protocol::Config) -> Option<protocol::PreparedSampling> {
@@ -192,12 +172,12 @@ impl Sampling {
                 protocol::DecisionReason::invalid_configuration(message),
                 false,
             )),
-            Ok(()) if self.exact_target == 0 => Some(protocol::PreparedSampling::disabled(
-                protocol::DecisionReason::target_zero(),
+            Ok(()) if self.target == 0 => Some(protocol::PreparedSampling::disabled(
+                protocol::DecisionReason::TargetZero,
                 false,
             )),
             Ok(()) if !policy.tracked() => Some(protocol::PreparedSampling::disabled(
-                protocol::DecisionReason::untracked(),
+                protocol::DecisionReason::Untracked,
                 false,
             )),
             Ok(())
@@ -218,12 +198,11 @@ impl Sampling {
         policy: &protocol::Config,
         backend: impl Future<Output = io::Result<S>>,
         timeout: Duration,
-        draw: f64,
     ) -> protocol::PreparedSampling {
         if timeout.is_zero() {
             return protocol::PreparedSampling::disabled(
-                protocol::DecisionReason::timeout(),
-                policy.failure_decision(draw),
+                protocol::DecisionReason::Timeout,
+                policy.failure_decision(),
             );
         }
         match tokio::time::Instant::now().checked_add(timeout) {
@@ -235,16 +214,16 @@ impl Sampling {
                 Ok(Ok(store)) => {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     policy
-                        .prepare_with_timeout_and_draw(Arc::new(store), remaining, draw)
+                        .prepare_with_timeout(Arc::new(store), remaining)
                         .await
                 }
                 Ok(Err(error)) => protocol::PreparedSampling::disabled(
                     protocol::DecisionReason::store_failure(error.to_string()),
-                    policy.failure_decision(draw),
+                    policy.failure_decision(),
                 ),
                 Err(_) => protocol::PreparedSampling::disabled(
-                    protocol::DecisionReason::timeout(),
-                    policy.failure_decision(draw),
+                    protocol::DecisionReason::Timeout,
+                    policy.failure_decision(),
                 ),
             },
         }
@@ -252,12 +231,13 @@ impl Sampling {
 
     fn status(
         &self,
-        initial: protocol::SamplingSnapshot,
+        enabled: bool,
+        reason: &protocol::DecisionReason,
         _maintenance: Option<&protocol::SamplingSession>,
     ) -> SamplingStatus {
-        tracing::info!(enabled = initial.recording(), reason = ?initial.reason(), "sampling startup decision");
+        tracing::info!(enabled, ?reason, "sampling startup decision");
         SamplingStatus {
-            enabled: initial.recording(),
+            enabled,
             #[cfg(any(test, feature = "dial9"))]
             changes: _maintenance.map(protocol::SamplingSession::recording_changes),
             #[cfg(feature = "dial9")]
@@ -337,7 +317,6 @@ impl<F> SamplingStartup<F> {
         let prepared = match sampling.preflight(&policy) {
             Some(prepared) => prepared,
             None => {
-                let draw = protocol::startup_draw();
                 match build_runtime() {
                     Ok(runtime) => {
                         // Own the runtime before polling user code, so initialization
@@ -351,20 +330,20 @@ impl<F> SamplingStartup<F> {
                                 &policy,
                                 backend,
                                 sampling.startup_timeout.saturating_sub(start.elapsed()),
-                                draw,
                             ))
                     }
                     Err(error) => protocol::PreparedSampling::disabled(
                         protocol::DecisionReason::store_failure(error.to_string()),
-                        policy.failure_decision(draw),
+                        policy.failure_decision(),
                     ),
                 }
             }
         };
-        let initial = prepared.snapshot();
+        let enabled = prepared.enabled;
+        let reason = prepared.reason.clone();
         session.maintenance = prepared.into_session();
         #[allow(unused_mut)]
-        let mut status = sampling.status(initial, session.maintenance.as_ref());
+        let mut status = sampling.status(enabled, &reason, session.maintenance.as_ref());
         #[cfg(feature = "dial9")]
         {
             let registration = Arc::new(registration::RecorderRegistrations::new(

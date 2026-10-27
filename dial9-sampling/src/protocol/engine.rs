@@ -5,7 +5,6 @@ use crate::backend::{
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
@@ -28,15 +27,6 @@ pub(crate) enum DecisionReason {
     StoreFailure { message: String },
 }
 impl DecisionReason {
-    pub(crate) fn timeout() -> Self {
-        Self::Timeout
-    }
-    pub(crate) fn target_zero() -> Self {
-        Self::TargetZero
-    }
-    pub(crate) fn untracked() -> Self {
-        Self::Untracked
-    }
     pub(crate) fn invalid_configuration(message: impl Into<String>) -> Self {
         Self::InvalidConfiguration {
             message: message.into(),
@@ -49,49 +39,20 @@ impl DecisionReason {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SamplingSnapshot {
-    pub(crate) recording: bool,
-    pub(crate) reason: DecisionReason,
-    pub(crate) coordinated: bool,
-    pub(crate) estimated_population: Option<u64>,
-}
-impl SamplingSnapshot {
-    pub(crate) fn recording(&self) -> bool {
-        self.recording
-    }
-    pub(crate) fn reason(&self) -> &DecisionReason {
-        &self.reason
-    }
-}
-
+#[derive(Debug)]
 pub(crate) struct PreparedSampling {
-    initial: SamplingSnapshot,
-    snapshot: Arc<Mutex<SamplingSnapshot>>,
+    // Background trimming must never alter the immutable application startup choice.
+    pub(crate) enabled: bool,
+    pub(crate) reason: DecisionReason,
     session: Option<SamplingSession>,
 }
-impl std::fmt::Debug for PreparedSampling {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.snapshot().fmt(f)
-    }
-}
 impl PreparedSampling {
-    pub(crate) fn disabled(reason: DecisionReason, recording: bool) -> Self {
-        let initial = SamplingSnapshot {
-            recording,
-            reason,
-            coordinated: false,
-            estimated_population: None,
-        };
+    pub(crate) fn disabled(reason: DecisionReason, enabled: bool) -> Self {
         Self {
-            initial: initial.clone(),
-            snapshot: Arc::new(Mutex::new(initial)),
+            enabled,
+            reason,
             session: None,
         }
-    }
-    // Background trimming must never alter the immutable application startup choice.
-    pub(crate) fn snapshot(&self) -> SamplingSnapshot {
-        self.initial.clone()
     }
     pub(crate) fn into_session(mut self) -> Option<SamplingSession> {
         self.session.take()
@@ -99,23 +60,18 @@ impl PreparedSampling {
 }
 
 /// The invocation owns this session; a status value never owns coordination.
+#[derive(Debug)]
 pub(crate) struct SamplingSession {
-    snapshot: Arc<Mutex<SamplingSnapshot>>,
     stop: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
     #[cfg(any(test, feature = "dial9"))]
     recording: watch::Receiver<bool>,
     cleanup_budget: Arc<Mutex<Duration>>,
 }
-impl std::fmt::Debug for SamplingSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.snapshot.lock().expect("snapshot lock").fmt(f)
-    }
-}
 impl SamplingSession {
     #[cfg(all(test, not(shuttle)))]
-    pub(crate) fn snapshot(&self) -> SamplingSnapshot {
-        self.snapshot.lock().expect("snapshot lock").clone()
+    pub(crate) fn is_recording(&self) -> bool {
+        *self.recording.borrow()
     }
     #[cfg(any(test, feature = "dial9"))]
     pub(crate) fn recording_changes(&self) -> watch::Receiver<bool> {
@@ -153,14 +109,6 @@ impl Clock for WallClock {
 }
 fn nonce() -> String {
     ulid::Ulid::new().to_string()
-}
-pub(crate) fn startup_draw() -> f64 {
-    let bits = u64::from_be_bytes(
-        Sha256::digest(nonce().as_bytes())[..8]
-            .try_into()
-            .expect("digest length"),
-    );
-    (bits >> 11) as f64 / (1u64 << 53) as f64
 }
 fn invalid(message: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> StoreError {
     StoreError::new(StoreErrorKind::invalid_response(), message)
@@ -243,9 +191,6 @@ struct Roster {
     // Fresh on every mutation: body-based ETags must never repeat (ABA).
     revision: String,
     epoch: u64,
-    expires_at_ms: u64,
-    generated_at_ms: u64,
-    cutoff_computed_at_ms: u64,
     cutoff_settled: bool,
     settled: bool,
     arm_cutoff: Cutoff,
@@ -256,15 +201,12 @@ struct Roster {
     slice_too_small: bool,
 }
 impl Roster {
-    fn initial(config: &Config, incarnation: &str, now: u64) -> Self {
+    fn initial(config: &Config, incarnation: &str) -> Self {
         Self {
             policy: Policy::new(config),
             holder: incarnation.into(),
             revision: nonce(),
             epoch: 0,
-            expires_at_ms: now.saturating_add(config.poll_interval.as_millis() as u64 * 3),
-            generated_at_ms: now,
-            cutoff_computed_at_ms: now,
             cutoff_settled: false,
             settled: false,
             arm_cutoff: Cutoff::threshold(config.tracked_limit()),
@@ -285,13 +227,6 @@ impl Roster {
         if !self.arm_cutoff.within(config.tracked_limit())
             || self.holder.parse::<ulid::Ulid>().is_err()
             || self.revision.parse::<ulid::Ulid>().is_err()
-            || self.expires_at_ms < self.generated_at_ms
-            || u128::from(self.cutoff_computed_at_ms)
-                > u128::from(self.generated_at_ms) + config.max_clock_skew.as_millis() * 2
-            || self.census_computed_at_ms.is_some_and(|time| {
-                u128::from(time)
-                    > u128::from(self.generated_at_ms) + config.max_clock_skew.as_millis() * 2
-            })
             || (self.keep_cutoff.is_some() && self.census_computed_at_ms.is_none())
             || self
                 .counts
@@ -308,17 +243,13 @@ impl Roster {
         }
         Ok(())
     }
-    fn mutate(&mut self, config: &Config, incarnation: &str, now: u64) -> Result<(), StoreError> {
+    fn mutate(&mut self, incarnation: &str) -> Result<(), StoreError> {
         self.holder = incarnation.into();
         self.revision = nonce();
         self.epoch = self
             .epoch
             .checked_add(1)
             .ok_or_else(|| invalid("roster epoch overflow"))?;
-        self.generated_at_ms = now;
-        self.expires_at_ms = now
-            .checked_add(config.poll_interval.as_millis() as u64 * 3)
-            .ok_or_else(|| invalid("lease expiry overflow"))?;
         Ok(())
     }
 }
@@ -343,8 +274,8 @@ fn expired(
     store: &dyn SamplingStore,
     now: SystemTime,
 ) -> bool {
-    // Server LastModified is authoritative for lease age; the body's expiry is
-    // diagnostic. Conservative precision/skew margins only delay takeover.
+    // Server LastModified determines lease age. Conservative precision/skew
+    // margins only delay takeover.
     observed
         .modified_at
         .checked_add(config.poll_interval.saturating_mul(3))
@@ -357,17 +288,16 @@ pub(crate) async fn prepare_using(
     config: Config,
     store: Arc<dyn SamplingStore>,
     timeout: Duration,
-    draw: Option<f64>,
     clock: Arc<dyn Clock>,
 ) -> PreparedSampling {
     if let Err(message) = config.validate() {
         return PreparedSampling::disabled(DecisionReason::invalid_configuration(message), false);
     }
     if config.target() == 0 {
-        return PreparedSampling::disabled(DecisionReason::target_zero(), false);
+        return PreparedSampling::disabled(DecisionReason::TargetZero, false);
     }
     if !config.tracked() {
-        return PreparedSampling::disabled(DecisionReason::untracked(), false);
+        return PreparedSampling::disabled(DecisionReason::Untracked, false);
     }
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         return PreparedSampling::disabled(
@@ -375,7 +305,7 @@ pub(crate) async fn prepare_using(
             false,
         );
     };
-    let fallback = config.failure_decision(draw.unwrap_or_else(startup_draw));
+    let fallback = config.failure_decision();
     let key = format!("{}roster.json", config.pool_prefix());
     let result = if timeout.is_zero() {
         None
@@ -422,23 +352,21 @@ pub(crate) async fn prepare_using(
         return PreparedSampling::disabled(reason, recording);
     }
     let mut prepared = PreparedSampling::disabled(reason, recording);
-    {
-        let mut snapshot = prepared.snapshot.lock().expect("snapshot lock");
-        snapshot.coordinated = observed.as_ref().is_some_and(|o| o.roster.cutoff_settled);
-        snapshot.estimated_population = observed.as_ref().and_then(|o| o.roster.population);
-        prepared.initial = snapshot.clone();
-    }
+    let membership_allowed = matches!(
+        prepared.reason,
+        DecisionReason::MissingRoster
+            | DecisionReason::Roster
+            | DecisionReason::OutsideCutoff
+            | DecisionReason::UnsettledRoster
+    );
+    tracing::debug!(
+        population = ?observed.as_ref().and_then(|o| o.roster.population),
+        "sampling startup roster"
+    );
     let (signal, changes) = watch::channel(recording);
     let stop = CancellationToken::new();
     let cleanup_budget = Arc::new(Mutex::new(Duration::from_millis(500)));
-    let mut worker = Worker::new(
-        config,
-        store,
-        clock,
-        observed,
-        signal,
-        prepared.snapshot.clone(),
-    );
+    let mut worker = Worker::new(config, store, clock, observed, signal, membership_allowed);
     let cancellation = stop.clone();
     let budget = cleanup_budget.clone();
     let task = tokio::spawn(async move {
@@ -459,7 +387,6 @@ pub(crate) async fn prepare_using(
     #[cfg(not(any(test, feature = "dial9")))]
     drop(changes);
     prepared.session = Some(SamplingSession {
-        snapshot: prepared.snapshot.clone(),
         stop,
         task: Some(task),
         cleanup_budget,
@@ -646,15 +573,11 @@ fn compute(
             .zip(history.iter().skip(1))
             .all(|(&a, &b)| u128::from(b) * 100 <= u128::from(a) * 102);
     if settled && counts.tracked > 0 {
-        let threshold = if counts.tracked == 0 {
-            config.tracked_limit()
-        } else {
-            (u128::from(config.target()) * config.tracked_limit() / u128::from(counts.tracked))
-                .min(config.tracked_limit())
-        };
+        let threshold = (u128::from(config.target()) * config.tracked_limit()
+            / u128::from(counts.tracked))
+        .min(config.tracked_limit());
         roster.arm_cutoff = Cutoff::threshold(threshold);
         roster.cutoff_settled = true;
-        roster.cutoff_computed_at_ms = now;
     }
     let cap = u64::from(config.target()) + u64::from(config.overshoot());
     active.sort();
@@ -680,7 +603,6 @@ struct Worker {
     leader: Option<Observed>,
     history: VecDeque<u64>,
     signal: watch::Sender<bool>,
-    snapshot: Arc<Mutex<SamplingSnapshot>>,
     keys: BTreeMap<u64, HashSet<String>>,
     written_bucket: Option<u64>,
     offset_ms: u64,
@@ -694,23 +616,14 @@ impl Worker {
         clock: Arc<dyn Clock>,
         observed: Option<Observed>,
         signal: watch::Sender<bool>,
-        snapshot: Arc<Mutex<SamplingSnapshot>>,
+        membership_allowed: bool,
     ) -> Self {
-        let initial = snapshot.lock().expect("snapshot lock").clone();
-        let membership_allowed = matches!(
-            initial.reason,
-            DecisionReason::MissingRoster
-                | DecisionReason::Roster
-                | DecisionReason::OutsideCutoff
-                | DecisionReason::UnsettledRoster
-        );
-        let recording = initial.recording;
+        let recording = *signal.borrow();
         let incarnation = nonce();
-        let entropy = u64::from_be_bytes(
-            Sha256::digest(incarnation.as_bytes())[..8]
-                .try_into()
-                .expect("digest length"),
-        );
+        let entropy = incarnation
+            .parse::<ulid::Ulid>()
+            .expect("fresh incarnation")
+            .random() as u64;
         let offset_ms = entropy % config.bucket_width.as_millis() as u64;
         // A fixed per-incarnation jitter also spreads polls and remains testable.
         let poll_ms = (config.poll_interval.as_millis() as u64 * (900 + entropy % 201)) / 1000;
@@ -730,7 +643,6 @@ impl Worker {
             leader: None,
             history: VecDeque::new(),
             signal,
-            snapshot,
             keys: BTreeMap::new(),
             written_bucket: None,
             offset_ms,
@@ -740,9 +652,6 @@ impl Worker {
     }
     fn bucket(&self) -> Result<u64, StoreError> {
         Ok(millis(self.clock.now())? / self.config.bucket_width.as_millis() as u64)
-    }
-    fn operation_budget(&self) -> Duration {
-        self.config.poll_interval
     }
     async fn write_member(&mut self, bucket: u64) -> Result<(), StoreError> {
         let key = member_key(
@@ -857,16 +766,15 @@ impl Worker {
         }) {
             return Ok(());
         }
-        let now = millis(self.clock.now())?;
         let mut roster = match &self.observed {
             Some(observed) => observed.roster.clone(),
-            None => Roster::initial(&self.config, &self.incarnation, now),
+            None => Roster::initial(&self.config, &self.incarnation),
         };
         // Acquisition must not freshen an old cohort's trimming boundary.
         // Preserve the settled startup cutoff, and recompute keep after LIST.
         roster.keep_cutoff = None;
         roster.settled = false;
-        roster.mutate(&self.config, &self.incarnation, now)?;
+        roster.mutate(&self.incarnation)?;
         let claimed = self
             .replace(
                 &roster,
@@ -946,7 +854,7 @@ impl Worker {
             roster.keep_cutoff = None;
             self.history.clear();
         }
-        roster.mutate(&self.config, &self.incarnation, now)?;
+        roster.mutate(&self.incarnation)?;
         let published = self.replace(&roster, Some(&previous.version)).await?;
         if let Some(observed) = &published {
             tracing::debug!(tracked = observed.roster.counts.tracked, active = observed.roster.counts.active,
@@ -961,10 +869,6 @@ impl Worker {
         let Some(observed) = &self.observed else {
             return Ok(());
         };
-        self.snapshot
-            .lock()
-            .expect("snapshot lock")
-            .estimated_population = observed.roster.population;
         if expired(
             observed,
             &self.config,
@@ -999,7 +903,6 @@ impl Worker {
             self.state = MemberState::Carrier;
             self.written_bucket = None;
             self.signal.send_replace(false);
-            self.snapshot.lock().expect("snapshot lock").recording = false;
             tracing::info!(
                 rank = self.rank,
                 "sampling active process permanently trimmed"
@@ -1072,7 +975,7 @@ impl Worker {
         let mut next_poll = Instant::now();
         let mut next_pass = Instant::now();
         loop {
-            let operation_budget = self.operation_budget();
+            let operation_budget = self.config.poll_interval;
             if let Err(error) = bounded(operation_budget, self.refresh_member(false)).await {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!(%error, "sampling membership refresh failed");
@@ -1142,7 +1045,3 @@ async fn bounded<T>(
 #[cfg(all(test, not(shuttle)))]
 #[path = "tests.rs"]
 mod tests;
-
-#[cfg(all(test, not(shuttle), feature = "s3"))]
-#[path = "s3_integration_tests.rs"]
-mod s3_integration_tests;

@@ -1,15 +1,11 @@
 //! Sticky startup selection from one roster, maintained by an elected census leader.
 mod engine;
 mod rate_limit;
-#[cfg(test)]
-pub(crate) mod simulation;
 #[cfg(all(test, shuttle))]
 mod storage_shuttle_tests;
 
 use crate::backend::SamplingStore;
-pub(crate) use engine::{
-    DecisionReason, PreparedSampling, SamplingSession, SamplingSnapshot, startup_draw,
-};
+pub(crate) use engine::{DecisionReason, PreparedSampling, SamplingSession};
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 
@@ -30,12 +26,6 @@ pub enum StartupFailure {
         /// Assumed number of live processes. Must be positive.
         population: u64,
     },
-    /// Uses one independent draw. Fleet probability is capped by the tracked fraction.
-    #[non_exhaustive]
-    EnableWithFixedProbability {
-        /// A finite probability in the inclusive range 0–1.
-        probability: f64,
-    },
 }
 impl StartupFailure {
     /// Keeps profiling off on startup failure or an absent/unsettled roster.
@@ -46,11 +36,6 @@ impl StartupFailure {
     pub fn assume_population(population: u64) -> Self {
         Self::AssumePopulation { population }
     }
-    /// Selects with one independent draw. The fleet-wide probability is capped
-    /// by the tracked fraction; actual profilers can exceed the target.
-    pub fn enable_with_fixed_probability(probability: f64) -> Self {
-        Self::EnableWithFixedProbability { probability }
-    }
 }
 impl Default for StartupFailure {
     fn default() -> Self {
@@ -58,47 +43,19 @@ impl Default for StartupFailure {
     }
 }
 
-/// All hosts in a namespace must use the same policy. Host identity is not policy.
-#[derive(Clone, Debug, bon::Builder)]
-pub(crate) struct Config {
-    #[builder(field)]
-    dimensions: Vec<(String, String)>,
-    #[builder(into)]
-    scope: String,
-    exact_target: u32,
-    if_failed: StartupFailure,
-    #[builder(default = ulid::Ulid::new().to_string(), into)]
-    host_id: String,
-    #[builder(default)]
-    minimum_population: u64,
-    max_overshoot: Option<u32>,
-    #[builder(default = Duration::from_secs(60))]
-    poll_interval: Duration,
-    #[builder(default = Duration::from_secs(300))]
-    bucket_width: Duration,
-    #[builder(default = Duration::from_secs(5))]
-    max_clock_skew: Duration,
-}
-impl<S: config_builder::State> ConfigBuilder<S> {
-    pub(crate) fn add_dimension(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
-        self.dimensions.push((name.into(), value.into()));
-        self
-    }
-}
+// The invocation resolves host_id on the caller's configuration; there is no
+// second builder or configuration copy with independent defaults.
+pub(crate) type Config = crate::Sampling;
 impl Config {
     pub(crate) fn target(&self) -> u32 {
-        self.exact_target
+        self.target
     }
     /// An explicit lower population assumption supports reducing census traffic.
     fn slice_bits(&self) -> u32 {
-        if self.exact_target == 0 {
+        if self.target == 0 {
             return 0;
         }
-        let required = 32 * u64::from(self.exact_target);
+        let required = 32 * u64::from(self.target);
         let mut bits = 0;
         while bits < 58 && (self.minimum_population >> (bits + 1)) >= required {
             bits += 1;
@@ -114,7 +71,11 @@ impl Config {
     pub(crate) fn rank(&self) -> u64 {
         let mut dimensions = self.dimensions.clone();
         dimensions.sort();
-        let canonical = serde_json::to_vec(&(&self.scope, dimensions, &self.host_id))
+        let host_id = self
+            .host_id
+            .as_deref()
+            .expect("invocation identity resolved");
+        let canonical = serde_json::to_vec(&(&self.scope, dimensions, host_id))
             .expect("string tuple serializes");
         u64::from_be_bytes(
             Sha256::digest(canonical)[..8]
@@ -122,32 +83,24 @@ impl Config {
                 .expect("digest length"),
         )
     }
-    pub(crate) fn failure_decision(&self, draw: f64) -> bool {
-        self.exact_target > 0
+    pub(crate) fn failure_decision(&self) -> bool {
+        self.target > 0
             && self.validate().is_ok()
             && self.tracked()
             && match self.if_failed {
                 StartupFailure::Disabled {} => false,
                 StartupFailure::AssumePopulation { population } => {
-                    let threshold = ((u128::from(self.exact_target) << 64)
-                        / u128::from(population))
-                    .min(self.tracked_limit());
+                    let threshold = ((u128::from(self.target) << 64) / u128::from(population))
+                        .min(self.tracked_limit());
                     u128::from(self.rank()) < threshold
-                }
-                StartupFailure::EnableWithFixedProbability { probability } => {
-                    // The draw is conditional on membership in the tracked
-                    // slice. Preserve the caller's fleet-wide probability
-                    // below that slice's unavoidable ceiling.
-                    let conditional = (probability * (1u64 << self.slice_bits()) as f64).min(1.0);
-                    draw < conditional
                 }
             }
     }
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.scope.trim().is_empty()
-            || self.host_id.trim().is_empty()
-            || self.host_id.contains('/')
-        {
+        let Some(host_id) = &self.host_id else {
+            return Err("invocation identity must be resolved".into());
+        };
+        if self.scope.trim().is_empty() || host_id.trim().is_empty() || host_id.contains('/') {
             return Err("scope and host_id must be nonblank; host_id must not contain '/'".into());
         }
         let mut names = std::collections::HashSet::new();
@@ -156,20 +109,12 @@ impl Config {
                 return Err("dimensions must have unique, nonblank names and values".into());
             }
         }
-        match self.if_failed {
-            StartupFailure::AssumePopulation { population: 0 } => {
-                return Err("assumed population must be positive".into());
-            }
-            StartupFailure::EnableWithFixedProbability { probability }
-                if !probability.is_finite() || !(0.0..=1.0).contains(&probability) =>
-            {
-                return Err("probability must be finite and between zero and one".into());
-            }
-            _ => {}
+        if let StartupFailure::AssumePopulation { population: 0 } = self.if_failed {
+            return Err("assumed population must be positive".into());
         }
         // Whole milliseconds are the wire format. Bound all time arithmetic and
         // leave a previous bucket visible while a delayed heartbeat is retried.
-        if self.exact_target > 10000
+        if self.target > 10000
             || self.poll_interval < Duration::from_millis(100)
             || self.poll_interval > Duration::from_secs(86400 / 3)
             || self.bucket_width > Duration::from_secs(86400)
@@ -202,21 +147,13 @@ impl Config {
     }
     fn overshoot(&self) -> u32 {
         self.max_overshoot
-            .unwrap_or_else(|| (3.0 * f64::from(self.exact_target).sqrt()).ceil() as u32)
+            .unwrap_or_else(|| (3.0 * f64::from(self.target).sqrt()).ceil() as u32)
     }
-    pub(crate) async fn prepare_with_timeout_and_draw(
+    pub(crate) async fn prepare_with_timeout(
         &self,
         store: Arc<dyn SamplingStore>,
         timeout: Duration,
-        draw: f64,
     ) -> PreparedSampling {
-        engine::prepare_using(
-            self.clone(),
-            store,
-            timeout,
-            Some(draw),
-            Arc::new(engine::WallClock),
-        )
-        .await
+        engine::prepare_using(self.clone(), store, timeout, Arc::new(engine::WallClock)).await
     }
 }

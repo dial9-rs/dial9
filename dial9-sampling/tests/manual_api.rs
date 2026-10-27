@@ -239,7 +239,7 @@ fn registration_rejects_disabled_or_ended_invocation(#[case] ended: bool) {
     } else {
         Sampling::builder()
             .scope("disabled-registration")
-            .exact_target(0)
+            .target(0)
             .if_failed(StartupFailure::disabled())
             .build()
             .with_backend(async { Ok(MemoryStore::new()) })
@@ -293,16 +293,16 @@ async fn entered_runtime_is_rejected_before_polling_or_application() {
 }
 
 #[rstest::rstest]
-#[case(0.0, false)]
-#[case(1.0, true)]
+#[case(StartupFailure::disabled(), false)]
+#[case(StartupFailure::assume_population(1), true)]
 fn backend_error_still_starts_application_with_fallback(
-    #[case] probability: f64,
+    #[case] fallback: StartupFailure,
     #[case] expected: bool,
 ) {
     let enabled = Sampling::builder()
         .scope("failure")
-        .exact_target(1)
-        .if_failed(StartupFailure::enable_with_fixed_probability(probability))
+        .target(1)
+        .if_failed(fallback)
         .build()
         .with_backend(async { Err::<MemoryStore, _>(std::io::Error::other("backend failed")) })
         .start_application(|SamplingStatus { enabled, .. }| {
