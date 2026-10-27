@@ -1,8 +1,8 @@
 //! Write samples and stacks dictionary as Parquet files.
 
 use arrow::array::{
-    ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Int64Builder, ListBuilder, StringBuilder,
-    StructBuilder, UInt8Builder, UInt32Builder, UInt64Builder,
+    ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Int64Builder, ListBuilder, MapFieldNames,
+    StringBuilder, StructBuilder, UInt8Builder, UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::record_batch::RecordBatch;
@@ -77,7 +77,11 @@ fn samples_record_batch(
     // Metadata map: keys and values builders
     let map_keys_builder = StringBuilder::new();
     let map_values_builder = StringBuilder::new();
-    let mut map_builder = arrow::array::MapBuilder::new(None, map_keys_builder, map_values_builder);
+    let mut map_builder = arrow::array::MapBuilder::new(
+        Some(map_field_names()),
+        map_keys_builder,
+        map_values_builder,
+    );
 
     // Enclosing spans: LIST<STRUCT<span_uid, span_type_uid, elapsed_ns, details_complete>>
     let es_fields = enclosing_span_fields();
@@ -338,6 +342,17 @@ fn polls_schema() -> Arc<Schema> {
     ]))
 }
 
+/// Entry field names for the `metadata` and `attributes` map columns. Arrow 60
+/// changed the `MapBuilder` defaults to `key`/`value`; pin the names the
+/// schemas declare so part files keep the same layout.
+fn map_field_names() -> MapFieldNames {
+    MapFieldNames {
+        entry: "entries".to_string(),
+        key: "keys".to_string(),
+        value: "values".to_string(),
+    }
+}
+
 /// Fields of the enclosing_spans struct within the samples table.
 /// Compact OTAP-aligned: only identity, duration, and completeness for the hot
 /// flamegraph filter path. Full metadata lives in `spans/` only.
@@ -475,8 +490,11 @@ fn build_spans_batch(schema: Arc<Schema>, spans: &[ResolvedSpan]) -> anyhow::Res
     // Attributes: Map<String, String>
     let attr_keys_builder = StringBuilder::new();
     let attr_values_builder = StringBuilder::new();
-    let mut attr_map_builder =
-        arrow::array::MapBuilder::new(None, attr_keys_builder, attr_values_builder);
+    let mut attr_map_builder = arrow::array::MapBuilder::new(
+        Some(map_field_names()),
+        attr_keys_builder,
+        attr_values_builder,
+    );
 
     let mut source_key_builder = StringBuilder::with_capacity(n, 128 * n);
     let mut host_builder = StringBuilder::with_capacity(n, 64 * n);
@@ -1196,7 +1214,11 @@ mod tests {
         // Build metadata map column with a representative entry.
         let map_keys_builder = StringBuilder::new();
         let map_values_builder = StringBuilder::new();
-        let mut map_builder = MapBuilder::new(None, map_keys_builder, map_values_builder);
+        let mut map_builder = MapBuilder::new(
+            Some(map_field_names()),
+            map_keys_builder,
+            map_values_builder,
+        );
 
         ts_builder.append_value(1000);
         stack_id_builder.append_value([1u8; 16]).unwrap();
