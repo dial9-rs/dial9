@@ -26,7 +26,7 @@ use crate::storage::{ObjectInfo, StorageBackend};
 use arrow::array::Array;
 use lasso::{Rodeo, Spur};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::Semaphore;
 
 use super::decode;
@@ -284,7 +284,7 @@ fn full_source_key(source_is_local: bool, source_bucket: &str, key: &str) -> Str
 
 /// Process-global concurrency limits for the demand-driven fold pipeline.
 ///
-/// These are shared across all in-flight `/api/flamegraph` requests (held in
+/// These are shared across all in-flight aggregation requests (held in
 /// `AppState` and cloned per request — the inner `Arc<Semaphore>`s are shared),
 /// so total fold work is bounded *application-wide* rather than per request.
 /// Without this, N concurrent polls each running their own bounded batch could
@@ -320,6 +320,34 @@ pub(crate) struct FoldLimits {
     pub cpu: Arc<Semaphore>,
     /// Bounds concurrently in-flight folds (memory backstop; held fetch→write).
     pub inflight: Arc<Semaphore>,
+    /// Coalesces folds targeting the same durable completion marker.
+    files: Arc<Mutex<FoldLockMap>>,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct FoldIdentity {
+    backend: usize,
+    bucket: String,
+    samples_key: String,
+}
+
+type FoldLockMap = HashMap<FoldIdentity, Weak<tokio::sync::Mutex<()>>>;
+
+/// Only active requests retain a lock. Completion remains recorded by the
+/// samples part, so cancellation and failed writes allow another request to retry.
+struct FoldFileLock {
+    identity: FoldIdentity,
+    files: Arc<Mutex<FoldLockMap>>,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Drop for FoldFileLock {
+    fn drop(&mut self) {
+        let mut files = self.files.lock().expect("fold lock registry poisoned");
+        if Arc::strong_count(&self.lock) == 1 {
+            files.remove(&self.identity);
+        }
+    }
 }
 
 impl FoldLimits {
@@ -332,6 +360,29 @@ impl FoldLimits {
             fetch: Arc::new(Semaphore::new(fetch_permits.max(1))),
             cpu: Arc::new(Semaphore::new(cpu_permits.max(1))),
             inflight: Arc::new(Semaphore::new(inflight_permits.max(1))),
+            files: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn file_lock(&self, agg: &AggContext, full_key: &str) -> FoldFileLock {
+        let identity = FoldIdentity {
+            backend: Arc::as_ptr(&agg.output) as *const () as usize,
+            bucket: agg.output_bucket.clone(),
+            samples_key: samples_part_key(&agg.output_prefix, full_key),
+        };
+        let mut files = self.files.lock().expect("fold lock registry poisoned");
+        let lock = files
+            .get(&identity)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                files.insert(identity.clone(), Arc::downgrade(&lock));
+                lock
+            });
+        FoldFileLock {
+            identity,
+            files: self.files.clone(),
+            lock,
         }
     }
 
@@ -494,12 +545,27 @@ async fn write_parts(
 /// released before the part-file writes, so each global limit bounds only the
 /// stage it is meant to bound. A zero-sample file still writes an empty samples
 /// part-file (the "folded" record). Idempotent: re-folding writes the same keys.
+/// Overlapping requests share a file lock and reuse completed parts.
 pub(crate) async fn fold_one(
     agg: &AggContext,
     raw_key: &str,
     limits: &FoldLimits,
 ) -> anyhow::Result<()> {
     use std::time::Instant;
+    let full_key = full_source_key(agg.source_is_local, &agg.source_bucket, raw_key);
+    let file = limits.file_lock(agg, &full_key);
+    // Waiters consume no fetch/decode/memory permits. Recheck the durable
+    // completion marker because the request's folded-set listing may be stale.
+    let _file_guard = file.lock.lock().await;
+    match agg
+        .output
+        .get_object_stream(&agg.output_bucket, &file.identity.samples_key)
+        .await
+    {
+        Ok(_) => return Ok(()),
+        Err(crate::storage::StorageError::NotFound(_)) => {}
+        Err(error) => return Err(anyhow::anyhow!("check folded {raw_key}: {error}")),
+    }
     // One per-file metric per fold: assemble phase timings as we go, emit once on
     // the way out (success or failure). See `FoldFileMetrics`.
     let mut metric = crate::server::metrics::FoldFileMetricsBuilder::new();
@@ -545,7 +611,6 @@ pub(crate) async fn fold_one(
 
     // Stage 2 — decode + encode (CPU-bound) on a blocking thread, gated so
     // concurrent folds don't oversubscribe the cores.
-    let full_key = full_source_key(agg.source_is_local, &agg.source_bucket, raw_key);
     let decode_key = full_key.clone();
     let encoded = {
         let _permit = limits
@@ -1650,6 +1715,13 @@ mod tests {
     struct ConcurrencyProbe {
         in_flight: std::sync::atomic::AtomicUsize,
         peak: std::sync::atomic::AtomicUsize,
+        fetches: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: Option<Arc<Semaphore>>,
+        trace: Option<Vec<u8>>,
+        objects: std::sync::Mutex<HashMap<String, Vec<u8>>>,
+        fail_fetch: std::sync::atomic::AtomicBool,
+        fail_spans_write: std::sync::atomic::AtomicBool,
     }
 
     impl StorageBackend for ConcurrencyProbe {
@@ -1685,11 +1757,30 @@ mod tests {
         }
         fn get_object(
             &self,
-            _bucket: &str,
-            _key: &str,
+            bucket: &str,
+            key: &str,
         ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
             use std::sync::atomic::Ordering;
+            let bucket = bucket.to_string();
+            let key = key.to_string();
             Box::pin(async move {
+                if bucket == "out" {
+                    return self
+                        .objects
+                        .lock()
+                        .unwrap()
+                        .get(&key)
+                        .cloned()
+                        .ok_or(StorageError::NotFound(key));
+                }
+                self.fetches.fetch_add(1, Ordering::SeqCst);
+                self.entered.notify_one();
+                if let Some(release) = &self.release {
+                    release.acquire().await.unwrap().forget();
+                }
+                if self.fail_fetch.swap(false, Ordering::SeqCst) {
+                    return Err(StorageError::Other("injected fetch failure".into()));
+                }
                 let cur = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 self.peak.fetch_max(cur, Ordering::SeqCst);
                 // Hold the in-flight window open across several executor turns so
@@ -1700,17 +1791,168 @@ mod tests {
                 self.in_flight.fetch_sub(1, Ordering::SeqCst);
                 // Junk bytes: fold_one's decode stage fails, but only AFTER the
                 // fetch — which is all this probe measures.
-                Ok(vec![0u8; 8])
+                Ok(self.trace.clone().unwrap_or_else(|| vec![0u8; 8]))
             })
         }
         fn put_object(
             &self,
             _bucket: &str,
-            _key: &str,
-            _data: Vec<u8>,
+            key: &str,
+            data: Vec<u8>,
         ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
+            let key = key.to_string();
+            Box::pin(async move {
+                if key.contains("/spans/")
+                    && self
+                        .fail_spans_write
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(StorageError::Other("injected spans write failure".into()));
+                }
+                self.objects.lock().unwrap().insert(key, data);
+                Ok(())
+            })
         }
+    }
+
+    fn gated_fold() -> (Arc<ConcurrencyProbe>, AggContext, FoldLimits) {
+        let probe = Arc::new(ConcurrencyProbe {
+            release: Some(Arc::new(Semaphore::new(0))),
+            trace: Some(dial9_trace_format::encoder::Encoder::new().into_inner()),
+            ..Default::default()
+        });
+        let agg = AggContext {
+            source: probe.clone(),
+            output: probe.clone(),
+            source_bucket: "src".into(),
+            source_is_local: false,
+            output_bucket: "out".into(),
+            output_prefix: "flamegraph-data".into(),
+            source_prefixes: vec![],
+            segment_duration_secs: 60,
+        };
+        (probe, agg, FoldLimits::new(2, 1, 2))
+    }
+
+    const SHARED_RAW_KEY: &str = "service=work/date=2026-10-27/host=a/1793133179-0.bin";
+
+    #[tokio::test]
+    async fn overlapping_requests_fold_each_source_once() {
+        use std::sync::atomic::Ordering;
+
+        let (probe, agg, limits) = gated_fold();
+        let task = tokio::spawn(async move {
+            // Both requests are polled before this task yields back to the test.
+            tokio::join!(
+                fold_one(&agg, SHARED_RAW_KEY, &limits),
+                fold_one(&agg, SHARED_RAW_KEY, &limits)
+            )
+        });
+        probe.entered.notified().await;
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 1);
+        probe.release.as_ref().unwrap().add_permits(2);
+        let (first, second) = task.await.unwrap();
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.objects.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn cancelled_fold_allows_waiter_to_retry() {
+        use std::sync::atomic::Ordering;
+
+        let (probe, agg, limits) = gated_fold();
+        let owner = tokio::spawn({
+            let agg = agg.clone();
+            let limits = limits.clone();
+            async move { fold_one(&agg, SHARED_RAW_KEY, &limits).await }
+        });
+        probe.entered.notified().await;
+        let waiter = fold_one(&agg, SHARED_RAW_KEY, &limits);
+        tokio::pin!(waiter);
+        assert!(futures::poll!(&mut waiter).is_pending());
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 1);
+        owner.abort();
+        assert!(owner.await.unwrap_err().is_cancelled());
+        probe.release.as_ref().unwrap().add_permits(1);
+        waiter.await.unwrap();
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 2);
+        assert_eq!(probe.objects.lock().unwrap().len(), 4);
+        assert!(limits.files.lock().unwrap().is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn separate_output_destinations_fold_independently(#[case] separate_backend: bool) {
+        use std::sync::atomic::Ordering;
+
+        let (probe, agg, limits) = gated_fold();
+        let mut other = agg.clone();
+        if separate_backend {
+            other.output = Arc::new(ConcurrencyProbe::default());
+        } else {
+            other.output_prefix = "other-output".into();
+        }
+        let task = tokio::spawn(async move {
+            tokio::join!(
+                fold_one(&agg, SHARED_RAW_KEY, &limits),
+                fold_one(&other, SHARED_RAW_KEY, &limits)
+            )
+        });
+        probe.entered.notified().await;
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 2);
+        probe.release.as_ref().unwrap().add_permits(2);
+        let (first, second) = task.await.unwrap();
+        first.unwrap();
+        second.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn failed_fold_does_not_commit_or_prevent_retry(#[case] fail_write: bool) {
+        use std::sync::atomic::Ordering;
+
+        let (probe, agg, limits) = gated_fold();
+        if fail_write {
+            probe.fail_spans_write.store(true, Ordering::SeqCst);
+        } else {
+            probe.fail_fetch.store(true, Ordering::SeqCst);
+        }
+        probe.release.as_ref().unwrap().add_permits(2);
+        assert!(fold_one(&agg, SHARED_RAW_KEY, &limits).await.is_err());
+        let full_key = full_source_key(false, "src", SHARED_RAW_KEY);
+        assert!(
+            !probe
+                .objects
+                .lock()
+                .unwrap()
+                .contains_key(&samples_part_key(&agg.output_prefix, &full_key))
+        );
+        fold_one(&agg, SHARED_RAW_KEY, &limits).await.unwrap();
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 2);
+        assert_eq!(probe.objects.lock().unwrap().len(), 4);
+        assert!(limits.files.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_fold_is_reused_only_in_its_output_namespace() {
+        use std::sync::atomic::Ordering;
+
+        let (probe, mut agg, limits) = gated_fold();
+        probe.release.as_ref().unwrap().add_permits(2);
+        fold_one(&agg, SHARED_RAW_KEY, &limits).await.unwrap();
+        fold_one(&agg, SHARED_RAW_KEY, &limits).await.unwrap();
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 1);
+        agg.output_prefix = "other-output".into();
+        fold_one(&agg, SHARED_RAW_KEY, &limits).await.unwrap();
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 2);
+        assert_eq!(probe.objects.lock().unwrap().len(), 8);
+        assert!(limits.files.lock().unwrap().is_empty());
     }
 
     /// The in-flight cap bounds how many folds hold a fetched segment buffer at

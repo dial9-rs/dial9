@@ -1553,7 +1553,8 @@ pub(crate) async fn get_tail(
         let (start, end) = (scope.start_ns, scope.end_ns);
         work = tokio::task::spawn_blocking(move || {
             let (mut collector, selection, permit) = work;
-            let reader = SpansBatchReader::new(start, end, Some(selection.uid), None);
+            let reader = SpansBatchReader::new(start, end, Some(selection.uid), None)
+                .without_exemplar_attributes();
             let (_, result) = reader.read(data, |input| {
                 if let SpanStatsInput::Row(row) = input {
                     collector.push(*row, &selection, source, &url);
@@ -1591,7 +1592,10 @@ pub(crate) async fn get_tail(
         let (start, end) = (scope.start_ns, scope.end_ns);
         work = tokio::task::spawn_blocking(move || {
             let (response, mut metadata, permit) = work;
-            let reader = SpansBatchReader::new(start, end, Some(uid), None);
+            let coordinates = metadata.sources[&source].keys().copied().collect();
+            let reader = SpansBatchReader::new(start, end, Some(uid), None)
+                .without_exemplar_attributes()
+                .with_selected_coordinates(coordinates);
             let (_, result) = reader.read(data, |input| {
                 if let SpanStatsInput::Row(row) = input
                     && let Some(example) = row.exemplar
@@ -3524,8 +3528,9 @@ mod tests {
         let mut parquet = Vec::new();
         crate::ingest::parquet_writer::write_spans(&mut parquet, &spans).unwrap();
         let mut collector = Collector::default();
-        let (_, result) =
-            SpansBatchReader::new(None, None, Some(uid), None).read(parquet.clone(), |input| {
+        let (_, result) = SpansBatchReader::new(None, None, Some(uid), None)
+            .without_exemplar_attributes()
+            .read(parquet.clone(), |input| {
                 if let SpanStatsInput::Row(row) = input {
                     collector.push(*row, &selection, 0, "");
                 }
@@ -3534,8 +3539,11 @@ mod tests {
         result.unwrap();
         let mut folded = collector.finish(&selection, 1, 1).unwrap();
         let mut metadata = MetadataHydrator::new(&folded.report);
-        let (_, result) =
-            SpansBatchReader::new(None, None, Some(uid), None).read(parquet, |input| {
+        let coordinates = metadata.sources[&0].keys().copied().collect();
+        let (_, result) = SpansBatchReader::new(None, None, Some(uid), None)
+            .without_exemplar_attributes()
+            .with_selected_coordinates(coordinates)
+            .read(parquet, |input| {
                 if let SpanStatsInput::Row(row) = input
                     && let Some(example) = row.exemplar
                 {
