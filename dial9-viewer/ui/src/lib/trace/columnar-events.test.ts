@@ -273,7 +273,7 @@ describe("capacityForBytes", () => {
 });
 
 describe("column widths", () => {
-  it("costs 54 bytes per event", () => {
+  it("costs 62 bytes per event", () => {
     const store = new ColumnarEvents(1) as unknown as Record<
       string,
       { BYTES_PER_ELEMENT: number }
@@ -286,6 +286,7 @@ describe("column widths", () => {
       globalQueue: 4,
       cpuTime: 8,
       schedWaitRaw: 8,
+      schedulingDelayRaw: 8,
       taskIdx: 4,
       spawnLocIdx: 4,
       tidRaw: 4,
@@ -297,7 +298,7 @@ describe("column widths", () => {
       expect(store[col]!.BYTES_PER_ELEMENT, `${col} width`).toBe(want);
       total += want;
     }
-    expect(total).toBe(54);
+    expect(total).toBe(62);
   });
 
   it("round-trips a tid past Float32's exact range, and an absent one", () => {
@@ -315,6 +316,29 @@ describe("column widths", () => {
     const store = new ColumnarEvents(2);
     store.pushEvent(0, 1, 0, 255, 0, 0, null, 1, null, undefined, undefined, undefined);
     expect(store.at(0)!.localQueue).toBe(255);
+  });
+
+  it("round-trips optional direct scheduling latency", () => {
+    const store = new ColumnarEvents(2);
+    store.pushEvent(
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      null,
+      1,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      123_456,
+    );
+    store.pushEvent(0, 2, 0, 0, 0, 0, null, 1, null, undefined, undefined, undefined);
+
+    expect(store.at(0)!.schedulingDelay).toBe(123_456);
+    expect(store.at(1)!.schedulingDelay).toBeUndefined();
   });
 });
 

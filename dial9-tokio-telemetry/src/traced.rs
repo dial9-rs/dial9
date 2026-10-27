@@ -297,7 +297,7 @@ impl<F: Future> Future for WakeTraced<F> {
         // Closes the span on the way out, panic or not. A panicking future
         // unwinds past the rest of this function and tokio catches it above us.
         let _guard = PollSpanGuard { ctx };
-        ctx.record_poll_start(this.spawn_loc, this.waker_data.woken_task_id);
+        ctx.record_poll_start(this.spawn_loc, this.waker_data.woken_task_id, None);
         this.inner.poll(&mut traced_cx)
     }
 }

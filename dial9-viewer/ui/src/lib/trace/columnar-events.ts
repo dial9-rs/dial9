@@ -1,6 +1,6 @@
 // Columnar (struct-of-arrays) store for `trace.events`, the scheduler-event
 // stream that dominates a large trace's memory (13M+ events at ~836 B/event as
-// fat objects -> ~11.5 GB; as typed-array columns -> ~73 B/event -> ~1 GB, and
+// fat objects -> ~11.5 GB; as typed-array columns -> ~81 B/event -> ~1.1 GB, and
 // no per-event object means no major-GC thrash during parse).
 //
 // It is a drop-in for the fat `events` array on two fronts:
@@ -40,6 +40,8 @@ export interface EventLike {
   cpuTime: number;
   /** null when this park->unpark was not schedstat-sampled (distinct from 0). */
   schedWait: number | null;
+  /** Direct scheduled-to-poll latency from Tokio, when recorded. */
+  schedulingDelay?: number | undefined;
   taskId: number;
   /** spawn-location string, or null. (Parser sets spawnLocId === spawnLoc.) */
   spawnLocId: string | null;
@@ -70,7 +72,7 @@ const MAX_ESTIMATED_CAP = 1 << 25; // ~33.5M events
 /**
  * Capacity to start the columns at for a trace of `bytes` decoded bytes.
  *
- * Growth doubles and copies all 12 columns, so the TOTAL copied is ~N elements
+ * Growth doubles and copies all 13 columns, so the TOTAL copied is ~N elements
  * however small the start - the win is not from fewer early copies (those are
  * cheap) but from landing at the final size in one allocation and copying
  * nothing. That is only possible when the byte count is known up front, which
@@ -92,6 +94,8 @@ export class ColumnarEvents {
   cpuTime: Float64Array;
   /** NaN encodes null (unsampled sched_wait). */
   schedWaitRaw: Float64Array;
+  /** NaN encodes an absent direct scheduling-delay measurement. */
+  schedulingDelayRaw: Float64Array;
   /** Indices into `taskIdList`, -1 encodes absent. Interning keeps the column
    *  4 bytes whatever magnitude tokio's u64 counter has reached. */
   taskIdx: Int32Array;
@@ -131,6 +135,7 @@ export class ColumnarEvents {
     this.globalQueue = allocColumn(Int32Array, cap);
     this.cpuTime = allocColumn(Float64Array, cap);
     this.schedWaitRaw = allocColumn(Float64Array, cap);
+    this.schedulingDelayRaw = allocColumn(Float64Array, cap);
     this.taskIdx = allocColumn(Int32Array, cap);
     this.spawnLocIdx = allocColumn(Int32Array, cap);
     this.tidRaw = allocColumn(Uint32Array, cap);
@@ -160,6 +165,7 @@ export class ColumnarEvents {
     this.globalQueue = i32;
     this.cpuTime = new Float64Array(0);
     this.schedWaitRaw = new Float64Array(0);
+    this.schedulingDelayRaw = new Float64Array(0);
     this.taskIdx = i32;
     this.spawnLocIdx = i32;
     this.tidRaw = new Uint32Array(0);
@@ -216,6 +222,7 @@ export class ColumnarEvents {
           this.globalQueue,
           this.cpuTime,
           this.schedWaitRaw,
+          this.schedulingDelayRaw,
           this.taskIdx,
           this.spawnLocIdx,
           this.tidRaw,
@@ -243,6 +250,7 @@ export class ColumnarEvents {
     this.globalQueue = g(this.globalQueue, Int32Array);
     this.cpuTime = g(this.cpuTime, Float64Array);
     this.schedWaitRaw = g(this.schedWaitRaw, Float64Array);
+    this.schedulingDelayRaw = g(this.schedulingDelayRaw, Float64Array);
     this.taskIdx = g(this.taskIdx, Int32Array);
     this.spawnLocIdx = g(this.spawnLocIdx, Int32Array);
     this.tidRaw = g(this.tidRaw, Uint32Array);
@@ -270,6 +278,8 @@ export class ColumnarEvents {
     this.globalQueue[i] = e.globalQueue ?? 0;
     this.cpuTime[i] = e.cpuTime ?? 0;
     this.schedWaitRaw[i] = e.schedWait == null ? NaN : e.schedWait;
+    this.schedulingDelayRaw[i] =
+      e.schedulingDelay == null ? NaN : e.schedulingDelay;
     this.taskIdx[i] = this.internTask(e.taskId);
     this.spawnLocIdx[i] = this.intern(e.spawnLoc ?? null);
     this.tidRaw[i] = e.tid == null ? NO_TID : e.tid;
@@ -297,7 +307,8 @@ export class ColumnarEvents {
     spawnLoc: string | null,
     tid: number | undefined,
     wakerTaskId: number | undefined,
-    wokenTaskId: number | undefined
+    wokenTaskId: number | undefined,
+    schedulingDelay?: number
   ): void {
     if (this._len === this._cap) this.grow();
     const i = this._len++;
@@ -310,6 +321,8 @@ export class ColumnarEvents {
     this.globalQueue[i] = globalQueue;
     this.cpuTime[i] = cpuTime;
     this.schedWaitRaw[i] = schedWait == null ? NaN : schedWait;
+    this.schedulingDelayRaw[i] =
+      schedulingDelay == null ? NaN : schedulingDelay;
     this.taskIdx[i] = this.internTask(taskId);
     this.spawnLocIdx[i] = this.intern(spawnLoc);
     this.tidRaw[i] = tid == null ? NO_TID : tid;
@@ -327,6 +340,11 @@ export class ColumnarEvents {
     this.assertLive();
     const v = this.schedWaitRaw[i]!;
     return Number.isNaN(v) ? null : v;
+  }
+  schedulingDelayAt(i: number): number | undefined {
+    this.assertLive();
+    const v = this.schedulingDelayRaw[i]!;
+    return Number.isNaN(v) ? undefined : v;
   }
   tidAt(i: number): number | undefined {
     this.assertLive();
@@ -484,6 +502,7 @@ function materialize(c: ColumnarEvents, i: number): EventLike {
     globalQueue: c.globalQueue[i]!,
     cpuTime: c.cpuTime[i]!,
     schedWait: c.schedWaitAt(i),
+    schedulingDelay: c.schedulingDelayAt(i),
     taskId: c.taskIdAt(i),
     spawnLocId: c.spawnLocAt(i),
     spawnLoc: c.spawnLocAt(i),
@@ -511,6 +530,7 @@ class ReusedEventCursor implements EventLike {
   get globalQueue(): number { return this.c.globalQueue[this._i]!; }
   get cpuTime(): number { return this.c.cpuTime[this._i]!; }
   get schedWait(): number | null { return this.c.schedWaitAt(this._i); }
+  get schedulingDelay(): number | undefined { return this.c.schedulingDelayAt(this._i); }
   get taskId(): number { return this.c.taskIdAt(this._i); }
   get spawnLocId(): string | null { return this.c.spawnLocAt(this._i); }
   get spawnLoc(): string | null { return this.c.spawnLocAt(this._i); }

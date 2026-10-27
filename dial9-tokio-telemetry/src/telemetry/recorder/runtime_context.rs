@@ -425,8 +425,19 @@ impl RuntimeContext {
         &self,
         location: &'static std::panic::Location<'static>,
         task_id: TaskId,
+        scheduling_delay_ns: Option<u64>,
     ) {
-        self.record(|| make_poll_start(self, location, task_id));
+        #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+        {
+            let scheduling_delay_ns = scheduling_delay_ns
+                .expect("only Tokio's runtime hook records polls with schedule-latency enabled");
+            self.record(|| make_poll_start(self, location, task_id, scheduling_delay_ns));
+        }
+        #[cfg(not(all(tokio_unstable, feature = "schedule-latency")))]
+        {
+            let _ = scheduling_delay_ns;
+            self.record(|| make_poll_start(self, location, task_id));
+        }
     }
 
     pub(crate) fn record_poll_end(&self) {
@@ -656,6 +667,8 @@ pub(crate) struct PollStart {
     pub local_queue: u8,
     pub task_id: TaskId,
     pub location: &'static std::panic::Location<'static>,
+    #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+    pub scheduling_delay_ns: u64,
 }
 
 impl Encodable for PollStart {
@@ -667,6 +680,8 @@ impl Encodable for PollStart {
             local_queue: self.local_queue,
             task_id: self.task_id,
             spawn_loc,
+            #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+            scheduling_delay_ns: self.scheduling_delay_ns,
         });
     }
 }
@@ -710,6 +725,7 @@ fn make_poll_start(
     ctx: &RuntimeContext,
     location: &'static std::panic::Location<'static>,
     task_id: TaskId,
+    #[cfg(all(tokio_unstable, feature = "schedule-latency"))] scheduling_delay_ns: u64,
 ) -> PollStart {
     let worker_id = event_worker_id(ctx);
     let worker_local_queue_depth = current_local_queue_depth();
@@ -721,6 +737,8 @@ fn make_poll_start(
         local_queue: worker_local_queue_depth as u8,
         task_id,
         location,
+        #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+        scheduling_delay_ns,
     }
 }
 

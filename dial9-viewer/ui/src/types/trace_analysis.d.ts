@@ -38,6 +38,8 @@ declare module "*/trace_analysis.js" {
      * `spawnLoc` for the resolved string. */
     spawnLocId: number | string | null;
     spawnLoc: string | null;
+    /** Direct scheduled-to-poll latency from Tokio, when recorded. */
+    schedulingDelay?: number | undefined;
     /**
      * True when no matching PollEnd was seen (block_in_place handoff or
      * park closed the poll); the actual duration is unknown.
