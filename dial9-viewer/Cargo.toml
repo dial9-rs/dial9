@@ -115,6 +115,7 @@ urlencoding = "2"
 
 [dev-dependencies]
 assert2 = { workspace = true }
+rstest = "0.26.1"
 metrique = { version = "0.1.28", features = ["emf", "local-format", "test-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 s3s = "0.14.1"
