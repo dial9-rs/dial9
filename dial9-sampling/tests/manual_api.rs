@@ -1,3 +1,6 @@
+//! Public startup API and application lifecycle regressions.
+#![allow(clippy::unwrap_used, reason = "Test assertions fail immediately.")]
+
 use dial9_sampling::{Sampling, SamplingStartup, SamplingStatus, StartupFailure, backend};
 // Fault injection is covered by the sampler's unit tests.
 #[allow(dead_code)]
@@ -34,7 +37,9 @@ struct SignalDrop(Option<oneshot::Sender<()>>);
 
 impl Drop for SignalDrop {
     fn drop(&mut self) {
-        let _ = self.0.take().unwrap().send(());
+        if self.0.take().unwrap().send(()).is_err() {
+            tracing::debug!("test observer dropped before sampler task ended");
+        }
     }
 }
 

@@ -1,4 +1,7 @@
+//! Native S3 error classification and malformed-response regressions.
 #![cfg(feature = "s3")]
+#![allow(clippy::unwrap_used, reason = "Test assertions fail immediately.")]
+
 use aws_smithy_runtime_api::{
     client::{
         http::{HttpConnector, HttpConnectorFuture, SharedHttpConnector, http_client_fn},

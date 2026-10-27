@@ -14,7 +14,7 @@ impl crate::protocol::engine::Clock for MemoryStore {
 
 /// Prepares a startup choice with the default 500 ms budget; maintenance requires the caller executor to remain alive.
 #[cfg(all(test, not(shuttle)))]
-pub async fn prepare(policy: &Config, store: Arc<MemoryStore>) -> PreparedSampling {
+pub(crate) async fn prepare(policy: &Config, store: Arc<MemoryStore>) -> PreparedSampling {
     crate::protocol::engine::prepare_using(
         policy.clone(),
         store.clone(),
@@ -27,7 +27,7 @@ pub async fn prepare(policy: &Config, store: Arc<MemoryStore>) -> PreparedSampli
 
 /// Establishes a fleet using the exact same preparation API as production.
 #[cfg(all(test, not(shuttle)))]
-pub async fn prepare_fleet(
+pub(crate) async fn prepare_fleet(
     policy: Config,
     store: Arc<MemoryStore>,
     count: usize,

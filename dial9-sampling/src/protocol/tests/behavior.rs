@@ -258,7 +258,9 @@ impl SamplingStore for DelayedCommit {
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let result = inner.put(request).await;
-                let _ = tx.send(result);
+                if tx.send(result).is_err() {
+                    tracing::debug!("sampling client cancelled before store response");
+                }
             });
             Box::pin(async move { rx.await.expect("server operation survived cancellation") })
         } else {

@@ -23,12 +23,33 @@ pub trait SamplingStore: Send + Sync + 'static {
         std::time::Duration::ZERO
     }
     /// Reads an object's current contents and version, or returns `None` if absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the object cannot be read or its contents,
+    /// version or modification time cannot satisfy the storage contract.
     fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>>;
     /// Atomically writes under the requested condition; uncertainty requires reconciliation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the write fails. An uncertain commit must use
+    /// [`StoreErrorKind::WriteOutcomeUnknown`]; a definitive precondition failure
+    /// is a [`PutOutcome::PreconditionFailed`], rather than an error.
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome>;
     /// Lists an ordered page including completed writes, with an opaque continuation cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if listing fails or the response cannot satisfy
+    /// the ordering, pagination or modification-time contract.
     fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage>;
     /// Deletes a process's unique membership object; deleting an absent object succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the deletion fails. Cancellation or an error
+    /// does not prove that the object still exists.
     fn delete(&self, key: String) -> StoreFuture<'_, ()>;
 }
 

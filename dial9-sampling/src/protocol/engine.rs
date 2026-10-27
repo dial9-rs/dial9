@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Reason for the current profiling choice; failure fallback can still enable profiling.
-pub enum DecisionReason {
+pub(crate) enum DecisionReason {
     #[non_exhaustive]
     /// A conditional allocation was confirmed.
     Admitted {},
@@ -51,21 +51,21 @@ pub enum DecisionReason {
 }
 impl DecisionReason {
     /// Constructs a startup-deadline failure.
-    pub fn timeout() -> Self {
+    pub(crate) fn timeout() -> Self {
         Self::Timeout {}
     }
     /// Constructs an explicitly disabled startup choice.
-    pub fn target_zero() -> Self {
+    pub(crate) fn target_zero() -> Self {
         Self::TargetZero {}
     }
     /// Constructs a configuration failure with its explanation.
-    pub fn invalid_configuration(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_configuration(message: impl Into<String>) -> Self {
         Self::InvalidConfiguration {
             message: message.into(),
         }
     }
     /// Constructs a storage failure with its explanation.
-    pub fn store_failure(message: impl Into<String>) -> Self {
+    pub(crate) fn store_failure(message: impl Into<String>) -> Self {
         Self::StoreFailure {
             message: message.into(),
         }
@@ -73,7 +73,7 @@ impl DecisionReason {
 }
 #[derive(Clone, Debug)]
 /// A point-in-time choice and optional coordination/population diagnostics.
-pub struct SamplingSnapshot {
+pub(crate) struct SamplingSnapshot {
     pub(crate) recording: bool,
     pub(crate) reason: DecisionReason,
     pub(crate) coordinated: bool,
@@ -83,37 +83,37 @@ pub struct SamplingSnapshot {
 }
 impl SamplingSnapshot {
     /// Whether this choice permits profiling. Lease-loss continuity or failure fallback can remain enabled without coordination.
-    pub fn recording(&self) -> bool {
+    pub(crate) fn recording(&self) -> bool {
         self.recording
     }
     /// Returns the decision or lease-loss reason; consult recording() separately for the actual choice.
-    pub fn reason(&self) -> &DecisionReason {
+    pub(crate) fn reason(&self) -> &DecisionReason {
         &self.reason
     }
     /// Whether this process currently has a confirmed valid allocation.
     #[cfg(all(test, not(shuttle)))]
-    pub fn coordinated(&self) -> bool {
+    pub(crate) fn coordinated(&self) -> bool {
         self.coordinated
     }
     /// Returns an estimate only when enough live membership has been observed; unknown is never zero.
     #[cfg(all(test, not(shuttle)))]
-    pub fn estimated_population(&self) -> Option<f64> {
+    pub(crate) fn estimated_population(&self) -> Option<f64> {
         self.estimated_population
     }
     /// Whether the most recent successful refresh confirmed this process in the membership sample.
     #[cfg(all(test, not(shuttle)))]
-    pub fn membership_registered(&self) -> bool {
+    pub(crate) fn membership_registered(&self) -> bool {
         self.membership_registered
     }
     /// Last successful membership refresh. Failed refreshes clear this timestamp
     /// and the estimate; a missing estimate never represents a zero-sized pool.
     #[cfg(all(test, not(shuttle)))]
-    pub fn population_updated_at(&self) -> Option<SystemTime> {
+    pub(crate) fn population_updated_at(&self) -> Option<SystemTime> {
         self.population_updated_at
     }
 }
 /// A completed startup choice and ownership of any background maintenance.
-pub struct PreparedSampling {
+pub(crate) struct PreparedSampling {
     snapshot: Arc<Mutex<SamplingSnapshot>>,
     session: Option<SamplingSession>,
 }
@@ -126,7 +126,7 @@ impl PreparedSampling {
     /// Constructs a completed choice without storage or background maintenance.
     ///
     /// `recording` is the final choice, including any startup-failure fallback.
-    pub fn disabled(reason: DecisionReason, recording: bool) -> Self {
+    pub(crate) fn disabled(reason: DecisionReason, recording: bool) -> Self {
         Self {
             snapshot: Arc::new(Mutex::new(SamplingSnapshot {
                 recording,
@@ -140,20 +140,21 @@ impl PreparedSampling {
         }
     }
     /// Clones current diagnostics. Later maintenance can change coordination and freshness.
-    pub fn snapshot(&self) -> SamplingSnapshot {
+    pub(crate) fn snapshot(&self) -> SamplingSnapshot {
         self.snapshot.lock().expect("snapshot lock").clone()
     }
     /// Transfers maintenance ownership, or returns None if no session was started.
-    pub fn into_session(mut self) -> Option<SamplingSession> {
+    pub(crate) fn into_session(mut self) -> Option<SamplingSession> {
         self.session.take()
     }
 }
 
 /// Owns coordination, not a profiler. Drop requests bounded cleanup.
-pub struct SamplingSession {
+pub(crate) struct SamplingSession {
     snapshot: Arc<Mutex<SamplingSnapshot>>,
     stop: CancellationToken,
     done: Option<tokio::sync::oneshot::Receiver<()>>,
+    #[cfg(any(test, feature = "dial9"))]
     recording: watch::Receiver<bool>,
     cleanup_budget: Arc<Mutex<Duration>>,
 }
@@ -164,15 +165,16 @@ impl std::fmt::Debug for SamplingSession {
 }
 impl SamplingSession {
     /// Clones current diagnostics. Later maintenance can change coordination and freshness.
-    pub fn snapshot(&self) -> SamplingSnapshot {
+    pub(crate) fn snapshot(&self) -> SamplingSnapshot {
         self.snapshot.lock().expect("snapshot lock").clone()
     }
     /// Subscribes to the recording choice. An optional lease-loss stop is permanent.
-    pub fn recording_changes(&self) -> watch::Receiver<bool> {
+    #[cfg(any(test, feature = "dial9"))]
+    pub(crate) fn recording_changes(&self) -> watch::Receiver<bool> {
         self.recording.clone()
     }
     /// Stops maintenance and attempts owner-checked release and membership withdrawal within the budget.
-    pub async fn shutdown(mut self, timeout: Duration) {
+    pub(crate) async fn shutdown(mut self, timeout: Duration) {
         *self.cleanup_budget.lock().expect("cleanup budget lock") = timeout;
         self.stop.cancel();
         if let Some(done) = self.done.take()
@@ -227,7 +229,7 @@ fn probability_draw(id: &str) -> f64 {
     (bits >> 11) as f64 / (1u64 << 53) as f64
 }
 /// Generates one uniform startup draw in [0, 1) for a failure fallback.
-pub fn startup_draw() -> f64 {
+pub(crate) fn startup_draw() -> f64 {
     probability_draw(&nonce())
 }
 
@@ -310,6 +312,8 @@ pub(crate) async fn prepare_using(
     let stop = CancellationToken::new();
     let (done_tx, done) = tokio::sync::oneshot::channel();
     let (recording_tx, recording_rx) = watch::channel(recording);
+    #[cfg(not(any(test, feature = "dial9")))]
+    drop(recording_rx);
     let task_stop = stop.clone();
     let cleanup_budget = Arc::new(Mutex::new(DEFAULT_PREPARE_TIMEOUT));
     let task_cleanup_budget = cleanup_budget.clone();
@@ -343,6 +347,7 @@ pub(crate) async fn prepare_using(
         snapshot: prepared.snapshot.clone(),
         stop,
         done: Some(done),
+        #[cfg(any(test, feature = "dial9"))]
         recording: recording_rx,
         cleanup_budget,
     });
@@ -991,10 +996,10 @@ mod adversarial_shuttle {
         let objects = inner.objects();
         let mut owned = std::collections::BTreeMap::<String, usize>::new();
         for (key, value) in objects {
-            if key.contains("/slots/") {
-                if let Some(owner) = parse::<Lease>(&value).unwrap().owner {
-                    *owned.entry(owner).or_default() += 1;
-                }
+            if key.contains("/slots/")
+                && let Some(owner) = parse::<Lease>(&value).unwrap().owner
+            {
+                *owned.entry(owner).or_default() += 1;
             }
         }
         assert!(

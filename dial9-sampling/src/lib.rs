@@ -50,7 +50,10 @@
 //! })
 //! # }
 //! ```
-#![deny(missing_docs)]
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, reason = "Test assertions fail immediately.")
+)]
 
 mod protocol;
 

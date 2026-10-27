@@ -16,7 +16,7 @@ use std::{
 
 #[derive(Debug, Default)]
 /// Atomic in-memory storage with injectable latency, partitions and lost acknowledgements.
-pub struct MemoryStore {
+pub(crate) struct MemoryStore {
     objects: Mutex<BTreeMap<String, StoredObject>>,
     unavailable: AtomicBool,
     latency_ms: AtomicU64,
@@ -32,31 +32,31 @@ impl MemoryStore {
         *wall + instant.elapsed()
     }
     /// Constructs empty, available storage with zero operation latency.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
     /// Makes all subsequent operations fail while enabled.
     #[cfg(not(shuttle))]
-    pub fn set_unavailable(&self, value: bool) {
+    pub(crate) fn set_unavailable(&self, value: bool) {
         self.unavailable.store(value, Ordering::SeqCst);
     }
     /// Sets latency per operation. Tokio virtual time can control it on a paused executor.
     #[cfg(not(shuttle))]
-    pub fn set_latency(&self, value: Duration) {
+    pub(crate) fn set_latency(&self, value: Duration) {
         self.latency_ms
             .store(value.as_millis() as u64, Ordering::SeqCst);
     }
     /// Commit this many upcoming writes, but return an unknown-outcome error.
-    pub fn lose_write_acknowledgements(&self, count: u64) {
+    pub(crate) fn lose_write_acknowledgements(&self, count: u64) {
         self.lost_writes.store(count, Ordering::SeqCst);
     }
     /// Returns the number of attempted storage operations.
     #[cfg(not(shuttle))]
-    pub fn operation_count(&self) -> u64 {
+    pub(crate) fn operation_count(&self) -> u64 {
         self.operations.load(Ordering::Relaxed)
     }
     /// Clones the current objects and their versions for simulation assertions.
-    pub fn objects(&self) -> BTreeMap<String, StoredObject> {
+    pub(crate) fn objects(&self) -> BTreeMap<String, StoredObject> {
         self.objects.lock().expect("store lock").clone()
     }
     async fn before(&self) -> Result<(), StoreError> {

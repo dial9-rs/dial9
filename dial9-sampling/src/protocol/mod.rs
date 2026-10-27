@@ -1,14 +1,12 @@
 //! One startup decision per process, with conditional leases and no rotation.
 //! Continuity and probability fallback can exceed the coordinated slot target.
-#![deny(missing_docs)]
-
 mod engine;
 #[cfg(all(test, not(shuttle)))]
 mod lifecycle_tests;
 #[cfg(test)]
 pub(crate) mod simulation;
 use crate::backend::SamplingStore;
-pub use engine::{
+pub(crate) use engine::{
     DecisionReason, PreparedSampling, SamplingSession, SamplingSnapshot, startup_draw,
 };
 
@@ -16,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 
 /// Default startup preparation budget: 500 milliseconds.
-pub const DEFAULT_PREPARE_TIMEOUT: Duration = Duration::from_millis(500);
+pub(crate) const DEFAULT_PREPARE_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[non_exhaustive]
 #[derive(Clone, Debug)]
@@ -51,7 +49,7 @@ impl Default for StartupFailure {
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 /// Behavior after an admitted process loses its lease.
-pub enum LeaseLoss {
+pub(crate) enum LeaseLoss {
     #[non_exhaustive]
     /// Keeps profiling after lease loss (the default).
     KeepProfiling {},
@@ -66,11 +64,11 @@ impl Default for LeaseLoss {
 }
 impl LeaseLoss {
     /// Keeps the original on choice after lease loss; actual profilers can exceed the target.
-    pub fn keep_profiling() -> Self {
+    pub(crate) fn keep_profiling() -> Self {
         Self::KeepProfiling {}
     }
     /// Permanently stops profiling on lease loss and prevents re-enabling.
-    pub fn stop_profiling() -> Self {
+    pub(crate) fn stop_profiling() -> Self {
         Self::StopProfiling {}
     }
 }
@@ -82,7 +80,7 @@ impl LeaseLoss {
 /// owners; reducing a target does not stop processes already profiling.
 ///
 #[derive(Clone, bon::Builder)]
-pub struct Config {
+pub(crate) struct Config {
     #[builder(field)]
     dimensions: Vec<(String, String)>,
     /// Required service/environment scope separating unrelated fleets.
@@ -119,18 +117,22 @@ impl std::fmt::Debug for Config {
 }
 impl<S: config_builder::State> ConfigBuilder<S> {
     /// Adds a caller-provided dimension. Names must be unique; names and values must be nonblank.
-    pub fn add_dimension(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub(crate) fn add_dimension(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         self.dimensions.push((name.into(), value.into()));
         self
     }
 }
 impl Config {
     /// Returns the caller's requested number of profiling processes for these dimensions.
-    pub fn target(&self) -> u32 {
+    pub(crate) fn target(&self) -> u32 {
         self.exact_target
     }
     /// Applies the failure policy to one draw in [0, 1). Invalid configuration and target zero stay off.
-    pub fn failure_decision(&self, draw: f64) -> bool {
+    pub(crate) fn failure_decision(&self, draw: f64) -> bool {
         self.exact_target > 0
             && self.validate().is_ok()
             && match self.if_failed {
@@ -139,7 +141,7 @@ impl Config {
             }
     }
     /// Checks labels, probability, target and lease settings without performing storage I/O.
-    pub fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.scope.trim().is_empty() {
             return Err("sampling scope is blank".into());
         }
@@ -172,7 +174,7 @@ impl Config {
         Ok(())
     }
     /// Returns the relative coordination prefix, hashing scope and sorted dimensions independently of target.
-    pub fn pool_prefix(&self) -> String {
+    pub(crate) fn pool_prefix(&self) -> String {
         let mut dimensions = self.dimensions.clone();
         dimensions.sort();
         let canonical =
@@ -181,13 +183,13 @@ impl Config {
     }
     /// Prepares a test startup choice on the caller's executor without starting profilers.
     #[cfg(all(test, not(shuttle)))]
-    pub async fn prepare(&self, store: Arc<dyn SamplingStore>) -> PreparedSampling {
+    pub(crate) async fn prepare(&self, store: Arc<dyn SamplingStore>) -> PreparedSampling {
         self.prepare_with_timeout(store, DEFAULT_PREPARE_TIMEOUT)
             .await
     }
     /// Prepares one startup choice within the supplied cooperative budget. Failure uses the configured fallback.
     #[cfg(all(test, not(shuttle)))]
-    pub async fn prepare_with_timeout(
+    pub(crate) async fn prepare_with_timeout(
         &self,
         store: Arc<dyn SamplingStore>,
         timeout: Duration,
@@ -195,7 +197,7 @@ impl Config {
         engine::prepare(self.clone(), store, timeout).await
     }
     #[doc(hidden)]
-    pub async fn prepare_with_timeout_and_draw(
+    pub(crate) async fn prepare_with_timeout_and_draw(
         &self,
         store: Arc<dyn SamplingStore>,
         timeout: Duration,

@@ -45,5 +45,30 @@ rstest = "0.26"
 shuttle = "0.9.1"
 
 [lints.rust]
-missing_debug_implementations = "warn"
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
+unsafe_code = "forbid"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unreachable_pub = "deny"
+unused = { level = "deny", priority = -1 }
+unused_lifetimes = "deny"
+unfulfilled_lint_expectations = "deny"
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(shuttle)"] }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+exit = "deny"
+let_underscore_must_use = "deny"
+mem_forget = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+
+[lints.rustdoc]
+bare_urls = "deny"
+broken_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+invalid_html_tags = "deny"
