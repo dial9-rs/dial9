@@ -275,6 +275,7 @@ impl Recorder {
     ///
     /// Failures during draining are logged.
     pub fn graceful_shutdown(mut self, timeout: Duration) {
+        // `timeout` only bounds the worker drain, which exists under `pipeline`.
         #[cfg(not(feature = "pipeline"))]
         let _ = timeout;
 
