@@ -107,6 +107,8 @@ pub(crate) struct PollStart {
     pub(crate) task_id: u64,
     #[serde(default)]
     pub(crate) spawn_loc: Option<String>,
+    #[serde(default)]
+    pub(crate) scheduling_delay_ns: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

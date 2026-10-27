@@ -96,6 +96,9 @@ fn register_hooks(
         crate::telemetry::task_dump_config::TaskDumpConfig,
     >,
 ) {
+    #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+    builder.track_task_schedule_latency();
+
     let c1 = ctx.clone();
     let c2 = ctx.clone();
     #[cfg(tokio_unstable)]
@@ -116,7 +119,7 @@ fn register_hooks(
         meta: builder,
         on_before_task_poll,
         tokio_hooks.on_before_task_poll,
-        |meta| { c3.record_poll_start(meta.spawned_at(), TaskId::from(meta.id())) }
+        |meta| { record_task_poll_start(&c3, meta) }
     );
 
     #[cfg(tokio_unstable)]
@@ -203,6 +206,21 @@ fn register_hooks(
             dial9_perf_self_profile::unregister_current_thread();
         }
     });
+}
+
+#[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+fn record_task_poll_start(ctx: &RuntimeContext, meta: &tokio::runtime::TaskMeta<'_>) {
+    let latency = meta
+        .schedule_latency()
+        .expect("Tokio schedule-latency tracking is enabled");
+    // Duration uses u128 nanoseconds; the trace format uses u64.
+    let latency_ns = latency.as_nanos().min(u64::MAX as u128) as u64;
+    ctx.record_poll_start(meta.spawned_at(), TaskId::from(meta.id()), Some(latency_ns));
+}
+
+#[cfg(all(tokio_unstable, not(feature = "schedule-latency")))]
+fn record_task_poll_start(ctx: &RuntimeContext, meta: &tokio::runtime::TaskMeta<'_>) {
+    ctx.record_poll_start(meta.spawned_at(), TaskId::from(meta.id()), None);
 }
 
 /// Install only the user's hooks, for a runtime dial9 does not instrument
@@ -375,6 +393,40 @@ mod tests {
              but {}/{} were UNKNOWN",
             unknown.len(),
             poll_starts.len()
+        );
+    }
+
+    #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+    #[test]
+    fn plain_tokio_spawn_records_schedule_latency() {
+        let (capture, data) = CapturingProcessor::new();
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .pipe(capture)
+            .build();
+
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let rt = rec
+            .handle()
+            .attach_tokio_runtime(builder, TokioAttachOptions::default())
+            .unwrap();
+
+        rt.block_on(async {
+            tokio::spawn(async {}).await.unwrap();
+        });
+
+        drop(rt);
+        rec.graceful_shutdown(Duration::from_secs(1));
+
+        let raw = data.lock().unwrap();
+        let events = decode_captured(&raw);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                crate::telemetry::analysis_events::Dial9Event::PollStartEvent(event)
+                    if event.scheduling_delay_ns.is_some()
+            )),
+            "expected a plain tokio::spawn poll with direct scheduling latency"
         );
     }
 
@@ -710,6 +762,8 @@ mod tests {
                     local_queue: 0,
                     task_id,
                     spawn_loc,
+                    #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+                    scheduling_delay_ns: 0,
                 });
             });
             // Drain after each iteration to produce separate small batches
@@ -1223,6 +1277,8 @@ mod tests {
                             local_queue: 0,
                             task_id,
                             location: loc,
+                            #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+                            scheduling_delay_ns: 0,
                         },
                     )
                     .unwrap();

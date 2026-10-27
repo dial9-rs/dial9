@@ -1,6 +1,6 @@
 [package]
 name = "dial9-tokio-telemetry"
-version = "0.5.5"
+version = "0.5.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -68,6 +68,9 @@ dial9-destinations-s3 = { workspace = true, optional = true }
 
 [features]
 analysis = []
+## Per-poll task scheduling latency from Tokio's task hooks.
+## Requires Tokio >= 1.54 and `--cfg tokio_unstable`.
+schedule-latency = ["tokio/schedule-latency"]
 cpu-profiling = [
     "dep:dial9-perf-self-profile",
     "dial9-perf-self-profile/cpu-profiling",
@@ -114,6 +117,7 @@ unstable-events = ["dial9-perf-self-profile?/unstable-events"]
 ## All features except platform-specific ones (taskdump). Used in CI for non-Linux targets.
 __nonlinux_all_features = [
     "analysis",
+    "schedule-latency",
     "cpu-profiling",
     "memory-profiling",
     "process-resource",

@@ -680,9 +680,87 @@ describe("computeSchedulingDelays", () => {
       `gap wake wrongly adjusted: wakeTime=${r[0].wakeTime} delay=${r[0].delay} (expected 300/200)`,
     ).toBe(true);
   });
+
+  it("prefers direct TaskMeta latency without a wake", () => {
+    const poll = {
+      taskId: 1,
+      start: 2_000_000_000,
+      end: 2_000_000_100,
+      schedulingDelay: 1_500_000_000,
+    };
+    const result = computeSchedulingDelays(
+      { 0: { polls: [poll] } },
+      [0],
+      {},
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      wakeTime: 500_000_000,
+      pollTime: 2_000_000_000,
+      delay: 1_500_000_000,
+      taskId: 1,
+      wakerTaskId: 0,
+      worker: 0,
+      poll,
+    });
+  });
 });
 
 // ── filterPointsOfInterest ──
+
+describe("filterPointsOfInterest (synthetic)", () => {
+  it("leaves a task's first poll to the spawn-delay detector", () => {
+    const first = { taskId: 1, start: 100, end: 110, schedulingDelay: 50 };
+    const second = { taskId: 1, start: 200, end: 210, schedulingDelay: 50 };
+    const workerSpans = {
+      0: { polls: [first, second], parks: [], actives: [] },
+    };
+    const delays = [
+      { wakeTime: 50, pollTime: 100, delay: 50, taskId: 1, worker: 0, poll: first },
+      { wakeTime: 150, pollTime: 200, delay: 50, taskId: 1, worker: 0, poll: second },
+    ];
+
+    const result = filterPointsOfInterest(
+      "wake-delay",
+      workerSpans,
+      [0],
+      delays,
+      { taskSpawnTimes: new Map([[1, 25]]) },
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].span).toBe(second);
+  });
+
+  it("keeps a direct first-poll delay when the spawn is unavailable", () => {
+    const first = { taskId: 1, start: 100, end: 110, schedulingDelay: 50 };
+    const workerSpans = {
+      0: { polls: [first], parks: [], actives: [] },
+    };
+    const delays = [
+      {
+        wakeTime: 50,
+        pollTime: 100,
+        delay: 50,
+        taskId: 1,
+        worker: 0,
+        poll: first,
+      },
+    ];
+
+    const result = filterPointsOfInterest(
+      "wake-delay",
+      workerSpans,
+      [0],
+      delays,
+      {},
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].span).toBe(first);
+  });
+});
 
 describe("filterPointsOfInterest", () => {
   it("long-poll filter: returns the worst N, severity-ranked, not a cutoff", () => {

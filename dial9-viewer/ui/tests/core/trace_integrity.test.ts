@@ -31,6 +31,7 @@ interface TraceEvent {
   globalQueue?: number;
   cpuTime?: number;
   schedWait?: number;
+  schedulingDelay?: number;
   wokenTaskId?: number;
   targetWorker?: number;
 }
@@ -180,6 +181,17 @@ describe("task tracking", () => {
     const withSpawnLoc = pollStarts.filter((e) => !!e.spawnLoc);
     if (pollStarts.length > 0) {
       expect(withSpawnLoc.length, "No PollStart has spawnLoc").toBeGreaterThan(0);
+    }
+  });
+
+  it("records Tokio scheduling delay on every poll", () => {
+    const pollStarts = trace.events.filter(
+      (e) => e.eventType === EVENT_TYPES["PollStart"],
+    );
+    expect(pollStarts.length, "No PollStart events").toBeGreaterThan(0);
+    for (const event of pollStarts) {
+      expect(event.schedulingDelay).toBeTypeOf("number");
+      expect(event.schedulingDelay).toBeGreaterThanOrEqual(0);
     }
   });
 

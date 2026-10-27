@@ -76,7 +76,8 @@ pub struct TokioStatsResponse {
     /// coordinates to deep-link its trace segment. Ported from IRIS's
     /// `longPolls.top` (rust-ingest `analyze.rs`).
     pub top_long_polls: Vec<LongPoll>,
-    /// Longest runnable-to-poll latencies backed by spawn/wake evidence.
+    /// Longest runnable-to-poll latencies, measured directly or reconstructed
+    /// from spawn/wake evidence.
     pub top_scheduling_delays: Vec<SchedulingDelay>,
     /// Measurement coverage, including polls that cannot be safely inferred.
     pub scheduling_delay_coverage: SchedulingDelayCoverage,
@@ -132,8 +133,9 @@ pub struct LongPoll {
 
 /// One measured scheduling delay for the top-N "Scheduling delay" list: the gap
 /// between a task becoming runnable (`ready_at_ns`) and the worker starting to
-/// poll it (`poll_start_ns`). Backed by spawn- or wake-inferred evidence; each
-/// row carries the coordinates to deep-link its trace segment.
+/// poll it (`poll_start_ns`). Measured directly by Tokio or reconstructed from
+/// spawn/wake evidence; each row carries coordinates to deep-link its trace
+/// segment.
 #[derive(Serialize, Clone)]
 pub struct SchedulingDelay {
     pub delay_ns: i64,
@@ -145,7 +147,8 @@ pub struct SchedulingDelay {
     /// Where the future was spawned; `None` when the trace didn't record it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spawn_loc: Option<String>,
-    /// How the ready time was established: spawn, wake, or wake-during-poll.
+    /// How the ready time was obtained: directly from TaskMeta or reconstructed
+    /// from a spawn, wake, or wake-during-poll event.
     pub kind: SchedulingDelayKind,
     /// The task that woke this one, when the evidence is a wake.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,15 +158,15 @@ pub struct SchedulingDelay {
     pub source_key: String,
 }
 
-/// Measurement coverage for the scheduling-delay rollup: how many polls carried
-/// usable readiness evidence versus not, and why the unmeasured ones could not
-/// be inferred. Lets the UI qualify the top-N with an honest denominator rather
-/// than implying every poll was measured.
+/// Measurement coverage for the scheduling-delay rollup: how many polls were
+/// measured directly or reconstructed from readiness evidence, and why the
+/// remaining polls could not be inferred. Lets the UI qualify the top-N with an
+/// honest denominator rather than implying every poll was measured.
 #[derive(Serialize, Clone, Default)]
 pub struct SchedulingDelayCoverage {
-    /// Polls with a measured scheduling delay (readiness evidence present).
+    /// Polls with a direct measurement or usable readiness evidence.
     pub observed_polls: u64,
-    /// Polls with no usable readiness evidence.
+    /// Polls with neither a direct measurement nor usable readiness evidence.
     pub unmeasured_polls: u64,
     /// Measured polls whose delay cleared [`HIGH_SCHEDULING_DELAY_NS`].
     pub over_1ms_polls: u64,
@@ -173,6 +176,8 @@ pub struct SchedulingDelayCoverage {
     pub wake_observed_polls: u64,
     /// Measured polls whose readiness came from a wake during a prior poll.
     pub wake_during_poll_polls: u64,
+    /// Polls measured directly by Tokio's task metadata.
+    pub task_meta_observed_polls: u64,
     /// Unmeasured polls on tasks known NOT to use dial9's traced waker.
     pub uninstrumented_unmeasured_polls: u64,
     /// Unmeasured polls where instrumentation state is unknown (old traces).
@@ -788,10 +793,11 @@ fn read_polls_part(
             }
 
             // Scheduling delay (IRIS has no equivalent; dial9-specific). A poll
-            // is "measured" when the trace carried readiness evidence; otherwise
-            // it lands in the coverage tallies, bucketed by why we couldn't infer
-            // it. Column-absent part-files (predating the rollup) count every row
-            // as instrumentation-unknown, matching the null-instrumented case.
+            // is observed when it has a direct measurement or reconstructed
+            // readiness evidence; otherwise it lands in the coverage tallies,
+            // bucketed by why it could not be inferred. Column-absent part-files
+            // count every row as instrumentation-unknown, matching the
+            // null-instrumented case.
             let measured = scheduling_delay_arr
                 .zip(ready_at_arr)
                 .filter(|(delay, ready)| !delay.is_null(i) && !ready.is_null(i))
@@ -809,6 +815,7 @@ fn read_polls_part(
                     Some(SchedulingDelayKind::Spawn) => cov.spawn_inferred_polls += 1,
                     Some(SchedulingDelayKind::Wake) => cov.wake_observed_polls += 1,
                     Some(SchedulingDelayKind::WakeDuringPoll) => cov.wake_during_poll_polls += 1,
+                    Some(SchedulingDelayKind::TaskMeta) => cov.task_meta_observed_polls += 1,
                     None => {}
                 }
                 // Only rows with a worker + task can be deep-linked, same guard
@@ -1087,7 +1094,10 @@ mod tests {
             "every poll must be counted as measured or unmeasured"
         );
         assert_eq!(
-            cov.spawn_inferred_polls + cov.wake_observed_polls + cov.wake_during_poll_polls,
+            cov.spawn_inferred_polls
+                + cov.wake_observed_polls
+                + cov.wake_during_poll_polls
+                + cov.task_meta_observed_polls,
             cov.observed_polls,
             "per-kind tallies must partition the observed polls"
         );

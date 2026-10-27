@@ -73,6 +73,7 @@ describe("schedulingDelayEvidenceLabel", () => {
     expect(schedulingDelayEvidenceLabel("wake_during_poll")).toBe(
       "poll end → next poll",
     );
+    expect(schedulingDelayEvidenceLabel("task_meta")).toBe("Tokio measurement");
   });
 
   it("falls back for an unknown or absent kind", () => {

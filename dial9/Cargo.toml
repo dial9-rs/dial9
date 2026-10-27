@@ -1,6 +1,6 @@
 [package]
 name = "dial9"
-version = "0.5.5"
+version = "0.5.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -88,6 +88,10 @@ tokio = [
     "pipeline",
     "dial9-metrique?/tokio",
 ]
+
+## Per-poll task scheduling latency from Tokio's task hooks.
+## Requires Tokio >= 1.54 and `--cfg tokio_unstable`.
+schedule-latency = ["tokio", "dial9-tokio-telemetry/schedule-latency"]
 
 ## CPU and scheduler profiling as a standalone `Source`. Auto-wires into the Tokio
 ## runtime when the `tokio` feature is also on.

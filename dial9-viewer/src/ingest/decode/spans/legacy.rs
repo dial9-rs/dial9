@@ -749,6 +749,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -780,6 +781,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 11,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -789,6 +791,7 @@ mod tests {
                 worker_id: 2,
                 task_id: 22,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -822,6 +825,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -859,6 +863,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -884,6 +889,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -917,6 +923,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -944,6 +951,7 @@ mod tests {
             worker_id: 0,
             task_id: 99,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -977,6 +985,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 11,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -986,6 +995,7 @@ mod tests {
                 worker_id: 2,
                 task_id: 22,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },

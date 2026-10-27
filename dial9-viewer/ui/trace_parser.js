@@ -1327,13 +1327,16 @@
         switch (frame.name) {
             case "PollStartEvent": {
                 const spawnLoc = v.spawn_loc || null;
+                const schedulingDelay = v.scheduling_delay_ns != null
+                    ? num(v.scheduling_delay_ns)
+                    : undefined;
                 if (spawnLoc) spawnLocations.set(spawnLoc, spawnLoc);
                 const taskId = num(v.task_id);
                 if (taskId && spawnLoc && !taskSpawnLocs.has(taskId)) {
                     taskSpawnLocs.set(taskId, spawnLoc);
                 }
                 if (events.pushEvent) {
-                    events.pushEvent(0, ts, num(v.worker_id), num(v.local_queue), 0, 0, 0, taskId, spawnLoc, undefined, undefined, undefined);
+                    events.pushEvent(0, ts, num(v.worker_id), num(v.local_queue), 0, 0, 0, taskId, spawnLoc, undefined, undefined, undefined, schedulingDelay);
                     break;
                 }
                 events.push({
@@ -1344,6 +1347,7 @@
                     globalQueue: 0,
                     cpuTime: 0,
                     schedWait: 0,
+                    schedulingDelay,
                     taskId,
                     spawnLocId: spawnLoc,
                     spawnLoc,
