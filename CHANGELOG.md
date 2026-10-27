@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.5...dial9-v0.5.6) - 2026-10-26
+
+### Added
+
+- *(perf)* report the CPU backend, count samples, and register start failures ([#1001](https://github.com/dial9-rs/dial9/pull/1001))
+
+### Fixed
+
+- *(deps)* clear open RustSec advisories ([#1052](https://github.com/dial9-rs/dial9/pull/1052))
+- *(memory)* suppress samples during collector initialization ([#1054](https://github.com/dial9-rs/dial9/pull/1054))
+- *(toolkit)* ignore segments without runtime events in trace bounds ([#1072](https://github.com/dial9-rs/dial9/pull/1072))
+
+### Other
+
+- separate allocator fast paths from sampled hooks ([#1066](https://github.com/dial9-rs/dial9/pull/1066))
+- downgrade min tokio version to 1.51.0 ([#1051](https://github.com/dial9-rs/dial9/pull/1051))
+- inline Dial9Allocator allocation methods ([#1065](https://github.com/dial9-rs/dial9/pull/1065))
+
 ## [0.5.5](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.4...dial9-v0.5.5) - 2026-10-16
 
 ### Added
