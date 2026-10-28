@@ -203,10 +203,10 @@ impl Default for Encoder<Vec<u8>> {
 
 impl Encoder<Vec<u8>> {
     pub fn new() -> Self {
-        let mut buf = Vec::new();
-        codec::encode_header(&mut buf).expect("Vec::write_all cannot fail");
+        let mut state = EncodeState::new(Vec::new());
+        codec::encode_header(&mut state.writer).expect("Vec::write_all cannot fail");
         Self {
-            state: EncodeState::new(buf),
+            state,
             registry: SchemaRegistry::new(),
             string_pool: AHashMap::default(),
             next_pool_id: 0,
@@ -228,10 +228,11 @@ impl Encoder<Vec<u8>> {
 impl<W: Write> Encoder<W> {
     /// Create an encoder that writes to an arbitrary writer.
     /// Writes the file header immediately.
-    pub fn new_to(mut writer: W) -> io::Result<Self> {
-        codec::encode_header(&mut writer)?;
+    pub fn new_to(writer: W) -> io::Result<Self> {
+        let mut state = EncodeState::new(writer);
+        codec::encode_header(&mut state.writer)?;
         Ok(Self {
-            state: EncodeState::new(writer),
+            state,
             registry: SchemaRegistry::new(),
             string_pool: AHashMap::default(),
             next_pool_id: 0,
@@ -311,8 +312,10 @@ impl<W: Write> Encoder<W> {
 
     /// Reset the encoder to a new writer, preserving internal allocations.
     /// Returns the old writer. Writes a file header to the new writer.
-    pub fn reset_to(&mut self, mut new_writer: W) -> io::Result<W> {
-        codec::encode_header(&mut new_writer)?;
+    pub fn reset_to(&mut self, new_writer: W) -> io::Result<W> {
+        // creating a new EncodeState resets the timestamp delta
+        let mut new_state = EncodeState::new(new_writer);
+        codec::encode_header(&mut new_state.writer)?;
         self.string_pool.clear();
         self.next_pool_id = 0;
         self.stack_pool.clear();
@@ -322,8 +325,7 @@ impl<W: Write> Encoder<W> {
         self.dynamic_schema_cache.clear();
         self.slot_cache.fill(0);
         self.registered_ids.fill(0);
-        // creating a new EncodeState resets the timestamp delta
-        let old_state = std::mem::replace(&mut self.state, EncodeState::new(new_writer));
+        let old_state = std::mem::replace(&mut self.state, new_state);
         Ok(old_state.writer.into_inner())
     }
 
@@ -658,6 +660,7 @@ mod tests {
     #[test]
     fn encoder_writes_header() {
         let enc = Encoder::new();
+        assert_eq!(enc.bytes_written(), 5);
         let data = enc.finish();
         assert_eq!(&data[..5], &[0x54, 0x52, 0x43, 0x00, 1]);
     }
@@ -991,6 +994,7 @@ mod tests {
     fn encoder_new_to_writer() {
         let mut buf = Vec::new();
         let enc = Encoder::new_to(&mut buf).unwrap();
+        assert_eq!(enc.bytes_written(), 5);
         drop(enc);
         assert!(buf.len() >= 5);
         assert_eq!(&buf[..5], &[0x54, 0x52, 0x43, 0x00, 1]);
@@ -1020,10 +1024,13 @@ mod tests {
         while decoder.next_frame_ref().ok().flatten().is_some() {}
         let mut output = Vec::new();
         let mut ext = decoder.into_encoder(&mut output);
+        assert_eq!(ext.bytes_written(), 0);
         // Schema "Ev" is already known — no duplicate schema frame emitted
         ext.write_event(&schema, 2_000, &[FieldValue::Varint(2)])
             .unwrap();
+        let appended_bytes = ext.bytes_written();
         drop(ext);
+        assert_eq!(appended_bytes, output.len() as u64);
 
         // Concatenate and decode
         let mut combined = base.clone();
@@ -1326,6 +1333,7 @@ mod tests {
         );
 
         // Invariant 2: bytes_written resets to just the header size
+        assert_eq!(enc.bytes_written(), 5);
         assert!(
             enc.bytes_written() < old_bytes_written,
             "bytes_written should reset (got {} vs old {})",
@@ -1342,6 +1350,7 @@ mod tests {
         let _s2 = enc.intern_string("hello").unwrap();
 
         // Invariant 5: new output is a valid standalone trace
+        assert_eq!(enc.bytes_written(), enc.as_inner().len() as u64);
         let new_bytes = enc.reset_to_infallible(Vec::new());
         let mut dec2 = Decoder::new(&new_bytes).unwrap();
         let new_frames = dec2.decode_all();

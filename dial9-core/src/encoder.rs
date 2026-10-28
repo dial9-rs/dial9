@@ -450,8 +450,8 @@ mod tests {
 
     #[test]
     fn test_should_flush_respects_batch_size() {
-        // Use a tiny batch size so a single event triggers flush.
-        let mut buffer = ThreadLocalBuffer::with_batch_size(1);
+        // Use a threshold above the five-byte header so one event triggers flush.
+        let mut buffer = ThreadLocalBuffer::with_batch_size(6);
         assert!(!buffer.should_flush());
         buffer.record_encodable(&sample_event());
         assert!(buffer.should_flush());
