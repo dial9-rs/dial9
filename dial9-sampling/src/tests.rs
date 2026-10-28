@@ -41,7 +41,7 @@ impl Sampling {
         let reason = prepared.reason.clone();
         let maintenance = prepared.into_session();
         #[allow(unused_mut)]
-        let mut status = self.status(enabled, &reason, maintenance.as_ref());
+        let mut status = policy.status(enabled, &reason, maintenance.as_ref());
         #[cfg(feature = "dial9")]
         let registration = {
             let registration = Arc::new(registration::RecorderRegistrations::new(Some(
@@ -86,6 +86,21 @@ async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_i
             tokio::task::yield_now().await;
         }
     }
+    let census = sampling
+        .population_at()
+        .store(store.as_ref())
+        // This helper exercises the public admission path's wall clock;
+        // MemoryStore's modification times advance with paused Tokio time.
+        .at(std::time::SystemTime::now())
+        .max_age(Duration::from_secs(10))
+        .call()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        census.no_support, 1,
+        "cold disabled cohort cannot be reconstructed"
+    );
     let future_startup = sampling
         .prepare_on_executor(async { Ok(store.clone()) })
         .await;
@@ -96,6 +111,41 @@ async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_i
     assert!(!session.enabled(), "an unarmed process never enables later");
     future_startup.shutdown(Duration::from_secs(1)).await;
     session.shutdown(Duration::from_secs(1)).await;
+}
+
+#[cfg(feature = "dial9")]
+#[test]
+fn enabled_fallback_without_maintenance_records_a_terminal_weight_at_application_return() {
+    let sampling = Sampling::builder()
+        .scope("fallback-weight")
+        .target(1)
+        .startup_timeout(Duration::ZERO)
+        .if_failed(StartupFailure::assume_population(1))
+        .build();
+    let (status, recorder) = sampling
+        .with_backend(async {
+            panic!("zero budget must not poll the backend");
+            #[allow(unreachable_code)]
+            Ok(MemoryStore::new())
+        })
+        .start_application(|status| {
+            assert!(status.enabled);
+            assert_eq!(status.initial_expansion_weight, Some(1.0));
+            assert!(status.changes.is_none());
+            let recorder = dial9_core::recorder::recorder(
+                dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+            )
+            .build();
+            status.register_recorder(&recorder);
+            (status, recorder)
+        });
+    assert!(!recorder.handle().is_enabled());
+    assert_eq!(
+        status.weights.as_ref().unwrap().current_expansion_weight(),
+        Some(0.0)
+    );
+    recorder.enable();
+    assert!(!recorder.handle().is_enabled());
 }
 
 #[rstest::rstest]
@@ -225,8 +275,10 @@ async fn automatic_recorder_stop_survives_status_drop(#[case] maintenance_ended:
     )));
     let status = SamplingStatus {
         enabled: true,
+        initial_expansion_weight: Some(1.0),
         changes: Some(changes),
         registration: Arc::downgrade(&registration),
+        weights: None,
     };
     let recorder =
         dial9_core::recorder::recorder(dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap())
@@ -242,56 +294,6 @@ async fn automatic_recorder_stop_survives_status_drop(#[case] maintenance_ended:
     registration.wait_for_stops().await;
     assert!(!recorder.handle().is_enabled());
     registration.stop();
-}
-
-#[cfg(feature = "dial9")]
-#[tokio::test(start_paused = true)]
-async fn roster_trim_disables_registered_recorders_without_application_tasks() {
-    let store = Arc::new(MemoryStore::new());
-    let mut invocations = Vec::new();
-    for host in ["host-a", "host-b", "host-c"] {
-        let TestSession {
-            status,
-            maintenance,
-            registration,
-        } = Sampling::builder()
-            .scope("automatic-roster-trim")
-            .host_id(host)
-            .target(1)
-            .max_overshoot(0)
-            .poll_interval(Duration::from_secs(3))
-            .bucket_width(Duration::from_secs(30))
-            .max_clock_skew(Duration::ZERO)
-            .if_failed(StartupFailure::assume_population(1))
-            .build()
-            .prepare_on_executor(async { Ok(store.clone()) })
-            .await;
-        assert!(status.enabled);
-        let recorder =
-            dial9_core::recorder::recorder(dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap())
-                .build();
-        status.register_recorder(&recorder);
-        drop(status);
-        invocations.push((maintenance.unwrap(), registration, recorder));
-    }
-    for _ in 0..20 {
-        tokio::time::advance(Duration::from_secs(1)).await;
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
-    }
-    assert_eq!(
-        invocations
-            .iter()
-            .filter(|(_, _, recorder)| recorder.handle().is_enabled())
-            .count(),
-        1
-    );
-    for (maintenance, registration, recorder) in invocations {
-        registration.stop();
-        assert!(!recorder.handle().is_enabled());
-        maintenance.shutdown(Duration::from_secs(1)).await;
-    }
 }
 
 #[tokio::test(start_paused = true)]

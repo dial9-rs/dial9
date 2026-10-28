@@ -78,6 +78,7 @@ async fn seed(store: &MemoryStore, config: &Config, population: u64) -> Roster {
         active: 0,
         carriers: 0,
         unarmed: population,
+        no_support: 0,
     };
     publish(store, config, &roster, WriteCondition::absent()).await;
     roster
@@ -98,6 +99,100 @@ async fn startup_requires_one_get_and_no_claims_or_lists() {
         .unwrap()
         .shutdown(Duration::from_secs(1))
         .await;
+}
+
+#[rstest::rstest]
+#[case(100, 1000, 0)]
+#[case(1000, 10000, 2000)]
+#[tokio::test(start_paused = true)]
+async fn backend_timestamp_uncertainty_rejects_an_impossible_census_window(
+    #[case] poll_ms: u64,
+    #[case] bucket_ms: u64,
+    #[case] skew_ms: u64,
+) {
+    struct CoarseStore(MemoryStore);
+    impl SamplingStore for CoarseStore {
+        fn modification_time_uncertainty(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+        fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
+            self.0.get(key)
+        }
+        fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
+            self.0.put(request)
+        }
+        fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+            self.0.list(request)
+        }
+        fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+            self.0.delete(key)
+        }
+    }
+    let mut policy = config(15, "node");
+    policy.poll_interval = Duration::from_millis(poll_ms);
+    policy.bucket_width = Duration::from_millis(bucket_ms);
+    policy.max_clock_skew = Duration::from_millis(skew_ms);
+    assert!(
+        policy.validate().is_ok(),
+        "backend-independent settings are valid"
+    );
+    let store = Arc::new(CoarseStore(MemoryStore::new()));
+    let node = prepare_using(
+        policy,
+        store.clone(),
+        Duration::from_secs(1),
+        Arc::new(WallClock),
+    )
+    .await;
+    assert!(!node.enabled);
+    assert!(matches!(
+        node.reason,
+        DecisionReason::InvalidConfiguration { .. }
+    ));
+    assert!(node.session.is_none());
+    assert_eq!(store.0.operation_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn census_history_survives_roster_replacement_and_membership_cleanup() {
+    let store = Arc::new(MemoryStore::new());
+    let policy = config(1, "historical-node");
+    let node = prepare(&policy, store.clone()).await;
+    settle_time(5).await;
+    let time = store.now();
+    let before = policy
+        .population_at()
+        .store(store.as_ref())
+        .at(time)
+        .max_age(Duration::from_secs(5))
+        .call()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.tracked, 1);
+    node.into_session()
+        .unwrap()
+        .shutdown(Duration::from_secs(1))
+        .await;
+    assert!(!store.objects().keys().any(|k| k.contains("/members/")));
+    store
+        .delete(format!("{}roster.json", policy.pool_prefix()))
+        .await
+        .unwrap();
+    let after = policy
+        .population_at()
+        .store(store.as_ref())
+        .at(time)
+        .max_age(Duration::from_secs(5))
+        .call()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.population, before.population);
+    assert_eq!(
+        after.observation_completed_at,
+        before.observation_completed_at
+    );
 }
 
 #[rstest::rstest]
@@ -152,23 +247,72 @@ async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
     let store = Arc::new(MemoryStore::new());
     let mut sessions = Vec::new();
     let mut signals = Vec::new();
+    let mut policies = Vec::new();
+    #[cfg(feature = "dial9")]
+    let mut recorders = Vec::new();
     for index in 0..12 {
         let mut policy = config(3, &format!("node-{index}"));
         policy.max_overshoot = Some(0);
         let node = prepare(&policy, store.clone()).await;
         assert!(node.enabled);
         let session = node.into_session().unwrap();
+        #[cfg(feature = "dial9")]
+        {
+            let registration = Arc::new(crate::registration::RecorderRegistrations::new(Some(
+                tokio::runtime::Handle::current(),
+            )));
+            let mut status = policy.status(true, &DecisionReason::MissingRoster, Some(&session));
+            status.registration = Arc::downgrade(&registration);
+            let recorder = dial9_core::recorder::recorder(
+                dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+            )
+            .build();
+            status.register_recorder(&recorder);
+            recorders.push((registration, recorder));
+        }
         signals.push(session.recording_changes());
         sessions.push(session);
+        policies.push(policy);
     }
-    settle_time(12).await;
-    assert_eq!(signals.iter().filter(|signal| *signal.borrow()).count(), 3);
+    let salt = nonce();
+    let mut draws: Vec<_> = policies.iter().map(|p| p.draw("trim", &salt)).collect();
+    draws.sort_unstable();
+    let survival = Cutoff::threshold(u128::from(draws[6]));
+    let expected: Vec<_> = policies
+        .iter()
+        .map(|p| survival.includes(p.draw("trim", &salt)))
+        .collect();
+    let mut roster = Roster::initial(&policies[0], &nonce());
+    roster.epoch = 1;
+    roster.cutoff_settled = true;
+    roster.arm_cutoff = Cutoff(None);
+    roster.census_computed_at_ms = Some(millis(store.now()).unwrap());
+    roster.trim = Some(Trim {
+        epoch: 1,
+        salt,
+        created_ms: roster.census_computed_at_ms.unwrap(),
+        survival,
+    });
+    publish(&store, &policies[0], &roster, WriteCondition::absent()).await;
+    settle_time(2).await;
+    for (signal, expected) in signals.iter().zip(&expected) {
+        assert_eq!(*signal.borrow(), *expected);
+    }
+    #[cfg(feature = "dial9")]
+    for ((_, recorder), expected) in recorders.iter().zip(&expected) {
+        assert_eq!(recorder.handle().is_enabled(), *expected);
+        if !expected {
+            recorder.enable();
+            recorder.handle().enable();
+            assert!(!recorder.handle().is_enabled());
+        }
+    }
     assert_eq!(
         sessions
             .iter()
             .filter(|session| session.is_recording())
             .count(),
-        3
+        expected.iter().filter(|&&kept| kept).count()
     );
     let terminal: Vec<_> = signals.iter().map(|signal| !*signal.borrow()).collect();
     // A later permissive roster cannot rearm a carrier.
@@ -180,7 +324,7 @@ async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
         .unwrap()
         .unwrap();
     let mut roster: Roster = serde_json::from_slice(object.body()).unwrap();
-    roster.keep_cutoff = None;
+    roster.trim = None;
     roster.arm_cutoff = Cutoff(None);
     roster.revision = nonce();
     store
@@ -193,7 +337,7 @@ async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
         )
         .await
         .unwrap();
-    settle_time(3).await;
+    settle_time(2).await;
     for (was_terminal, signal) in terminal.iter().zip(&signals) {
         if *was_terminal {
             assert!(!*signal.borrow());
@@ -201,6 +345,10 @@ async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
     }
     for session in sessions {
         session.shutdown(Duration::from_secs(1)).await;
+    }
+    #[cfg(feature = "dial9")]
+    for (registration, _) in recorders {
+        registration.stop();
     }
 }
 
@@ -248,7 +396,9 @@ async fn restart_incarnations_are_distinct_even_with_sticky_rank_and_delayed_cle
         .into_keys()
         .filter(|key| key.contains("/members/"))
         .collect();
-    let new = prepare(&policy, store.clone()).await;
+    let mut restarted = policy.clone();
+    restarted.invocation_id = nonce();
+    let new = prepare(&restarted, store.clone()).await;
     settle_time(1).await;
     let before = census(
         store.as_ref(),
@@ -508,10 +658,11 @@ async fn incomplete_or_looping_pagination_cannot_become_a_population(#[case] rep
 }
 
 #[test]
-fn count_cutoff_and_trim_boundary_do_not_have_order_statistic_off_by_one() {
+fn count_cutoff_and_trim_survival_use_independent_probability_spaces() {
     let mut policy = config(3, "reader");
     policy.max_overshoot = Some(0);
     let mut roster = Roster::initial(&policy, &nonce());
+    roster.epoch = 1;
     let members: Vec<_> = (0..8)
         .map(|rank| Member {
             boundary: Boundary {
@@ -525,13 +676,21 @@ fn count_cutoff_and_trim_boundary_do_not_have_order_statistic_off_by_one() {
     let mut history = VecDeque::from([8, 8, 8]);
     compute(&mut roster, &policy, &members, &mut history, 1000);
     assert_eq!(roster.arm_cutoff, Cutoff::threshold(3 * (1u128 << 64) / 8));
-    assert_eq!(roster.keep_cutoff.as_ref().unwrap().rank, 3);
     assert_eq!(
-        members
-            .iter()
-            .filter(|member| member.boundary < *roster.keep_cutoff.as_ref().unwrap())
-            .count(),
-        3
+        roster.trim.as_ref().unwrap().survival,
+        Cutoff::threshold(3 * (1u128 << 64) / 8)
+    );
+    let salt = roster.trim.as_ref().unwrap().salt.clone();
+    compute(&mut roster, &policy, &members, &mut history, 2000);
+    assert_eq!(
+        roster.trim.as_ref().unwrap().salt,
+        salt,
+        "round held during follower grace"
+    );
+    compute(&mut roster, &policy, &members[..3], &mut history, 2500);
+    assert!(
+        roster.trim.is_none(),
+        "healthy census clears ancestral thinning"
     );
 }
 
@@ -566,6 +725,62 @@ fn sparse_census_uses_a_lower_population_assumption_and_default_tracks_all() {
 fn worker(policy: &Config, store: Arc<dyn SamplingStore>, clock: Arc<dyn Clock>) -> Worker {
     let (signal, _receiver) = watch::channel(true);
     Worker::new(policy.clone(), store, clock, None, signal, true)
+}
+
+#[cfg(feature = "dial9")]
+#[tokio::test(start_paused = true)]
+async fn survivor_weights_apply_each_new_epoch_once_and_new_joiners_skip_old_rounds() {
+    let store = Arc::new(MemoryStore::new());
+    let policy = config(3, "weighted-worker");
+    let mut active = worker(&policy, store.clone(), store.clone());
+    let weights = crate::trace_weights::TraceWeights::new(
+        policy.pool_hash(),
+        policy.invocation_id.clone(),
+        10.0,
+    );
+    active.weights = Some(weights.clone());
+    let mut roster = Roster::initial(&policy, &nonce());
+    roster.census_computed_at_ms = Some(millis(store.now()).unwrap());
+    for epoch in [1, 2] {
+        let salt = nonce();
+        // Seal a nonzero cutoff above this fixture's known draw. Distribution
+        // correctness is checked independently; this exercises real application.
+        let cutoff = (u128::from(policy.draw("trim", &salt)) + (1u128 << 64)) / 2 + 1;
+        let survival = Cutoff::threshold(cutoff);
+        let factor = 1.0 / survival.probability();
+        roster.epoch = epoch;
+        roster.trim = Some(Trim {
+            epoch,
+            salt,
+            created_ms: millis(store.now()).unwrap(),
+            survival,
+        });
+        publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
+        active.observed = active.read_roster().await.unwrap();
+        let before = weights.current_expansion_weight().unwrap();
+        active.apply_trim().await.unwrap();
+        assert_eq!(weights.current_expansion_weight(), Some(before * factor));
+        active.apply_trim().await.unwrap();
+        assert_eq!(weights.current_expansion_weight(), Some(before * factor));
+        let (signal, _) = watch::channel(true);
+        let mut joining = Worker::new(
+            config(3, "new-joiner"),
+            store.clone(),
+            store.clone(),
+            active.observed.clone(),
+            signal,
+            true,
+        );
+        let joining_weights = crate::trace_weights::TraceWeights::new(
+            policy.pool_hash(),
+            joining.incarnation.clone(),
+            10.0,
+        );
+        joining.weights = Some(joining_weights.clone());
+        joining.apply_trim().await.unwrap();
+        assert_eq!(joining_weights.current_expansion_weight(), Some(10.0));
+        assert_eq!(joining.state, MemberState::Active);
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -678,13 +893,15 @@ async fn partition_can_exceed_soft_cap_then_recovery_only_stops_processes() {
     );
     store.set_unavailable(false);
     settle_time(16).await;
-    assert_eq!(
-        fleet
-            .iter()
-            .filter(|session| session.is_recording())
-            .count(),
-        3
-    );
+    // Statistical concentration is checked by the independent simulator. This
+    // regression verifies recovery executes the census and publishes thinning.
+    let object = store
+        .get(format!("{}roster.json", config(3, "reader").pool_prefix()))
+        .await
+        .unwrap()
+        .unwrap();
+    let roster: Roster = serde_json::from_slice(object.body()).unwrap();
+    assert!(roster.census_computed_at_ms.is_some());
     for session in fleet {
         session.shutdown(Duration::from_secs(1)).await;
     }
@@ -695,9 +912,12 @@ async fn stale_keep_boundary_does_not_trim_using_an_old_cohort() {
     let store = Arc::new(MemoryStore::new());
     let policy = config(3, "node");
     let mut roster = seed(&store, &policy, 3).await;
-    roster.keep_cutoff = Some(Boundary {
-        rank: 0,
-        incarnation: nonce(),
+    roster.epoch = 1;
+    roster.trim = Some(Trim {
+        epoch: 1,
+        salt: nonce(),
+        created_ms: millis(store.now()).unwrap(),
+        survival: Cutoff(Some(1)),
     });
     publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
     tokio::time::advance(Duration::from_secs(4)).await;
@@ -712,13 +932,16 @@ async fn prepared_startup_choice_is_immutable_even_if_maintenance_trims_before_c
     let store = Arc::new(MemoryStore::new());
     let policy = config(3, "node");
     let mut roster = seed(&store, &policy, 3).await;
-    roster.keep_cutoff = Some(Boundary {
-        rank: 0,
-        incarnation: nonce(),
-    });
-    publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
     let prepared = prepare(&policy, store.clone()).await;
     assert!(prepared.enabled);
+    roster.epoch = 1;
+    roster.trim = Some(Trim {
+        epoch: 1,
+        salt: nonce(),
+        created_ms: millis(store.now()).unwrap(),
+        survival: Cutoff(Some(1)),
+    });
+    publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
     settle_time(1).await;
     assert!(!prepared.session.as_ref().unwrap().is_recording());
     assert!(
@@ -772,7 +995,7 @@ async fn bucket_edge_renews_lease_without_listing_or_replacing_admission() {
     );
     let roster = &leader.leader.as_ref().unwrap().roster;
     assert!(!roster.cutoff_settled);
-    assert!(roster.keep_cutoff.is_none());
+    assert!(roster.trim.is_none());
     assert_eq!(
         leader.pass_cadence(),
         Duration::from_secs(1),
@@ -806,9 +1029,12 @@ async fn fresh_server_commit_cannot_freshen_an_expired_census_trim_boundary() {
     let store = Arc::new(MemoryStore::new());
     let policy = config(3, "node");
     let mut roster = seed(&store, &policy, 3).await;
-    roster.keep_cutoff = Some(Boundary {
-        rank: 0,
-        incarnation: nonce(),
+    roster.epoch = 1;
+    roster.trim = Some(Trim {
+        epoch: 1,
+        salt: nonce(),
+        created_ms: millis(store.now()).unwrap(),
+        survival: Cutoff(Some(1)),
     });
     let key = format!("{}roster.json", policy.pool_prefix());
     let previous = store.get(key.clone()).await.unwrap().unwrap();

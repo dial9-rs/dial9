@@ -3,7 +3,8 @@
 `dial9-sampling` makes one profiling decision at application startup from a
 shared S3 population roster. An elected process maintains the census in the
 background; excess profilers can stop permanently. The target is an expected
-count, with a soft upper limit while storage and the census are healthy.
+count. Overshoot triggers randomized thinning; the profiler count has
+statistical error while storage and the census are healthy.
 
 Enable `s3` for the native backend and `dial9` for recorder registration.
 
@@ -65,17 +66,20 @@ Use a new scope when changing the pool policy.
 Choose `if_failed` explicitly. `StartupFailure::disabled()` starts off when the
 roster is unavailable, invalid, missing or unsettled. Those tracked processes
 still populate the census; only future startups can become enabled after it
-settles. `StartupFailure::assume_population(n)` selects by rank with probability
-`min(1, target / n)`. An inaccurate assumption can over- or undersample.
+settles. `StartupFailure::assume_population(n)` uses an independent draw with probability
+`min(1, target / n)`, capped by the tracking fraction. An inaccurate assumption
+can over- or undersample.
 
 By default all processes are tracked. `minimum_population(n)` asserts a lower
 bound for this particular pool and chooses the largest `k` with
 `n / 2^k >= 32 * target`; only ranks in the lowest `1 / 2^k` slice perform I/O.
 An overstated lower bound loses small-pool coverage. A maximum fleet size cannot
-justify it. A supplied `host_id` keeps the rank sticky across restarts; otherwise
-each invocation gets a fresh identity. Simultaneously live processes need
-independent identities for the statistical bounds. Fresh membership incarnations
-isolate restart cleanup; overlapping processes count separately.
+justify it. A supplied `host_id` keeps the **census** rank stable across restarts;
+otherwise each invocation gets a fresh identity. Simultaneously live processes
+need independent identities for the statistical bounds. Profiling admission
+uses separate, fresh invocation randomness; each startup choice stays fixed.
+Fresh membership incarnations isolate restart cleanup; overlapping processes
+count separately.
 
 ## Census, trimming and storage
 
@@ -90,9 +94,17 @@ This heuristic does not certify a complete census. Empty counts cannot establish
 one. The last settled admission cutoff survives outages; stale population data
 can therefore over- or undersample. Existing off processes never turn on.
 
-A fresh census can trim active processes to `target + max_overshoot`, whose
-default is `ceil(3 * sqrt(target))`. Trimmed carriers continue census membership
-and never restart recording. Lease age uses server modification time; trimming
+A fresh census whose admitted count `A` exceeds `target + max_overshoot`
+publishes a fresh thinning round with survival probability `q = target / A`.
+The overshoot default is `ceil(3 * sqrt(target))`. Each eligible process applies
+a round once using independent randomness; survivors increase their expansion
+weight by `1/q`, and failed draws stop permanently. A fully applied round on
+`A` members has expected remaining count `target`, not an exact cap. Slow
+polling, changing membership and partial application add separate error.
+The round remains stable during a grace period; a healthy census clears it,
+and new joiners skip rounds published before their startup observation.
+Trimmed carriers continue census membership and never restart recording.
+Lease age uses server modification time; trimming
 also checks the embedded census age. Partitions can exceed the cap indefinitely.
 Bucket-edge LIST guards require `max_clock_skew` (default 5s) to bound each host
 relative to storage UTC, with a safe window after backend timestamp uncertainty.
@@ -101,6 +113,81 @@ Crashes or failed cleanup can leave membership visible for two bucket widths.
 The S3 prefix defaults to `_dial9_sampling/`. Grant GET, PUT, LIST and membership
 DELETE. Expire **only** `v2/members/`, with retention comfortably exceeding two
 bucket widths and skew (for example one day). Preserve `v2/pools/` rosters.
+Retain `v2/census/` observations at least as long as the traces to be analyzed.
 Custom backends implement `backend::SamplingStore` with strong reads, atomic
 conditional writes, complete pagination and declared timestamp uncertainty;
 unknown writes must never be hidden by blind retries.
+
+## Historical population
+
+The counted unit is a live process/container that could emit Dial9 traces,
+including processes whose profiling choice is off. Each complete, guarded
+census writes an immutable observation before attempting the roster CAS.
+Membership cleanup and roster replacement do not delete observations. A
+publisher that later loses its CAS still supplied a complete measurement;
+the observation does not imply that its cutoffs were adopted.
+
+```rust,ignore
+let estimate = sampling.population_at()
+    .store(&store)
+    .at(time_slice)
+    .max_age(Duration::from_secs(90))
+    .call()
+    .await?;
+```
+
+This returns the latest census completed before the requested time, or `None`
+when no sufficiently recent evidence exists. The result includes the listing
+interval, observation age, bucket width, skew, tracked count `R`, tracking
+fraction `f`, and projected population `R / f`. For independent identities,
+the plug-in Gaussian standard error is `sqrt(R * (1-f)) / f`; sparse counts
+below 30 omit that approximation. A full census has no hash sampling error.
+
+This uncertainty describes **visible membership**, not an instantaneous live
+count. A short-lived process may finish between observations; a crash or
+failed cleanup can leave a ghost for nearly two bucket widths. Missing
+participants, clock violations, identity reuse and partitions cause separate
+bias. Do not extrapolate a nearby observation into an exact time-slice count.
+The admitted count describes the sampler choice; trace or recorder evidence
+establishes which processes actually recorded.
+
+## Fleet flamegraph weights
+
+`status.register_recorder(...)` also attaches time-stamped expansion weights.
+The existing background roster refresh updates this metadata when the process
+applies a new thinning round; no separate roster reader is needed. Decoding
+needs one expansion factor for each sampling interval, rather than the full
+roster or an external join.
+Let `f` be the tracking fraction and `r` the startup admission probability
+conditional on tracking. A selected process starts with weight `1 / (f*r)`;
+each independent thinning round it actually survives multiplies this by `1/q`.
+Missed rounds add no factor. These sequential conditional factors preserve the
+expected contribution of each process despite changing cohorts and asynchronous
+application; they are not its exact marginal inclusion probability.
+
+The sampler uses separate entropy for tracking, admission and each thinning
+round. Protocol schema 3 rejects peers using the earlier rank-based trimming
+semantics. Configured `host_id` affects census tracking, not the fresh admission
+or thinning draws.
+
+Every recorded segment carries `dial9.sampling.pool`, `incarnation`, `schema`,
+`clock`, `weight_history` and `observed_through_ns` metadata. History is JSON
+`[[monotonic_ns, expansion_weight], ...]`. For each CPU sample or stack-duration
+contribution, use the last history entry at or before its **collection time**,
+multiply its sample mass by that factor, then sum by stack. Do not apply the
+last weight to an entire file or use a single population/profiler ratio.
+Later segments repeat the full history and can extend earlier coverage.
+Times beyond the checkpoint, missing history, or `null` weights are unknown.
+A terminal zero entry excludes frames collected during asynchronous stop lag.
+An idle recorder may emit no segment, so trace presence alone is not a census.
+
+Unbiased expanded totals require positive sampling support, independent
+identities/randomness, exogenous lifetimes/workload and usable trace delivery.
+For complete startup-cohort coverage choose a positive `AssumePopulation`
+fallback. A cold `Disabled` cohort has zero inclusion probability and cannot
+be recovered from later traces; `no_support` in census observations exposes
+tracked members of these cohorts. Missing or dropped trace spans cannot be
+repaired by census data. Workload estimates can have large variance; normalizing
+expanded totals into percentages introduces the usual finite-sample ratio error.
+This PR records the evidence needed by a future weighted flamegraph reader;
+the existing viewer does not yet apply these factors.

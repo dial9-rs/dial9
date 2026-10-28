@@ -1,6 +1,7 @@
 //! Sticky startup selection from one roster, maintained by an elected census leader.
 mod engine;
 mod rate_limit;
+pub(crate) use rate_limit::rate_limited;
 #[cfg(all(test, shuttle))]
 mod storage_shuttle_tests;
 
@@ -19,7 +20,8 @@ pub enum StartupFailure {
     /// Keeps profiling off. This still participates in the background census.
     #[non_exhaustive]
     Disabled {},
-    /// Uses the stable rank with probability `min(1, target / population)`.
+    /// Uses an independent invocation draw with probability `min(1, target / population)`,
+    /// capped by the census tracking fraction.
     /// The population assumption is the caller's; it does not bound actual volume.
     #[non_exhaustive]
     AssumePopulation {
@@ -32,7 +34,7 @@ impl StartupFailure {
     pub fn disabled() -> Self {
         Self::Disabled {}
     }
-    /// Selects by stable rank using a positive assumed population.
+    /// Selects by an independent invocation draw using a positive assumed population.
     pub fn assume_population(population: u64) -> Self {
         Self::AssumePopulation { population }
     }
@@ -84,17 +86,28 @@ impl Config {
         )
     }
     pub(crate) fn failure_decision(&self) -> bool {
-        self.target > 0
-            && self.validate().is_ok()
-            && self.tracked()
-            && match self.if_failed {
-                StartupFailure::Disabled {} => false,
-                StartupFailure::AssumePopulation { population } => {
-                    let threshold = ((u128::from(self.target) << 64) / u128::from(population))
-                        .min(self.tracked_limit());
-                    u128::from(self.rank()) < threshold
-                }
+        self.validate().is_ok() && self.selects(self.failure_cutoff())
+    }
+    pub(crate) fn failure_cutoff(&self) -> u128 {
+        match self.if_failed {
+            StartupFailure::Disabled {} => 0,
+            StartupFailure::AssumePopulation { population: 0 } => 0,
+            StartupFailure::AssumePopulation { population } => {
+                ((u128::from(self.target) << 64) / u128::from(population)).min(self.tracked_limit())
             }
+        }
+    }
+    fn draw(&self, purpose: &str, round: &str) -> u64 {
+        let canonical = serde_json::to_vec(&(&self.invocation_id, purpose, round))
+            .expect("string tuple serializes");
+        u64::from_be_bytes(
+            Sha256::digest(canonical)[..8]
+                .try_into()
+                .expect("digest length"),
+        )
+    }
+    fn selects(&self, cutoff: u128) -> bool {
+        self.tracked() && u128::from(self.draw("admission", "")) < (cutoff << self.slice_bits())
     }
     pub(crate) fn validate(&self) -> Result<(), String> {
         let Some(host_id) = &self.host_id else {
@@ -132,7 +145,7 @@ impl Config {
         }
         Ok(())
     }
-    fn pool_hash(&self) -> String {
+    pub(crate) fn pool_hash(&self) -> String {
         let mut dimensions = self.dimensions.clone();
         dimensions.sort();
         let canonical =

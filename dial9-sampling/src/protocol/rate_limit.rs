@@ -26,4 +26,4 @@ macro_rules! rate_limited {
     }};
 }
 
-pub(super) use rate_limited;
+pub(crate) use rate_limited;

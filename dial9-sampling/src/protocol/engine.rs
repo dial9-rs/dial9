@@ -1,4 +1,4 @@
-use super::{Config, rate_limit::rate_limited};
+use super::{Config, rate_limited};
 use crate::backend::{
     ListRequest, PutOutcome, PutRequest, SamplingStore, StoreError, StoreErrorKind, StoredObject,
     VersionToken, WriteCondition,
@@ -67,8 +67,18 @@ pub(crate) struct SamplingSession {
     #[cfg(any(test, feature = "dial9"))]
     recording: watch::Receiver<bool>,
     cleanup_budget: Arc<Mutex<Duration>>,
+    startup_probability: f64,
+    #[cfg(feature = "dial9")]
+    weights: Option<crate::trace_weights::TraceWeights>,
 }
 impl SamplingSession {
+    pub(crate) fn startup_probability(&self) -> f64 {
+        self.startup_probability
+    }
+    #[cfg(feature = "dial9")]
+    pub(crate) fn weights(&self) -> Option<crate::trace_weights::TraceWeights> {
+        self.weights.clone()
+    }
     #[cfg(all(test, not(shuttle)))]
     pub(crate) fn is_recording(&self) -> bool {
         *self.recording.borrow()
@@ -130,6 +140,12 @@ fn serialize(value: &impl Serialize) -> Bytes {
 #[serde(transparent)]
 struct Cutoff(Option<u64>);
 impl Cutoff {
+    fn value(&self) -> u128 {
+        self.0.map_or(1u128 << 64, u128::from)
+    }
+    fn probability(&self) -> f64 {
+        self.value() as f64 / (1u128 << 64) as f64
+    }
     fn threshold(value: u128) -> Self {
         Self(if value >= (1u128 << 64) {
             None
@@ -166,7 +182,7 @@ struct Policy {
 impl Policy {
     fn new(config: &Config) -> Self {
         Self {
-            schema: 2,
+            schema: 3,
             pool: config.pool_hash(),
             target: config.target(),
             slice_bits: config.slice_bits(),
@@ -183,6 +199,14 @@ struct Counts {
     active: u64,
     carriers: u64,
     unarmed: u64,
+    no_support: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Trim {
+    epoch: u64,
+    salt: String,
+    created_ms: u64,
+    survival: Cutoff,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Roster {
@@ -194,7 +218,7 @@ struct Roster {
     cutoff_settled: bool,
     settled: bool,
     arm_cutoff: Cutoff,
-    keep_cutoff: Option<Boundary>,
+    trim: Option<Trim>,
     counts: Counts,
     census_computed_at_ms: Option<u64>,
     population: Option<u64>,
@@ -210,7 +234,7 @@ impl Roster {
             cutoff_settled: false,
             settled: false,
             arm_cutoff: Cutoff::threshold(config.tracked_limit()),
-            keep_cutoff: None,
+            trim: None,
             counts: Counts::default(),
             census_computed_at_ms: None,
             population: None,
@@ -227,16 +251,18 @@ impl Roster {
         if !self.arm_cutoff.within(config.tracked_limit())
             || self.holder.parse::<ulid::Ulid>().is_err()
             || self.revision.parse::<ulid::Ulid>().is_err()
-            || (self.keep_cutoff.is_some() && self.census_computed_at_ms.is_none())
+            || (self.trim.is_some() && self.census_computed_at_ms.is_none())
+            || self.counts.no_support > self.counts.unarmed
             || self
                 .counts
                 .active
                 .checked_add(self.counts.carriers)
                 .and_then(|n| n.checked_add(self.counts.unarmed))
                 != Some(self.counts.tracked)
-            || self.keep_cutoff.as_ref().is_some_and(|boundary| {
-                u128::from(boundary.rank) >= config.tracked_limit()
-                    || boundary.incarnation.parse::<ulid::Ulid>().is_err()
+            || self.trim.as_ref().is_some_and(|trim| {
+                trim.epoch > self.epoch
+                    || trim.salt.parse::<ulid::Ulid>().is_err()
+                    || trim.survival.value() == 0
             })
         {
             return Err(invalid("invalid sampling roster fields"));
@@ -293,6 +319,20 @@ pub(crate) async fn prepare_using(
     if let Err(message) = config.validate() {
         return PreparedSampling::disabled(DecisionReason::invalid_configuration(message), false);
     }
+    let guard_ms = config
+        .max_clock_skew
+        .saturating_mul(2)
+        .saturating_add(store.modification_time_uncertainty())
+        .as_nanos()
+        .div_ceil(1_000_000);
+    if config.bucket_width.as_millis() <= guard_ms.saturating_mul(2) {
+        return PreparedSampling::disabled(
+            DecisionReason::invalid_configuration(
+                "bucket width must exceed twice the census guard (two clock skews plus backend timestamp uncertainty)",
+            ),
+            false,
+        );
+    }
     if config.target() == 0 {
         return PreparedSampling::disabled(DecisionReason::TargetZero, false);
     }
@@ -334,7 +374,7 @@ pub(crate) async fn prepare_using(
                 (fallback, DecisionReason::UnsettledRoster, Some(observed))
             }
             Ok(observed) => {
-                let active = observed.roster.arm_cutoff.includes(config.rank());
+                let active = config.selects(observed.roster.arm_cutoff.value());
                 (
                     active,
                     if active {
@@ -363,10 +403,32 @@ pub(crate) async fn prepare_using(
         population = ?observed.as_ref().and_then(|o| o.roster.population),
         "sampling startup roster"
     );
+    let startup_probability = observed
+        .as_ref()
+        .filter(|o| o.roster.cutoff_settled)
+        .map_or_else(
+            || config.failure_cutoff() as f64 / (1u128 << 64) as f64,
+            |o| o.roster.arm_cutoff.probability(),
+        );
+    #[cfg(feature = "dial9")]
+    let weights = recording.then(|| {
+        crate::trace_weights::TraceWeights::new(
+            config.pool_hash(),
+            config.invocation_id.clone(),
+            1.0 / startup_probability,
+        )
+    });
     let (signal, changes) = watch::channel(recording);
     let stop = CancellationToken::new();
     let cleanup_budget = Arc::new(Mutex::new(Duration::from_millis(500)));
     let mut worker = Worker::new(config, store, clock, observed, signal, membership_allowed);
+    if startup_probability == 0.0 {
+        worker.state = MemberState::NoSupport;
+    }
+    #[cfg(feature = "dial9")]
+    {
+        worker.weights = weights.clone();
+    }
     let cancellation = stop.clone();
     let budget = cleanup_budget.clone();
     let task = tokio::spawn(async move {
@@ -374,6 +436,10 @@ pub(crate) async fn prepare_using(
             biased;
             () = cancellation.cancelled() => {},
             () = worker.run() => {},
+        }
+        #[cfg(feature = "dial9")]
+        if let Some(weights) = &worker.weights {
+            weights.stop();
         }
         worker.signal.send_replace(false);
         let timeout = *budget.lock().expect("cleanup budget lock");
@@ -390,6 +456,9 @@ pub(crate) async fn prepare_using(
         stop,
         task: Some(task),
         cleanup_budget,
+        startup_probability,
+        #[cfg(feature = "dial9")]
+        weights,
         #[cfg(any(test, feature = "dial9"))]
         recording: changes,
     });
@@ -399,6 +468,7 @@ pub(crate) async fn prepare_using(
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum MemberState {
     Unarmed,
+    NoSupport,
     Active,
     Carrier,
 }
@@ -406,6 +476,7 @@ impl MemberState {
     fn code(&self) -> char {
         match self {
             Self::Unarmed => 'u',
+            Self::NoSupport => 'n',
             Self::Active => 'a',
             Self::Carrier => 'c',
         }
@@ -413,6 +484,7 @@ impl MemberState {
     fn parse(value: &str) -> Result<Self, StoreError> {
         match value {
             "u" => Ok(Self::Unarmed),
+            "n" => Ok(Self::NoSupport),
             "a" => Ok(Self::Active),
             "c" => Ok(Self::Carrier),
             _ => Err(invalid("invalid member state")),
@@ -549,15 +621,17 @@ fn compute(
     now: u64,
 ) {
     let mut counts = Counts::default();
-    let mut active = Vec::new();
     for member in members {
         counts.tracked += 1;
         match member.state {
             MemberState::Unarmed => counts.unarmed += 1,
+            MemberState::NoSupport => {
+                counts.unarmed += 1;
+                counts.no_support += 1;
+            }
             MemberState::Carrier => counts.carriers += 1,
             MemberState::Active => {
                 counts.active += 1;
-                active.push(member.boundary.clone());
             }
         }
     }
@@ -580,11 +654,22 @@ fn compute(
         roster.cutoff_settled = true;
     }
     let cap = u64::from(config.target()) + u64::from(config.overshoot());
-    active.sort();
-    roster.keep_cutoff = usize::try_from(cap)
-        .ok()
-        .and_then(|cap| active.get(cap))
-        .cloned();
+    if counts.active <= cap {
+        roster.trim = None;
+    } else if roster.trim.as_ref().is_none_or(|trim| {
+        now.saturating_sub(trim.created_ms)
+            >= config.poll_interval.as_millis() as u64 * 3
+                + config.max_clock_skew.as_millis() as u64 * 2
+    }) {
+        roster.trim = Some(Trim {
+            epoch: roster.epoch,
+            salt: nonce(),
+            created_ms: now,
+            survival: Cutoff::threshold(
+                (u128::from(config.target()) << 64) / u128::from(counts.active),
+            ),
+        });
+    }
     roster.settled = settled && counts.tracked > 0;
     roster.slice_too_small = counts.tracked < u64::from(config.target()) * 4;
     roster.population = counts.tracked.checked_mul(1u64 << config.slice_bits());
@@ -608,6 +693,9 @@ struct Worker {
     offset_ms: u64,
     poll_ms: u64,
     membership_allowed: bool,
+    last_trim_epoch: u64,
+    #[cfg(feature = "dial9")]
+    weights: Option<crate::trace_weights::TraceWeights>,
 }
 impl Worker {
     fn new(
@@ -619,7 +707,8 @@ impl Worker {
         membership_allowed: bool,
     ) -> Self {
         let recording = *signal.borrow();
-        let incarnation = nonce();
+        let incarnation = config.invocation_id.clone();
+        let last_trim_epoch = observed.as_ref().map_or(0, |o| o.roster.epoch);
         let entropy = incarnation
             .parse::<ulid::Ulid>()
             .expect("fresh incarnation")
@@ -648,6 +737,9 @@ impl Worker {
             offset_ms,
             poll_ms,
             membership_allowed,
+            last_trim_epoch,
+            #[cfg(feature = "dial9")]
+            weights: None,
         }
     }
     fn bucket(&self) -> Result<u64, StoreError> {
@@ -770,9 +862,9 @@ impl Worker {
             Some(observed) => observed.roster.clone(),
             None => Roster::initial(&self.config, &self.incarnation),
         };
-        // Acquisition must not freshen an old cohort's trimming boundary.
-        // Preserve the settled startup cutoff, and recompute keep after LIST.
-        roster.keep_cutoff = None;
+        // Acquisition must not freshen an old cohort's thinning round.
+        // Preserve the settled startup cutoff, and recompute thinning after LIST.
+        roster.trim = None;
         roster.settled = false;
         roster.mutate(&self.incarnation)?;
         let claimed = self
@@ -793,7 +885,8 @@ impl Worker {
             .max_clock_skew
             .saturating_mul(2)
             .saturating_add(self.store.modification_time_uncertainty())
-            .as_millis()
+            .as_nanos()
+            .div_ceil(1_000_000)
     }
     fn census_window(&self, now: u64) -> bool {
         let width = self.config.bucket_width.as_millis();
@@ -835,6 +928,7 @@ impl Worker {
         let width = self.config.bucket_width.as_millis() as u64;
         let bucket = started / width;
         let mut roster = previous.roster.clone();
+        roster.mutate(&self.incarnation)?;
         let members = if self.census_window(started) {
             Some(census(self.store.as_ref(), &self.config, bucket).await?)
         } else {
@@ -842,19 +936,65 @@ impl Worker {
         };
         let now = millis(self.clock.now())?;
         if let Some(members) = members
+            && now >= started
             && now / width == bucket
             && self.census_window(now)
         {
             compute(&mut roster, &self.config, &members, &mut self.history, now);
+            let observation = crate::history::CensusObservation {
+                schema: 1,
+                pool: self.config.pool_hash(),
+                started_ms: started,
+                completed_ms: now,
+                bucket,
+                bucket_ms: width,
+                skew_ms: self.config.max_clock_skew.as_millis() as u64,
+                timestamp_uncertainty_ms: u64::try_from(
+                    self.store
+                        .modification_time_uncertainty()
+                        .as_nanos()
+                        .div_ceil(1_000_000),
+                )
+                .map_err(invalid)?,
+                slice_bits: self.config.slice_bits(),
+                tracked: roster.counts.tracked,
+                admitted: roster.counts.active,
+                carriers: roster.counts.carriers,
+                unarmed: roster.counts.unarmed,
+                no_support: roster.counts.no_support,
+            };
+            // Retain the complete observation before changing the mutable
+            // roster. A fenced/unknown roster CAS does not invalidate a census;
+            // failure to archive must not silently erase its historical evidence.
+            match self
+                .store
+                .put(
+                    PutRequest::builder()
+                        .key(observation.key())
+                        .body(serialize(&observation))
+                        .build(),
+                )
+                .await?
+            {
+                PutOutcome::Stored { .. } => {}
+                PutOutcome::PreconditionFailed {} => {
+                    return Err(invalid("retained census key collision"));
+                }
+                PutOutcome::RetryableConflict {} => {
+                    return Err(StoreError::new(
+                        StoreErrorKind::write_outcome_unknown(),
+                        "uncertain retained census write",
+                    ));
+                }
+            }
         } else {
             // Opposite-skew clients can temporarily fall outside the two listed
             // buckets. Skip edge LISTs, renew the lease, and retain the arm cutoff.
             // A census crossing the boundary also cannot supply a new cutoff.
             roster.settled = false;
-            roster.keep_cutoff = None;
+            roster.trim = None;
             self.history.clear();
         }
-        roster.mutate(&self.incarnation)?;
         let published = self.replace(&roster, Some(&previous.version)).await?;
         if let Some(observed) = &published {
             tracing::debug!(tracked = observed.roster.counts.tracked, active = observed.roster.counts.active,
@@ -889,17 +1029,23 @@ impl Worker {
         {
             return Ok(());
         }
-        let own = Boundary {
-            rank: self.rank,
-            incarnation: self.incarnation.clone(),
+        let Some(trim) = &observed.roster.trim else {
+            return Ok(());
         };
-        if self.state == MemberState::Active
-            && observed
-                .roster
-                .keep_cutoff
-                .as_ref()
-                .is_some_and(|cutoff| own >= *cutoff)
-        {
+        if self.state != MemberState::Active || trim.epoch <= self.last_trim_epoch {
+            return Ok(());
+        }
+        self.last_trim_epoch = trim.epoch;
+        if trim.survival.includes(self.config.draw("trim", &trim.salt)) {
+            #[cfg(feature = "dial9")]
+            if let Some(weights) = &self.weights {
+                weights.multiply(1.0 / trim.survival.probability())?;
+            }
+        } else {
+            #[cfg(feature = "dial9")]
+            if let Some(weights) = &self.weights {
+                weights.stop();
+            }
             self.state = MemberState::Carrier;
             self.written_bucket = None;
             self.signal.send_replace(false);

@@ -12,8 +12,7 @@ use std::time::Duration;
 enum State {
     Disabled = 0,
     Enabled = 1,
-    #[cfg(feature = "pipeline")]
-    Failed = 2,
+    PermanentlyDisabled = 2,
     // Late worker failures must not undo shutdown's refusal of new attachments.
     Stopped = 3,
 }
@@ -21,7 +20,7 @@ enum State {
 crate::test_util_pub! {
 /// Runtime-agnostic core recording state.
 struct SharedState {
-    /// Recording lifecycle: disabled/enabled, permanently failed, then stopped.
+    /// Recording lifecycle: disabled/enabled, permanently disabled, then stopped.
     state: AtomicU8,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
@@ -112,7 +111,7 @@ impl SharedState {
     }
 
     crate::test_util_pub! {
-        /// Turn recording on. No-op once permanently failed or stopped.
+        /// Turn recording on. No-op after permanent disable or shutdown.
         fn enable(&self) {
             let _ = self.state.compare_exchange(
                 State::Disabled as u8,
@@ -123,7 +122,7 @@ impl SharedState {
         }
     }
 
-    /// Turn recording off. No-op once permanently failed or stopped.
+    /// Turn recording off. No-op after permanent disable or shutdown.
     pub(crate) fn disable(&self) {
         let _ = self.state.compare_exchange(
             State::Enabled as u8,
@@ -133,9 +132,9 @@ impl SharedState {
         );
     }
 
-    #[cfg(feature = "pipeline")]
     pub(crate) fn disable_permanently(&self) {
-        self.state.fetch_max(State::Failed as u8, Ordering::Relaxed);
+        self.state
+            .fetch_max(State::PermanentlyDisabled as u8, Ordering::Relaxed);
     }
 
     /// Stop for good: recording off, [`enable`](Self::enable) and new attaches

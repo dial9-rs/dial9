@@ -55,10 +55,13 @@
     allow(clippy::unwrap_used, reason = "Test assertions fail immediately.")
 )]
 
+pub mod history;
 mod protocol;
 
 #[cfg(feature = "dial9")]
 mod registration;
+#[cfg(feature = "dial9")]
+mod trace_weights;
 
 #[cfg(all(test, not(shuttle)))]
 mod tests;
@@ -102,17 +105,20 @@ pub struct Sampling {
     /// Cooperative budget covering runtime setup, backend construction and admission; defaults to 1000ms.
     #[builder(default = Duration::from_millis(1000))]
     startup_timeout: Duration,
-    /// Stable identity for sticky rank across restarts; defaults to a fresh identity per invocation.
-    /// Distinct simultaneously live processes should have distinct identities.
+    /// Stable census identity across restarts; defaults to a fresh identity per invocation.
+    /// Simultaneously live processes must have independent identities. Admission
+    /// and thinning use separate, fresh invocation randomness.
     /// Must be nonblank and must not contain `/`.
     #[builder(into)]
     host_id: Option<String>,
+    #[builder(skip)]
+    invocation_id: String,
     /// Conservative lower bound on the population; zero tracks every process.
     /// A positive bound reduces membership traffic. Exceeding the real population
     /// weakens coverage, especially for small pools.
     #[builder(default)]
     minimum_population: u64,
-    /// Additional active profilers tolerated before permanent trimming.
+    /// Additional admitted profilers tolerated before randomized permanent thinning.
     /// Defaults to the ceiling of three times the square root of the target.
     max_overshoot: Option<u32>,
     /// Background roster polling interval; defaults to one minute.
@@ -163,6 +169,7 @@ impl Sampling {
         policy
             .host_id
             .get_or_insert_with(|| ulid::Ulid::new().to_string());
+        policy.invocation_id = ulid::Ulid::new().to_string();
         policy
     }
 
@@ -236,12 +243,30 @@ impl Sampling {
         _maintenance: Option<&protocol::SamplingSession>,
     ) -> SamplingStatus {
         tracing::info!(enabled, ?reason, "sampling startup decision");
+        let probability = _maintenance.map_or_else(
+            || self.failure_cutoff() as f64 / (1u128 << 64) as f64,
+            protocol::SamplingSession::startup_probability,
+        );
+        let initial_expansion_weight = enabled.then(|| 1.0 / probability);
         SamplingStatus {
             enabled,
+            initial_expansion_weight,
             #[cfg(any(test, feature = "dial9"))]
             changes: _maintenance.map(protocol::SamplingSession::recording_changes),
             #[cfg(feature = "dial9")]
             registration: std::sync::Weak::new(),
+            #[cfg(feature = "dial9")]
+            weights: initial_expansion_weight.map(|weight| {
+                _maintenance
+                    .and_then(protocol::SamplingSession::weights)
+                    .unwrap_or_else(|| {
+                        trace_weights::TraceWeights::new(
+                            self.pool_hash(),
+                            self.invocation_id.clone(),
+                            weight,
+                        )
+                    })
+            }),
         }
     }
 }
@@ -343,7 +368,7 @@ impl<F> SamplingStartup<F> {
         let reason = prepared.reason.clone();
         session.maintenance = prepared.into_session();
         #[allow(unused_mut)]
-        let mut status = sampling.status(enabled, &reason, session.maintenance.as_ref());
+        let mut status = policy.status(enabled, &reason, session.maintenance.as_ref());
         #[cfg(feature = "dial9")]
         {
             let registration = Arc::new(registration::RecorderRegistrations::new(
@@ -368,18 +393,27 @@ impl<F> SamplingStartup<F> {
 pub struct SamplingStatus {
     /// The frozen startup choice. A later stop notification does not change it.
     pub enabled: bool,
+    /// Expansion weight at startup, for an initially selected process.
+    ///
+    /// After thinning, use the timestamped weight history attached by
+    /// `register_recorder`. `None` for an unselected process does not prove its
+    /// selection probability was zero.
+    pub initial_expansion_weight: Option<f64>,
     #[cfg(any(test, feature = "dial9"))]
     changes: Option<tokio::sync::watch::Receiver<bool>>,
     #[cfg(feature = "dial9")]
     registration: std::sync::Weak<registration::RecorderRegistrations>,
+    #[cfg(feature = "dial9")]
+    weights: Option<trace_weights::TraceWeights>,
 }
 
 impl SamplingStatus {
     /// Registers automatic recorder stop handling for this application invocation.
     ///
     /// An initially disabled choice disables the recorder immediately. The
-    /// sampler's runtime disables active recorders when a roster permanently
-    /// trims this process. Storage failures preserve the current state.
+    /// Also attaches timestamped expansion weights for fleet analysis. The
+    /// sampler disables active recorders when a thinning round excludes this
+    /// process. Storage failures preserve the current state.
     /// The sampler never re-enables recording.
     ///
     /// All registered recorders are disabled before sampling cleanup when the
@@ -389,12 +423,25 @@ impl SamplingStatus {
     /// the recorder immediately.
     #[cfg(feature = "dial9")]
     pub fn register_recorder(&self, recorder: &dial9_core::recording::Recorder) {
-        let disable = registration::StopAction::new(recorder.handle().disable_callback());
+        let stop_recorder = recorder.handle().disable_permanently_callback();
+        let weights = self.weights.clone();
+        let disable = registration::StopAction::new(move || {
+            if let Some(weights) = weights {
+                weights.stop();
+            }
+            stop_recorder();
+        });
         let Some(registration) = self.registration.upgrade() else {
             disable.run();
             return;
         };
         if !self.enabled {
+            disable.run();
+            return;
+        }
+        if let Some(weights) = &self.weights
+            && !weights.attach(recorder)
+        {
             disable.run();
             return;
         }
