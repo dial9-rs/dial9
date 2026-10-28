@@ -114,13 +114,15 @@ async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_i
 }
 
 #[cfg(feature = "dial9")]
-#[test]
-fn enabled_fallback_without_maintenance_records_a_terminal_weight_at_application_return() {
+#[rstest::rstest]
+#[case(StartupFailure::assume_population(1), true)]
+#[case(StartupFailure::disabled(), false)]
+fn fallback_recorder_controls_and_cleanup(#[case] failure: StartupFailure, #[case] enabled: bool) {
     let sampling = Sampling::builder()
         .scope("fallback-weight")
         .target(1)
         .startup_timeout(Duration::ZERO)
-        .if_failed(StartupFailure::assume_population(1))
+        .if_failed(failure)
         .build();
     let (status, recorder) = sampling
         .with_backend(async {
@@ -129,20 +131,26 @@ fn enabled_fallback_without_maintenance_records_a_terminal_weight_at_application
             Ok(MemoryStore::new())
         })
         .start_application(|status| {
-            assert!(status.enabled);
-            assert_eq!(status.initial_expansion_weight, Some(1.0));
+            assert_eq!(status.enabled, enabled);
+            assert_eq!(status.initial_expansion_weight, enabled.then_some(1.0));
             assert!(status.changes.is_none());
             let recorder = dial9_core::recorder::recorder(
                 dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
             )
             .build();
             status.register_recorder(&recorder);
+            assert_eq!(recorder.handle().is_enabled(), enabled);
+            recorder.enable();
+            assert!(recorder.handle().is_enabled());
             (status, recorder)
         });
     assert!(!recorder.handle().is_enabled());
     assert_eq!(
-        status.weights.as_ref().unwrap().current_expansion_weight(),
-        Some(0.0)
+        status
+            .weights
+            .as_ref()
+            .map(trace_weights::TraceWeights::current_expansion_weight),
+        enabled.then_some(Some(0.0))
     );
     recorder.enable();
     assert!(

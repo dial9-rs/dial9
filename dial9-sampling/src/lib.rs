@@ -431,14 +431,14 @@ impl SamplingStatus {
             disable();
             return;
         };
-        if !self.enabled {
-            disable();
-            return;
-        }
-        if let Some(weights) = &self.weights
-            && !weights.attach(recorder)
+        if !self.enabled
+            || self
+                .weights
+                .as_ref()
+                .is_some_and(|weights| !weights.attach(recorder))
         {
             disable();
+            registration.register(disable, None::<std::future::Ready<()>>);
             return;
         }
         if let Some(changes) = &self.changes
