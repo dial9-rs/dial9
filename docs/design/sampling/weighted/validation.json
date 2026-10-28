@@ -84,21 +84,42 @@
     "security_audit": "Not retriggered: Cargo manifests/lockfile unchanged by the weighted-sampling commit. Previous audit failed on advisory/package versions already present in the base lockfile; those findings remain."
   },
   "ci": {
-    "verified_at": "2026-10-28T15:02:30.864431+00:00",
+    "verified_at": "2026-10-28T15:13:07.997330+00:00",
     "implementation_commit": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
     "pr_state": "OPEN",
     "ci": {
       "headSha": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
-      "status": "queued",
+      "status": "in_progress",
       "conclusion": "",
       "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088"
     },
+    "required_gate": {
+      "name": "CI Pass",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/dial9-rs/dial9/actions/runs/40710094088/job/122903525291",
+      "completedAt": "2026-10-28T15:09:54Z"
+    },
     "benchmarks": {
+      "conclusion": "success",
       "headSha": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
       "status": "completed",
-      "conclusion": "success",
       "url": "https://github.com/dial9-rs/dial9/actions/runs/40710093710"
     },
-    "security_audit": "Not retriggered: Cargo manifests/lockfile are unchanged by the cleanup. Previous base-lockfile advisory findings remain."
+    "nonblocking_nightly_canaries": [
+      {
+        "name": "Build (macos-latest, nightly)",
+        "status": "in_progress",
+        "conclusion": "",
+        "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088/job/122894145495"
+      },
+      {
+        "name": "Build (ubuntu-latest, nightly)",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088/job/122894145555"
+      }
+    ],
+    "security_audit": "Not retriggered: Cargo manifests/lockfile unchanged by the cleanup. Previous base-lockfile advisory findings remain."
   }
 }
