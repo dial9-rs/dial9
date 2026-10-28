@@ -146,7 +146,6 @@ impl SamplingStore for S3SamplingStore {
                         .map(|response| response.status().as_u16());
                     match status {
                         Some(412 | 404) => Ok(PutOutcome::precondition_failed()),
-                        Some(409) => Ok(PutOutcome::retryable_conflict()),
                         Some(403) => Err(StoreError::new(StoreErrorKind::unauthorized(), error)),
                         _ => Err(StoreError::new(
                             StoreErrorKind::write_outcome_unknown(),
@@ -197,18 +196,7 @@ impl SamplingStore for S3SamplingStore {
                 let key = full
                     .strip_prefix(&self.prefix)
                     .ok_or_else(|| invalid("S3 list key outside sampling namespace"))?;
-                let modified = timestamp(
-                    object
-                        .last_modified()
-                        .ok_or_else(|| invalid("S3 list omitted LastModified"))?
-                        .secs(),
-                )?;
-                objects.push(
-                    ListedObject::builder()
-                        .key(key)
-                        .modified_at(modified)
-                        .build(),
-                );
+                objects.push(ListedObject::builder().key(key).build());
             }
             let truncated = result
                 .is_truncated()

@@ -10,6 +10,8 @@ pub(crate) use engine::{DecisionReason, PreparedSampling, SamplingSession};
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 
+pub(crate) const CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
+
 #[cfg(all(test, not(shuttle)))]
 pub(crate) const DEFAULT_PREPARE_TIMEOUT: Duration = Duration::from_millis(1000);
 

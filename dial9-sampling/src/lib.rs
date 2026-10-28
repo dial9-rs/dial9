@@ -259,13 +259,7 @@ impl Sampling {
             weights: initial_expansion_weight.map(|weight| {
                 _maintenance
                     .and_then(protocol::SamplingSession::weights)
-                    .unwrap_or_else(|| {
-                        trace_weights::TraceWeights::new(
-                            self.pool_hash(),
-                            self.invocation_id.clone(),
-                            weight,
-                        )
-                    })
+                    .unwrap_or_else(|| trace_weights::TraceWeights::new(self.pool_hash(), weight))
             }),
         }
     }
@@ -395,7 +389,7 @@ pub struct SamplingStatus {
     pub enabled: bool,
     /// Expansion weight at startup, for an initially selected process.
     ///
-    /// After thinning, use the timestamped weight history attached by
+    /// After thinning, use the evaluated weight metadata attached by
     /// `register_recorder`. `None` for an unselected process does not prove its
     /// selection probability was zero.
     pub initial_expansion_weight: Option<f64>,
@@ -410,8 +404,8 @@ pub struct SamplingStatus {
 impl SamplingStatus {
     /// Registers automatic recorder stop handling for this application invocation.
     ///
-    /// An initially disabled choice disables the recorder immediately. The
-    /// Also attaches timestamped expansion weights for fleet analysis. The
+    /// An initially disabled choice disables the recorder immediately.
+    /// Also attaches the current expansion weight for fleet analysis. The
     /// sampler disables active recorders when a thinning round excludes this
     /// process. Storage failures preserve the current state.
     /// The sampler never re-enables recording.
@@ -496,7 +490,7 @@ impl Drop for ApplicationSession {
         }
         if let Some(runtime) = self.runtime.take() {
             if let Some(session) = self.maintenance.take() {
-                runtime.block_on(session.shutdown(Duration::from_millis(500)));
+                runtime.block_on(session.shutdown(protocol::CLEANUP_TIMEOUT));
             }
             runtime.shutdown_background();
         }

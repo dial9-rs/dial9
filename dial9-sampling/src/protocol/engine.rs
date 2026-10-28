@@ -7,7 +7,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::watch, time::Instant};
@@ -66,7 +66,6 @@ pub(crate) struct SamplingSession {
     task: Option<tokio::task::JoinHandle<()>>,
     #[cfg(any(test, feature = "dial9"))]
     recording: watch::Receiver<bool>,
-    cleanup_budget: Arc<Mutex<Duration>>,
     startup_probability: f64,
     #[cfg(feature = "dial9")]
     weights: Option<crate::trace_weights::TraceWeights>,
@@ -88,7 +87,6 @@ impl SamplingSession {
         self.recording.clone()
     }
     pub(crate) async fn shutdown(mut self, timeout: Duration) {
-        *self.cleanup_budget.lock().expect("cleanup budget lock") = timeout;
         self.stop.cancel();
         if let Some(mut task) = self.task.take() {
             match tokio::time::timeout(timeout, &mut task).await {
@@ -163,11 +161,6 @@ impl Cutoff {
         }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-struct Boundary {
-    rank: u64,
-    incarnation: String,
-}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Policy {
     schema: u32,
@@ -221,14 +214,12 @@ struct Roster {
     trim: Option<Trim>,
     counts: Counts,
     census_computed_at_ms: Option<u64>,
-    population: Option<u64>,
-    slice_too_small: bool,
 }
 impl Roster {
-    fn initial(config: &Config, incarnation: &str) -> Self {
+    fn initial(config: &Config, invocation_id: &str) -> Self {
         Self {
             policy: Policy::new(config),
-            holder: incarnation.into(),
+            holder: invocation_id.into(),
             revision: nonce(),
             epoch: 0,
             cutoff_settled: false,
@@ -237,8 +228,6 @@ impl Roster {
             trim: None,
             counts: Counts::default(),
             census_computed_at_ms: None,
-            population: None,
-            slice_too_small: true,
         }
     }
     fn validate(&self, config: &Config) -> Result<(), StoreError> {
@@ -269,8 +258,8 @@ impl Roster {
         }
         Ok(())
     }
-    fn mutate(&mut self, incarnation: &str) -> Result<(), StoreError> {
-        self.holder = incarnation.into();
+    fn mutate(&mut self, invocation_id: &str) -> Result<(), StoreError> {
+        self.holder = invocation_id.into();
         self.revision = nonce();
         self.epoch = self
             .epoch
@@ -400,7 +389,9 @@ pub(crate) async fn prepare_using(
             | DecisionReason::UnsettledRoster
     );
     tracing::debug!(
-        population = ?observed.as_ref().and_then(|o| o.roster.population),
+        population = ?observed.as_ref().and_then(|o| {
+            o.roster.counts.tracked.checked_mul(1u64 << config.slice_bits())
+        }),
         "sampling startup roster"
     );
     let startup_probability = observed
@@ -412,15 +403,10 @@ pub(crate) async fn prepare_using(
         );
     #[cfg(feature = "dial9")]
     let weights = recording.then(|| {
-        crate::trace_weights::TraceWeights::new(
-            config.pool_hash(),
-            config.invocation_id.clone(),
-            1.0 / startup_probability,
-        )
+        crate::trace_weights::TraceWeights::new(config.pool_hash(), 1.0 / startup_probability)
     });
     let (signal, changes) = watch::channel(recording);
     let stop = CancellationToken::new();
-    let cleanup_budget = Arc::new(Mutex::new(Duration::from_millis(500)));
     let mut worker = Worker::new(config, store, clock, observed, signal, membership_allowed);
     if startup_probability == 0.0 {
         worker.state = MemberState::NoSupport;
@@ -430,7 +416,6 @@ pub(crate) async fn prepare_using(
         worker.weights = weights.clone();
     }
     let cancellation = stop.clone();
-    let budget = cleanup_budget.clone();
     let task = tokio::spawn(async move {
         tokio::select! {
             biased;
@@ -442,8 +427,7 @@ pub(crate) async fn prepare_using(
             weights.stop();
         }
         worker.signal.send_replace(false);
-        let timeout = *budget.lock().expect("cleanup budget lock");
-        if tokio::time::timeout(timeout, worker.cleanup())
+        if tokio::time::timeout(super::CLEANUP_TIMEOUT, worker.cleanup())
             .await
             .is_err()
         {
@@ -455,7 +439,6 @@ pub(crate) async fn prepare_using(
     prepared.session = Some(SamplingSession {
         stop,
         task: Some(task),
-        cleanup_budget,
         startup_probability,
         #[cfg(feature = "dial9")]
         weights,
@@ -493,7 +476,8 @@ impl MemberState {
 }
 #[derive(Clone, Debug)]
 struct Member {
-    boundary: Boundary,
+    rank: u64,
+    invocation_id: String,
     bucket: u64,
     state: MemberState,
 }
@@ -502,10 +486,10 @@ fn member_key(
     bucket: u64,
     rank: u64,
     state: &MemberState,
-    incarnation: &str,
+    invocation_id: &str,
 ) -> String {
     format!(
-        "{}{:016}/{rank:016x}.{}.{incarnation}",
+        "{}{:016}/{rank:016x}.{}.{invocation_id}",
         config.members_prefix(),
         bucket,
         state.code()
@@ -523,20 +507,20 @@ fn parse_member(key: &str, prefix: &str, bucket: u64, limit: u128) -> Result<Mem
             .next()
             .ok_or_else(|| invalid("missing member state"))?,
     )?;
-    let incarnation = parts.next().ok_or_else(|| invalid("missing incarnation"))?;
+    let invocation_id = parts
+        .next()
+        .ok_or_else(|| invalid("missing invocation identity"))?;
     if rank_hex.len() != 16
         || format!("{rank:016x}") != rank_hex
         || u128::from(rank) >= limit
         || parts.next().is_some()
-        || incarnation.parse::<ulid::Ulid>().is_err()
+        || invocation_id.parse::<ulid::Ulid>().is_err()
     {
         return Err(invalid("invalid sampling member key"));
     }
     Ok(Member {
-        boundary: Boundary {
-            rank,
-            incarnation: incarnation.into(),
-        },
+        rank,
+        invocation_id: invocation_id.into(),
         bucket,
         state,
     })
@@ -594,16 +578,16 @@ async fn census(
     let (current, previous) = tokio::try_join!(current, previous)?;
     let mut unique: HashMap<String, Member> = HashMap::new();
     for member in previous.into_iter().chain(current) {
-        match unique.entry(member.boundary.incarnation.clone()) {
+        match unique.entry(member.invocation_id.clone()) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(member);
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let old = entry.get();
-                if old.boundary.rank != member.boundary.rank {
-                    return Err(invalid("incarnation has inconsistent ranks"));
+                if old.rank != member.rank {
+                    return Err(invalid("invocation identity has inconsistent ranks"));
                 }
-                // State is terminal within an incarnation. A delayed active
+                // State is terminal within an application run. A delayed active
                 // PUT or backwards clock adjustment cannot outrank a carrier.
                 if (&member.state, member.bucket) > (&old.state, old.bucket) {
                     entry.insert(member);
@@ -671,8 +655,6 @@ fn compute(
         });
     }
     roster.settled = settled && counts.tracked > 0;
-    roster.slice_too_small = counts.tracked < u64::from(config.target()) * 4;
-    roster.population = counts.tracked.checked_mul(1u64 << config.slice_bits());
     roster.counts = counts;
     roster.census_computed_at_ms = Some(now);
 }
@@ -681,7 +663,7 @@ struct Worker {
     config: Config,
     store: Arc<dyn SamplingStore>,
     clock: Arc<dyn Clock>,
-    incarnation: String,
+    invocation_id: String,
     rank: u64,
     state: MemberState,
     observed: Option<Observed>,
@@ -707,21 +689,21 @@ impl Worker {
         membership_allowed: bool,
     ) -> Self {
         let recording = *signal.borrow();
-        let incarnation = config.invocation_id.clone();
+        let invocation_id = config.invocation_id.clone();
         let last_trim_epoch = observed.as_ref().map_or(0, |o| o.roster.epoch);
-        let entropy = incarnation
+        let entropy = invocation_id
             .parse::<ulid::Ulid>()
-            .expect("fresh incarnation")
+            .expect("fresh invocation identity")
             .random() as u64;
         let offset_ms = entropy % config.bucket_width.as_millis() as u64;
-        // A fixed per-incarnation jitter also spreads polls and remains testable.
+        // A fixed per-run jitter also spreads polls and remains testable.
         let poll_ms = (config.poll_interval.as_millis() as u64 * (900 + entropy % 201)) / 1000;
         let rank = config.rank();
         Self {
             config,
             store,
             clock,
-            incarnation,
+            invocation_id,
             rank,
             state: if recording {
                 MemberState::Active
@@ -751,10 +733,10 @@ impl Worker {
             bucket,
             self.rank,
             &self.state,
-            &self.incarnation,
+            &self.invocation_id,
         );
         // Track even an unacknowledged PUT: cleanup is safe because every key
-        // belongs to this incarnation, and never to a replacement process.
+        // belongs to this run, and never to a replacement process.
         self.keys.retain(|b, _| *b >= bucket.saturating_sub(1));
         self.keys.entry(bucket).or_default().insert(key.clone());
         match self
@@ -825,10 +807,6 @@ impl Worker {
                 modified_at: self.clock.now(),
             })),
             PutOutcome::PreconditionFailed {} => Ok(None),
-            PutOutcome::RetryableConflict {} => Err(StoreError::new(
-                StoreErrorKind::write_outcome_unknown(),
-                "uncertain roster CAS conflict",
-            )),
         }
     }
     async fn election(&mut self) -> Result<(), StoreError> {
@@ -860,13 +838,13 @@ impl Worker {
         }
         let mut roster = match &self.observed {
             Some(observed) => observed.roster.clone(),
-            None => Roster::initial(&self.config, &self.incarnation),
+            None => Roster::initial(&self.config, &self.invocation_id),
         };
         // Acquisition must not freshen an old cohort's thinning round.
         // Preserve the settled startup cutoff, and recompute thinning after LIST.
         roster.trim = None;
         roster.settled = false;
-        roster.mutate(&self.incarnation)?;
+        roster.mutate(&self.invocation_id)?;
         let claimed = self
             .replace(
                 &roster,
@@ -928,7 +906,7 @@ impl Worker {
         let width = self.config.bucket_width.as_millis() as u64;
         let bucket = started / width;
         let mut roster = previous.roster.clone();
-        roster.mutate(&self.incarnation)?;
+        roster.mutate(&self.invocation_id)?;
         let members = if self.census_window(started) {
             Some(census(self.store.as_ref(), &self.config, bucket).await?)
         } else {
@@ -980,12 +958,6 @@ impl Worker {
                 PutOutcome::PreconditionFailed {} => {
                     return Err(invalid("retained census key collision"));
                 }
-                PutOutcome::RetryableConflict {} => {
-                    return Err(StoreError::new(
-                        StoreErrorKind::write_outcome_unknown(),
-                        "uncertain retained census write",
-                    ));
-                }
             }
         } else {
             // Opposite-skew clients can temporarily fall outside the two listed
@@ -998,7 +970,9 @@ impl Worker {
         let published = self.replace(&roster, Some(&previous.version)).await?;
         if let Some(observed) = &published {
             tracing::debug!(tracked = observed.roster.counts.tracked, active = observed.roster.counts.active,
-                population = ?observed.roster.population, settled = observed.roster.settled, slice_too_small = observed.roster.slice_too_small,
+                population = ?observed.roster.counts.tracked.checked_mul(1u64 << self.config.slice_bits()),
+                settled = observed.roster.settled,
+                slice_too_small = observed.roster.counts.tracked < u64::from(self.config.target()) * 4,
                 "sampling census published");
             self.observed = Some(observed.clone());
         }
@@ -1062,7 +1036,7 @@ impl Worker {
                     old,
                     self.rank,
                     &MemberState::Active,
-                    &self.incarnation,
+                    &self.invocation_id,
                 );
                 if let Err(error) = self.store.delete(key.clone()).await {
                     rate_limited!(Duration::from_secs(60), {
@@ -1097,14 +1071,14 @@ impl Worker {
         }
         if self.leader.as_ref().is_some_and(|leader| {
             self.observed.as_ref().is_none_or(|current| {
-                current.version != leader.version || current.roster.holder != self.incarnation
+                current.version != leader.version || current.roster.holder != self.invocation_id
             })
         }) {
             self.leader = None;
         }
         if self.leader.is_none()
             && let Some(current) = &self.observed
-            && current.roster.holder == self.incarnation
+            && current.roster.holder == self.invocation_id
             && !expired(current, &self.config, self.store.as_ref(), self.clock.now())
         {
             // A GET reconciles an acknowledged-lost CAS on the same object.

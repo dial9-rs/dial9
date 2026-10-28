@@ -162,16 +162,15 @@ async fn backend_errors_preserve_meaning(
 async fn conditional_conflicts_are_classified(#[case] status: u16, #[case] uncertain: bool) {
     let result = store(response(status))
         .put(PutRequest::builder().key("a").body("data".into()).build())
-        .await
-        .unwrap();
-    assert_eq!(
-        matches!(result, PutOutcome::RetryableConflict { .. }),
-        uncertain
-    );
-    assert_eq!(
-        matches!(result, PutOutcome::PreconditionFailed { .. }),
-        !uncertain
-    );
+        .await;
+    if uncertain {
+        assert_eq!(kind(&result.unwrap_err()), "unknown");
+    } else {
+        assert!(matches!(
+            result.unwrap(),
+            PutOutcome::PreconditionFailed { .. }
+        ));
+    }
 }
 #[rstest::rstest]
 #[case("etag", "invalid")]
@@ -214,7 +213,6 @@ async fn missing_object_and_missing_put_ack_are_distinct() {
 }
 #[rstest::rstest]
 #[case("<Contents><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>")]
-#[case("<Contents><Key>coord/a</Key></Contents>")]
 #[case(
     "<Contents><Key>outside/a</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>"
 )]
@@ -223,7 +221,6 @@ async fn missing_object_and_missing_put_ack_are_distinct() {
 #[case("<IsTruncated>true</IsTruncated><NextContinuationToken></NextContinuationToken>")]
 #[case("<IsTruncated>false</IsTruncated><NextContinuationToken>next</NextContinuationToken>")]
 #[case("")]
-#[case("<Contents><Key>coord/a</Key><LastModified>1960-01-01T00:00:00Z</LastModified></Contents>")]
 #[tokio::test(start_paused = true)]
 async fn malformed_list_cannot_become_a_fleet_count(#[case] contents: &str) {
     let mut fixture = response(200);
@@ -246,8 +243,8 @@ async fn unordered_and_duplicate_list_entries_reach_the_census(
     let mut fixture = response(200);
     fixture.body = format!(
         "<ListBucketResult><IsTruncated>false</IsTruncated>\
-         <Contents><Key>coord/{first}</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>\
-         <Contents><Key>coord/{second}</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>\
+         <Contents><Key>coord/{first}</Key></Contents>\
+         <Contents><Key>coord/{second}</Key></Contents>\
          </ListBucketResult>"
     );
     let page = store(fixture)
@@ -300,7 +297,7 @@ async fn requested_write_condition_is_preserved_on_the_wire(
 ) {
     let fixture = RecordingFixture::new([response(200)]);
     let key = match &condition {
-        WriteCondition::Unconditional { .. } => "v2/members/pool/000001/process-incarnation",
+        WriteCondition::Unconditional { .. } => "v2/members/pool/000001/process-run",
         _ => "v2/pools/pool/roster.json",
     };
     let result = store_with_connector(fixture.clone(), 5)

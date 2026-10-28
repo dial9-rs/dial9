@@ -1,6 +1,6 @@
 //! Retained census observations for retrospective estimates of trace-emitting units.
 //!
-//! An observation counts visible process/container incarnations, including
+//! An observation counts visible process/container runs, including
 //! those with profiling off. It is a complete enumeration of two membership
 //! buckets, not an atomic snapshot of live processes. Missing registrations,
 //! churn, crashes and cleanup failures cause additional error that the Gaussian
@@ -39,7 +39,7 @@ pub struct PopulationEstimate {
     pub max_clock_skew: Duration,
     /// Backend timestamp uncertainty used by the census guards.
     pub timestamp_uncertainty: Duration,
-    /// Number of distinct tracked process/container incarnations observed.
+    /// Number of distinct tracked process/container runs observed.
     pub tracked: u64,
     /// Fraction of independent identities eligible for census tracking.
     pub tracking_probability: f64,

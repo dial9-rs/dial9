@@ -71,7 +71,6 @@ async fn seed(store: &MemoryStore, config: &Config, population: u64) -> Roster {
     } else {
         (u128::from(config.target()) << 64) / u128::from(population)
     });
-    roster.population = Some(population);
     roster.census_computed_at_ms = Some(now);
     roster.counts = Counts {
         tracked: population,
@@ -386,7 +385,7 @@ async fn configuration_mismatch_never_overwrites_the_existing_roster() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn restart_incarnations_are_distinct_even_with_sticky_rank_and_delayed_cleanup() {
+async fn restart_invocation_ids_are_distinct_even_with_sticky_rank_and_delayed_cleanup() {
     let store = Arc::new(MemoryStore::new());
     let policy = config(15, "stable-host");
     let old = prepare(&policy, store.clone()).await;
@@ -412,7 +411,7 @@ async fn restart_incarnations_are_distinct_even_with_sticky_rank_and_delayed_cle
         2,
         "overlapping processes are counted separately"
     );
-    assert_eq!(before[0].boundary.rank, before[1].boundary.rank);
+    assert_eq!(before[0].rank, before[1].rank);
     old.into_session()
         .unwrap()
         .shutdown(Duration::from_secs(1))
@@ -575,12 +574,12 @@ async fn put_member(
     bucket: u64,
     rank: u64,
     state: MemberState,
-    incarnation: &str,
+    invocation_id: &str,
 ) {
     store
         .put(
             PutRequest::builder()
-                .key(member_key(policy, bucket, rank, &state, incarnation))
+                .key(member_key(policy, bucket, rank, &state, invocation_id))
                 .body(Bytes::new())
                 .condition(WriteCondition::unconditional())
                 .build(),
@@ -620,7 +619,7 @@ async fn unordered_paginated_census_deduplicates_and_carrier_wins_same_bucket() 
     assert_eq!(
         result
             .iter()
-            .find(|member| member.boundary.incarnation == id)
+            .find(|member| member.invocation_id == id)
             .unwrap()
             .state,
         MemberState::Carrier
@@ -665,10 +664,8 @@ fn count_cutoff_and_trim_survival_use_independent_probability_spaces() {
     roster.epoch = 1;
     let members: Vec<_> = (0..8)
         .map(|rank| Member {
-            boundary: Boundary {
-                rank,
-                incarnation: nonce(),
-            },
+            rank,
+            invocation_id: nonce(),
             bucket: 1,
             state: MemberState::Active,
         })
@@ -733,11 +730,7 @@ async fn survivor_weights_apply_each_new_epoch_once_and_new_joiners_skip_old_rou
     let store = Arc::new(MemoryStore::new());
     let policy = config(3, "weighted-worker");
     let mut active = worker(&policy, store.clone(), store.clone());
-    let weights = crate::trace_weights::TraceWeights::new(
-        policy.pool_hash(),
-        policy.invocation_id.clone(),
-        10.0,
-    );
+    let weights = crate::trace_weights::TraceWeights::new(policy.pool_hash(), 10.0);
     active.weights = Some(weights.clone());
     let mut roster = Roster::initial(&policy, &nonce());
     roster.census_computed_at_ms = Some(millis(store.now()).unwrap());
@@ -771,11 +764,7 @@ async fn survivor_weights_apply_each_new_epoch_once_and_new_joiners_skip_old_rou
             signal,
             true,
         );
-        let joining_weights = crate::trace_weights::TraceWeights::new(
-            policy.pool_hash(),
-            joining.incarnation.clone(),
-            10.0,
-        );
+        let joining_weights = crate::trace_weights::TraceWeights::new(policy.pool_hash(), 10.0);
         joining.weights = Some(joining_weights.clone());
         joining.apply_trim().await.unwrap();
         assert_eq!(joining_weights.current_expansion_weight(), Some(10.0));
@@ -801,7 +790,7 @@ async fn committed_unknown_claim_is_not_retried_or_used_to_list() {
     let committed = store.get(key.clone()).await.unwrap().unwrap();
     assert_eq!(
         decode(committed.clone(), &policy).unwrap().roster.holder,
-        candidate.incarnation
+        candidate.invocation_id
     );
     candidate.observed = candidate.read_roster().await.unwrap();
     candidate.election().await.unwrap();
@@ -963,9 +952,9 @@ fn empty_or_unstable_census_never_creates_a_usable_full_range_cutoff() {
     compute(&mut roster, &policy, &[], &mut history, 1000);
     assert!(!roster.cutoff_settled);
     assert!(!roster.settled);
+    assert!(roster.census_computed_at_ms.is_some());
     assert_eq!(
-        roster.population,
-        Some(0),
+        roster.counts.tracked, 0,
         "zero is only a successfully counted empty census"
     );
 }
@@ -1063,7 +1052,7 @@ async fn fresh_server_commit_cannot_freshen_an_expired_census_trim_boundary() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_newer_bucket_active_write_cannot_override_a_terminal_carrier_incarnation() {
+async fn a_newer_bucket_active_write_cannot_override_a_terminal_carrier_invocation_id() {
     let store = Arc::new(MemoryStore::new());
     let policy = config(3, "node");
     let bucket = millis(store.now()).unwrap() / 10000;

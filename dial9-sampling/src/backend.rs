@@ -150,9 +150,6 @@ pub enum PutOutcome {
     #[non_exhaustive]
     /// Every attempt definitively failed its precondition without changing the object.
     PreconditionFailed {},
-    #[non_exhaustive]
-    /// The write conflicted and may have committed; ownership must be reconciled.
-    RetryableConflict {},
 }
 impl PutOutcome {
     /// Constructs a successful write result with the new version.
@@ -162,10 +159,6 @@ impl PutOutcome {
     /// Constructs a definitive failure: no attempt in this call changed the object.
     pub fn precondition_failed() -> Self {
         Self::PreconditionFailed {}
-    }
-    /// Constructs a conflict with an uncertain outcome; reconcile ownership before another claim.
-    pub fn retryable_conflict() -> Self {
-        Self::RetryableConflict {}
     }
 }
 
@@ -214,20 +207,15 @@ impl ListRequest {
     }
 }
 #[derive(Clone, Debug, bon::Builder)]
-/// Object key and server modification time returned by listing.
+/// Object key returned by listing.
 pub struct ListedObject {
     #[builder(into)]
     key: String,
-    modified_at: SystemTime,
 }
 impl ListedObject {
     /// Returns the key relative to the backend namespace.
     pub fn key(&self) -> &str {
         &self.key
-    }
-    /// Returns the server modification time; consumers must account for backend timestamp uncertainty.
-    pub fn modified_at(&self) -> SystemTime {
-        self.modified_at
     }
 }
 #[derive(Clone, Debug, bon::Builder)]

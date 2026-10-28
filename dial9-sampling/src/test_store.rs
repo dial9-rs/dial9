@@ -141,12 +141,7 @@ impl SamplingStore for MemoryStore {
                 .range::<str, _>((lower, Unbounded))
                 .take_while(|(key, _)| key.starts_with(request.prefix()))
                 .take(size.saturating_add(1))
-                .map(|(key, object)| {
-                    ListedObject::builder()
-                        .key(key.as_str())
-                        .modified_at(object.modified_at())
-                        .build()
-                })
+                .map(|(key, _)| ListedObject::builder().key(key.as_str()).build())
                 .collect();
             let continuation = if page.len() > size {
                 page.truncate(size);

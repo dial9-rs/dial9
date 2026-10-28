@@ -78,7 +78,7 @@ justify it. A supplied `host_id` keeps the **census** rank stable across restart
 otherwise each invocation gets a fresh identity. Simultaneously live processes
 need independent identities for the statistical bounds. Profiling admission
 uses separate, fresh invocation randomness; each startup choice stays fixed.
-Fresh membership incarnations isolate restart cleanup; overlapping processes
+Fresh membership IDs isolate restart cleanup; overlapping processes
 count separately.
 
 ## Census, trimming and storage
@@ -153,9 +153,9 @@ establishes which processes actually recorded.
 
 ## Fleet flamegraph weights
 
-`status.register_recorder(...)` also attaches time-stamped expansion weights.
-The existing background roster refresh updates this metadata when the process
-applies a new thinning round; no separate roster reader is needed. Decoding
+`status.register_recorder(...)` also attaches the current expansion weight.
+The existing background roster refresh updates the shared weight when the process
+applies a new thinning round; the source snapshots it during metadata evaluation. Decoding
 needs one expansion factor for each sampling interval, rather than the full
 roster or an external join.
 Let `f` be the tracking fraction and `r` the startup admission probability
@@ -170,18 +170,19 @@ round. Protocol schema 3 rejects peers using the earlier rank-based trimming
 semantics. Configured `host_id` affects census tracking, not the fresh admission
 or thinning draws.
 
-Every recorded segment carries `dial9.sampling.pool`, `incarnation`, `schema`,
-`clock`, `weight_history` and `observed_through_ns` metadata. History is JSON
-`[[monotonic_ns, expansion_weight], ...]`. For each CPU sample or stack-duration
-contribution, use the last history entry at or before its **collection time**,
-multiply its sample mass by that factor, then sum by stack. Do not apply the
-last weight to an entire file or use a single population/profiler ratio.
-Later segments repeat the full history and can extend earlier coverage.
-Times beyond the checkpoint, missing history, or `null` weights are unknown.
-A terminal zero entry excludes frames collected during asynchronous stop lag.
+The source emits `dial9.sampling.weight` and `dial9.sampling.pool`. It evaluates
+the weight when the recorder polls source metadata, and the writer carries the
+latest snapshot into trace segments. Unchanged weights produce no metadata
+updates. The trace's existing `boot_id` supplies process identity and its clock
+synchronization supplies timestamps.
+
+Multiply a segment's sample mass by its weight, then sum by stack. The value is
+correct when metadata is evaluated; applying it across the segment approximates
+any weight changes within that segment. `null` or missing weights are unknown.
+Zero means recording was permanently stopped when the weight was evaluated.
 An idle recorder may emit no segment, so trace presence alone is not a census.
 
-Unbiased expanded totals require positive sampling support, independent
+The sampling factors preserve expected contributions under positive sampling support, independent
 identities/randomness, exogenous lifetimes/workload and usable trace delivery.
 For complete startup-cohort coverage choose a positive `AssumePopulation`
 fallback. A cold `Disabled` cohort has zero inclusion probability and cannot

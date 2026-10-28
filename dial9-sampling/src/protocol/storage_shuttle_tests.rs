@@ -147,8 +147,8 @@ dial9_core::shuttle_test! {
     default;
     fn shuttle_restarted_process_membership_survives_old_cleanup() {
         let store = Arc::new(MemoryStore::new());
-        let old = "v2/members/pool/000001/0123456789abcdef.a.old-incarnation";
-        let replacement = "v2/members/pool/000001/0123456789abcdef.a.new-incarnation";
+        let old = "v2/members/pool/000001/0123456789abcdef.a.old-run";
+        let replacement = "v2/members/pool/000001/0123456789abcdef.a.new-run";
         put(&store, old, "", WriteCondition::unconditional());
         let cleanup_store = store.clone();
         let cleanup = thread::spawn(move || {
