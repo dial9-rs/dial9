@@ -43,7 +43,9 @@ pub(crate) const ORDER_VERSION: u32 = 1;
 /// repopulates lazily. The value is a monotonic cache namespace, not a schema
 /// revision, so skipped values are expected. The old tree is abandoned and
 /// GC'd out-of-band.
-pub const SAMPLES_FORMAT_VERSION: u32 = 10;
+// v11 persists span attribute units. Reusing v10 parts can mix absent and
+// present units, causing tail comparisons to discard otherwise valid fields.
+pub const SAMPLES_FORMAT_VERSION: u32 = 11;
 
 /// Default raw-trace segment duration, in seconds. A source file covers
 /// `[epoch, epoch + segment_duration)`; the [`Scope`] time filter pads by this

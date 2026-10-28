@@ -3612,6 +3612,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_spans_without_units_are_refolded_before_tail_comparison() {
+        use std::sync::Arc;
+
+        use axum::extract::FromRequestParts;
+        use dial9_core::schema_extensions::{self, roles};
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::{FieldAnnotation, FieldDef, SchemaEntry};
+        use dial9_trace_format::types::{FieldType, FieldValue};
+        use parquet::arrow::ArrowWriter;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        use crate::ingest::parquet_writer;
+        use crate::storage::{LocalBackend, StorageBackend};
+
+        let source_dir = tempfile::tempdir().unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(LocalBackend::new(source_dir.path()));
+        let output = Arc::new(LocalBackend::new(output_dir.path()));
+        let schema = Schema::from_entry(SchemaEntry::with_annotations(
+            "producer:RequestFixture",
+            vec![
+                FieldDef::new("started", FieldType::Varint),
+                FieldDef::new("operation", FieldType::String),
+                FieldDef::new("RequestBodyBytes", FieldType::Varint),
+                FieldDef::new("Time", FieldType::Varint),
+            ],
+            [
+                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
+                FieldAnnotation::new(0, "unit", "ns"),
+                FieldAnnotation::new(0, schema_extensions::SPAN_TYPE_KEY, "request-fixture"),
+                FieldAnnotation::new(1, schema_extensions::ROLE_KEY, roles::SPAN_NAME),
+                FieldAnnotation::new(2, "unit", "bytes"),
+                FieldAnnotation::new(3, "unit", "ms"),
+            ],
+        ));
+        let mut encoder = Encoder::new();
+        let mut started = 1;
+        for latency in 1..=64 {
+            let ended = started + latency * 1_000_000;
+            encoder
+                .write_event(
+                    &schema,
+                    ended,
+                    &[
+                        FieldValue::Varint(started),
+                        FieldValue::String("request".into()),
+                        FieldValue::Varint(latency * 100),
+                        FieldValue::Varint(latency),
+                    ],
+                )
+                .unwrap();
+            started = ended + 1;
+        }
+        let trace = encoder.into_inner();
+        let mut uid = None;
+        for index in 0..2 {
+            let key = format!(
+                "traces/version=1/date=2026-10-16/service=fixture/time=2100/instance=host/boot=test/1792184400-{index}.bin"
+            );
+            source
+                .put_object("local", &key, trace.clone())
+                .await
+                .unwrap();
+            let (_, _, _, spans) = decode::decode_samples(&trace, &key).unwrap();
+            uid = Some(spans[0].span_type_uid);
+            let mut spans_data = Vec::new();
+            parquet_writer::write_spans(&mut spans_data, &spans).unwrap();
+            if index == 0 {
+                // v10 parts written before unit persistence lack this column.
+                let batch = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(spans_data))
+                    .unwrap()
+                    .build()
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap();
+                let columns = (0..batch.num_columns())
+                    .filter(|&column| batch.schema().field(column).name() != "attribute_units")
+                    .collect::<Vec<_>>();
+                let batch = batch.project(&columns).unwrap();
+                spans_data = Vec::new();
+                let mut writer =
+                    ArrowWriter::try_new(&mut spans_data, batch.schema(), None).unwrap();
+                writer.write(&batch).unwrap();
+                writer.close().unwrap();
+            }
+            let mut samples_data = Vec::new();
+            parquet_writer::write_samples(&mut samples_data, &[], &spans, &Default::default())
+                .unwrap();
+            let leaf = aggregate::part_leaf_of(&key);
+            for (table, data) in [("spans", spans_data), ("samples", samples_data)] {
+                let cached_key = format!(
+                    "flamegraph-data/v10/bucket=local/{table}/service=fixture/date=2026-10-16/host=host/{leaf}.parquet"
+                );
+                output.put_object("local", &cached_key, data).await.unwrap();
+            }
+        }
+        let state = AppState::from_local_dir(source_dir.path()).with_agg(aggregate::AggContext {
+            source,
+            output,
+            source_bucket: "local".into(),
+            source_is_local: true,
+            output_bucket: "local".into(),
+            output_prefix: "flamegraph-data".into(),
+            source_prefixes: vec!["traces/".into()],
+            segment_duration_secs: 60,
+        });
+        let uri = format!("/api/span-tail?span_type_uid={}", hex::encode(uid.unwrap()))
+            .parse()
+            .unwrap();
+        let (mut parts, ()) = axum::http::Request::new(()).into_parts();
+        let creds = MaybeCreds::from_request_parts(&mut parts, &state)
+            .await
+            .unwrap();
+        let response = get_tail(
+            State(state),
+            creds,
+            Query::<SpanStatsParams>::try_from_uri(&uri).unwrap(),
+            Query::<TailOptions>::try_from_uri(&uri).unwrap(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.report.count, 128);
+        let signal = response
+            .report
+            .signals
+            .iter()
+            .find(|signal| signal.key == "RequestBodyBytes")
+            .expect("RequestBodyBytes must survive old cached parts without units");
+        assert_eq!(signal.unit.as_deref(), Some("bytes"));
+        assert_eq!(signal.density.as_ref().unwrap().count, 128);
+        assert!(
+            response
+                .report
+                .signals
+                .iter()
+                .all(|signal| signal.key != "Time")
+        );
+    }
+
+    #[tokio::test]
     async fn raw_endpoint_decodes_the_trace_on_the_server() {
         let trace = include_bytes!("../../../ui/public/demo-trace.bin");
         let (_, _, _, spans) = decode::decode_samples(
