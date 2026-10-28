@@ -41,7 +41,6 @@ shuttle-tokio-impl-inner = { version = "0.1.0", default-features = false, featur
 tracing = "0.1.44"
 
 [dev-dependencies]
-rstest = "0.26"
 assert2 = { workspace = true }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 metrique-timesource = { version = "0.1", features = [

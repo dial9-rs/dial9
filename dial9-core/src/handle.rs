@@ -216,25 +216,6 @@ impl Dial9Handle {
         }
     }
 
-    /// Returns a one-shot callback that permanently disables live recording.
-    ///
-    /// The callback holds a weak reference, so an external stop listener does
-    /// not retain recorder buffers, sources or worker threads. A disabled handle
-    /// produces a no-op callback. Subsequent [`enable`](Self::enable) calls
-    /// cannot resume recording. The recorder still owns normal flushing and
-    /// shutdown.
-    pub fn disable_permanently_callback(&self) -> impl FnOnce() + Send + 'static {
-        let shared = self
-            .inner
-            .as_ref()
-            .map(|inner| Arc::downgrade(&inner.shared));
-        move || {
-            if let Some(shared) = shared.and_then(|shared| shared.upgrade()) {
-                shared.disable_permanently();
-            }
-        }
-    }
-
     /// Profile the calling thread.
     ///
     /// Per-thread sources, such as the scheduler-event profiler, only sample
@@ -448,71 +429,4 @@ pub(crate) fn clear_global_handle_for(shared: &Arc<SharedState>) {
 /// process-global one. Equivalent to [`Dial9Handle::current`].
 pub fn current_handle() -> Dial9Handle {
     Dial9Handle::current()
-}
-
-#[cfg(all(test, not(shuttle)))]
-mod tests {
-    use super::*;
-    use crate::{buffer::MemoryBuffer, recorder::recorder};
-
-    #[test]
-    fn weak_permanent_disable_preserves_pause_resume_and_normal_shutdown() {
-        let recorder = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
-        let disable = recorder.handle().disable_permanently_callback();
-        assert!(recorder.handle().is_enabled());
-        recorder.disable();
-        assert!(!recorder.handle().is_enabled());
-        recorder.enable();
-        assert!(recorder.handle().is_enabled());
-        disable();
-        assert!(!recorder.handle().is_enabled());
-        recorder.handle().enable();
-        recorder.enable();
-        assert!(!recorder.handle().is_enabled());
-        assert!(
-            !recorder.handle().is_stopped(),
-            "flushing still owns shutdown"
-        );
-        let handle = recorder.handle().clone();
-        recorder.graceful_shutdown(std::time::Duration::ZERO);
-        assert!(handle.is_stopped());
-        Dial9Handle::disabled().disable_permanently_callback()();
-    }
-
-    #[test]
-    fn permanent_disable_callback_does_not_retain_recording_state() {
-        let recorder = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
-        let shared = Arc::downgrade(&recorder.handle().inner.as_ref().unwrap().shared);
-        let disable = recorder.handle().disable_permanently_callback();
-        drop(recorder);
-        assert!(shared.upgrade().is_none());
-        disable();
-    }
-}
-
-#[cfg(all(test, shuttle))]
-mod shuttle_tests {
-    use super::*;
-
-    crate::shuttle_test! {
-        default;
-        fn shuttle_permanent_disable_races_pause_resume() {
-            let shared = Arc::new(SharedState::new(0));
-            let (sender, _receiver) = crate::primitives::sync::mpsc::sync_channel(1);
-            let handle = Dial9Handle::enabled(shared, sender);
-            handle.enable();
-            let disable = handle.disable_permanently_callback();
-            let stop = crate::primitives::thread::spawn(disable);
-            let other = handle.clone();
-            let resume = crate::primitives::thread::spawn(move || {
-                other.disable();
-                other.enable();
-            });
-            stop.join().unwrap();
-            resume.join().unwrap();
-            handle.enable();
-            assert!(!handle.is_enabled());
-            assert!(!handle.is_stopped(), "permanent disable must preserve flushing");
-        }
-    }
 }

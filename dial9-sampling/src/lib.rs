@@ -118,7 +118,7 @@ pub struct Sampling {
     /// weakens coverage, especially for small pools.
     #[builder(default)]
     minimum_population: u64,
-    /// Additional admitted profilers tolerated before randomized permanent thinning.
+    /// Additional admitted profilers tolerated before randomized thinning.
     /// Defaults to the ceiling of three times the square root of the target.
     max_overshoot: Option<u32>,
     /// Background roster polling interval; defaults to one minute.
@@ -411,46 +411,48 @@ impl SamplingStatus {
     /// The sampler never re-enables recording.
     ///
     /// All registered recorders are disabled before sampling cleanup when the
-    /// application returns or unwinds. Registration holds only a weak recording
-    /// reference and does not take ownership of the recorder or its shutdown.
+    /// application returns or unwinds. Registration stores a recording handle;
+    /// the application continues to own the recorder and its shutdown.
+    /// Sampling uses normal `disable()`; the application retains `enable()` control.
+    /// Explicit enables override the sampling decision and its weight estimates.
     /// Registering through a status returned from an ended invocation disables
     /// the recorder immediately.
     #[cfg(feature = "dial9")]
     pub fn register_recorder(&self, recorder: &dial9_core::recording::Recorder) {
-        let stop_recorder = recorder.handle().disable_permanently_callback();
+        let handle = recorder.handle().clone();
         let weights = self.weights.clone();
-        let disable = registration::StopAction::new(move || {
-            if let Some(weights) = weights {
+        let disable: registration::DisableCallback = Arc::new(move || {
+            if let Some(weights) = &weights {
                 weights.stop();
             }
-            stop_recorder();
+            handle.disable();
         });
         let Some(registration) = self.registration.upgrade() else {
-            disable.run();
+            disable();
             return;
         };
         if !self.enabled {
-            disable.run();
+            disable();
             return;
         }
         if let Some(weights) = &self.weights
             && !weights.attach(recorder)
         {
-            disable.run();
+            disable();
             return;
         }
         if let Some(changes) = &self.changes
             && (!*changes.borrow() || changes.has_changed().is_err())
         {
-            disable.run();
+            disable();
         }
         registration.register(disable, self.changes.as_ref().map(|_| self.stopped()));
     }
 
     /// An owned future completing when profiling should stop. It never resumes.
     ///
-    /// An initially disabled application completes immediately. A permanent
-    /// roster trim or maintenance termination completes this future permanently.
+    /// An initially disabled application completes immediately. A roster trim
+    /// or maintenance termination also completes it; the sampler never reselects.
     /// A fallback without a constructed backend keeps recording until cleanup.
     /// The future does not borrow the status and can be spawned.
     #[cfg(any(test, feature = "dial9"))]

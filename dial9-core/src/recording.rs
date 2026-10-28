@@ -186,9 +186,6 @@ impl Recorder {
     }
 
     /// Enable recording.
-    ///
-    /// A live recorder can resume after a reversible disable. Permanent
-    /// disable, shutdown and disconnected recorders refuse to resume.
     pub fn enable(&self) {
         self.handle.enable();
         if !self.handle.is_enabled() {

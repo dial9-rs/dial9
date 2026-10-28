@@ -242,7 +242,7 @@ async fn zero_budget_has_no_get_but_constructed_store_still_participates(#[case]
 }
 
 #[tokio::test(start_paused = true)]
-async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
+async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
     let store = Arc::new(MemoryStore::new());
     let mut sessions = Vec::new();
     let mut signals = Vec::new();
@@ -300,11 +300,6 @@ async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
     #[cfg(feature = "dial9")]
     for ((_, recorder), expected) in recorders.iter().zip(&expected) {
         assert_eq!(recorder.handle().is_enabled(), *expected);
-        if !expected {
-            recorder.enable();
-            recorder.handle().enable();
-            assert!(!recorder.handle().is_enabled());
-        }
     }
     assert_eq!(
         sessions
@@ -342,12 +337,21 @@ async fn oversized_active_cohort_is_trimmed_once_and_never_reenabled() {
             assert!(!*signal.borrow());
         }
     }
+    #[cfg(feature = "dial9")]
+    for ((_, recorder), expected) in recorders.iter().zip(&expected) {
+        assert_eq!(recorder.handle().is_enabled(), *expected);
+        if !expected {
+            recorder.enable();
+            assert!(recorder.handle().is_enabled());
+        }
+    }
     for session in sessions {
         session.shutdown(Duration::from_secs(1)).await;
     }
     #[cfg(feature = "dial9")]
-    for (registration, _) in recorders {
+    for (registration, recorder) in recorders {
         registration.stop();
+        assert!(!recorder.handle().is_enabled());
     }
 }
 

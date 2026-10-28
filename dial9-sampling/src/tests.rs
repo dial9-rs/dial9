@@ -145,7 +145,10 @@ fn enabled_fallback_without_maintenance_records_a_terminal_weight_at_application
         Some(0.0)
     );
     recorder.enable();
-    assert!(!recorder.handle().is_enabled());
+    assert!(
+        recorder.handle().is_enabled(),
+        "normal enable remains available"
+    );
 }
 
 #[rstest::rstest]
@@ -293,7 +296,16 @@ async fn automatic_recorder_stop_survives_status_drop(#[case] maintenance_ended:
     }
     registration.wait_for_stops().await;
     assert!(!recorder.handle().is_enabled());
+    recorder.enable();
+    assert!(
+        recorder.handle().is_enabled(),
+        "normal enable remains available"
+    );
     registration.stop();
+    assert!(
+        !recorder.handle().is_enabled(),
+        "cleanup disables recording again"
+    );
 }
 
 #[tokio::test(start_paused = true)]

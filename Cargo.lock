@@ -1942,7 +1942,6 @@ dependencies = [
  "metrique-timesource",
  "metrique-writer",
  "proptest",
- "rstest 0.26.1",
  "serde",
  "shuttle",
  "shuttle-tokio-impl-inner",

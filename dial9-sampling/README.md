@@ -2,9 +2,9 @@
 
 `dial9-sampling` makes one profiling decision at application startup from a
 shared S3 population roster. An elected process maintains the census in the
-background; excess profilers can stop permanently. The target is an expected
-count. Overshoot triggers randomized thinning; the profiler count has
-statistical error while storage and the census are healthy.
+background; excess profilers stop through normal recorder disable. The target
+is an expected count. Overshoot triggers randomized thinning; the profiler count
+has statistical error while storage and the census are healthy.
 
 Enable `s3` for the native backend and `dial9` for recorder registration.
 
@@ -50,10 +50,12 @@ has a separate 500ms budget. A zero target, invalid configuration or untracked
 rank creates no backend or runtime. Dropping or returning `SamplingStatus` does
 not retain or end coordination; `enabled` always describes the startup choice.
 
-Register each recorder immediately after construction. The sampler holds a weak
-recording reference and stops registered recorders after a terminal trim or
-callback completion, including unwinding. Storage errors preserve recording;
-the sampler never re-enables it. The application owns normal recorder shutdown.
+Register each recorder immediately after construction. The sampler stores a
+recording handle and calls its normal `disable()` after a trim or callback
+completion, including unwinding. Storage errors preserve recording; the sampler
+never re-enables it. The application retains normal `enable()`/`disable()` control
+and owns recorder shutdown. Explicit enables override the sampling decision
+and are outside its count and weight estimates.
 
 ## Population and failure policy
 
@@ -98,12 +100,12 @@ A fresh census whose admitted count `A` exceeds `target + max_overshoot`
 publishes a fresh thinning round with survival probability `q = target / A`.
 The overshoot default is `ceil(3 * sqrt(target))`. Each eligible process applies
 a round once using independent randomness; survivors increase their expansion
-weight by `1/q`, and failed draws stop permanently. A fully applied round on
+weight by `1/q`, and failed draws disable recording. A fully applied round on
 `A` members has expected remaining count `target`, not an exact cap. Slow
 polling, changing membership and partial application add separate error.
 The round remains stable during a grace period; a healthy census clears it,
 and new joiners skip rounds published before their startup observation.
-Trimmed carriers continue census membership and never restart recording.
+Trimmed carriers continue census membership; the sampler never re-enables them.
 Lease age uses server modification time; trimming
 also checks the embedded census age. Partitions can exceed the cap indefinitely.
 Bucket-edge LIST guards require `max_clock_skew` (default 5s) to bound each host
@@ -179,7 +181,7 @@ synchronization supplies timestamps.
 Multiply a segment's sample mass by its weight, then sum by stack. The value is
 correct when metadata is evaluated; applying it across the segment approximates
 any weight changes within that segment. `null` or missing weights are unknown.
-Zero means recording was permanently stopped when the weight was evaluated.
+Zero means the sampler stopped profiling when the weight was evaluated.
 An idle recorder may emit no segment, so trace presence alone is not a census.
 
 The sampling factors preserve expected contributions under positive sampling support, independent

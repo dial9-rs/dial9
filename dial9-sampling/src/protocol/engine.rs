@@ -1030,7 +1030,7 @@ impl Worker {
             self.signal.send_replace(false);
             tracing::info!(
                 rank = self.rank,
-                "sampling active process permanently trimmed"
+                "sampling active process excluded by thinning"
             );
             let bucket = self.bucket()?;
             self.write_member(bucket).await?;

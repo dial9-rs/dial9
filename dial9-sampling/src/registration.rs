@@ -2,28 +2,12 @@ use dial9_core::primitives::sync::Mutex;
 use std::{future::Future, sync::Arc};
 use tokio::{runtime::Handle, task::JoinHandle};
 
-type DisableCallback = Box<dyn FnOnce() + Send>;
-
-#[derive(Clone)]
-pub(crate) struct StopAction(Arc<Mutex<Option<DisableCallback>>>);
-
-impl StopAction {
-    pub(crate) fn new(disable: impl FnOnce() + Send + 'static) -> Self {
-        Self(Arc::new(Mutex::new(Some(Box::new(disable)))))
-    }
-
-    pub(crate) fn run(&self) {
-        let disable = self.0.lock().expect("recorder stop lock").take();
-        if let Some(disable) = disable {
-            disable();
-        }
-    }
-}
+pub(crate) type DisableCallback = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Default)]
 struct State {
     closed: bool,
-    recorders: Vec<(StopAction, Option<JoinHandle<()>>)>,
+    recorders: Vec<(DisableCallback, Option<JoinHandle<()>>)>,
 }
 
 pub(crate) struct RecorderRegistrations {
@@ -41,13 +25,13 @@ impl RecorderRegistrations {
 
     pub(crate) fn register(
         &self,
-        disable: StopAction,
+        disable: DisableCallback,
         stopped: Option<impl Future<Output = ()> + Send + 'static>,
     ) {
         let mut state = self.state.lock().expect("recorder registration lock");
         if state.closed {
             drop(state);
-            disable.run();
+            disable();
             return;
         }
         let monitor = stopped.map(|stopped| {
@@ -57,7 +41,7 @@ impl RecorderRegistrations {
                 .expect("coordinated sampling runtime")
                 .spawn(async move {
                     stopped.await;
-                    disable.run();
+                    disable();
                 })
         });
         state.recorders.push((disable, monitor));
@@ -73,7 +57,7 @@ impl RecorderRegistrations {
             if let Some(monitor) = monitor {
                 monitor.abort();
             }
-            disable.run();
+            disable();
         }
     }
 
@@ -100,25 +84,11 @@ mod shuttle_tests {
 
     dial9_core::shuttle_test! {
         default;
-        fn shuttle_concurrent_stop_actions_run_once() {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let notice = calls.clone();
-            let disable = StopAction::new(move || { notice.fetch_add(1, Ordering::SeqCst); });
-            let other = disable.clone();
-            let worker = shuttle::thread::spawn(move || other.run());
-            disable.run();
-            worker.join().unwrap();
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-        }
-    }
-
-    dial9_core::shuttle_test! {
-        default;
         fn shuttle_registration_racing_cleanup_stops_recording() {
             let registrations = Arc::new(RecorderRegistrations::new(None));
             let calls = Arc::new(AtomicUsize::new(0));
             let notice = calls.clone();
-            let disable = StopAction::new(move || { notice.fetch_add(1, Ordering::SeqCst); });
+            let disable: DisableCallback = Arc::new(move || { notice.fetch_add(1, Ordering::SeqCst); });
             let other = registrations.clone();
             let worker = shuttle::thread::spawn(move || {
                 other.register(disable, None::<std::future::Ready<()>>);
