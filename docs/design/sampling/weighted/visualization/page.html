@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<base target="_blank">
+<title>Sampling a changing fleet · Dial9</title>
+<style>
+:root{
+ --paper:oklch(96% .008 85);--panel:oklch(99% .003 85);--ink:oklch(25% .014 65);
+ --mute:oklch(49% .015 65);--line:oklch(82% .012 85);--accent:oklch(48% .13 42);
+ --host:oklch(27% .018 70);--process:oklch(42% .10 247);--estimate:oklch(48% .13 42);
+ --profile:oklch(44% .09 155);--wash:oklch(91% .025 85);
+ --sans:Verdana,"DejaVu Sans",Arial,sans-serif;--mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+ --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+}
+*{box-sizing:border-box}[hidden]{display:none!important}html,body{margin:0;min-height:100%;background:var(--paper);color:var(--ink)}
+body{font:14px/1.6 var(--sans)}main{min-height:100dvh;width:100%;padding:clamp(16px,3vw,48px)}
+h1,h2,h3,p,figure{margin:0}h1{font-size:clamp(26px,3.3vw,46px);line-height:1.16;font-weight:500;letter-spacing:-.045em;max-width:22ch}
+h2{font-size:clamp(20px,2vw,28px);line-height:1.3;letter-spacing:-.025em;font-weight:500}
+h3{font-size:16px;font-weight:600;line-height:1.4}p{max-width:72ch}
+.mast{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,.65fr);gap:var(--s6);align-items:end;padding-bottom:var(--s6);border-bottom:1px solid var(--ink)}
+.mast p{font-size:15px}.stamp{font:11px/1.7 var(--mono);color:var(--mute);margin-top:var(--s4)}
+.mast .stamp{margin-bottom:var(--s3)}.intro{color:var(--mute)}
+.bench{display:grid;grid-template-columns:260px minmax(0,1fr);gap:var(--s6);margin-top:var(--s6)}
+aside.controls{background:var(--wash);padding:var(--s5);align-self:start;border:1px solid var(--line)}
+.controls h2{font-size:20px;margin-bottom:var(--s4)}label{display:block;font-size:12px;font-weight:600;margin-top:var(--s3)}
+input,select,button{font:inherit;color:var(--ink)}
+input,select{width:100%;border:1px solid var(--line);background:var(--panel);border-radius:2px;padding:8px;min-width:0}
+input[type=range]{padding:0;accent-color:var(--accent)}
+button{border:1px solid var(--accent);background:var(--accent);color:white;padding:10px 16px;font-weight:600;cursor:pointer;border-radius:2px}
+button:disabled{opacity:.6;cursor:progress}button:hover:not(:disabled){background:oklch(41% .12 42)}
+.controls button{width:100%;margin-top:var(--s5)}small,.small{font-size:11px;line-height:1.65;color:var(--mute);display:block}
+.hint{margin-top:var(--s2);font-size:11px;line-height:1.65;color:var(--mute)}
+details{margin-top:var(--s4)}summary{cursor:pointer;color:var(--accent);font-size:12px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:var(--s3)}
+.readout{font:12px var(--mono);margin-top:var(--s4);border-top:1px solid var(--line);padding-top:var(--s3)}
+.workspace{min-width:0}.workspace>section+section{margin-top:var(--s7)}
+.section-head{display:flex;gap:var(--s4);align-items:baseline;justify-content:space-between;flex-wrap:wrap;margin-bottom:var(--s3)}
+.scenario-copy{color:var(--mute);font-size:13px;margin-bottom:var(--s4)}
+.status{min-height:1.6em;color:var(--accent);font-size:12px;margin-top:var(--s3)}
+.chart{width:100%;height:auto;display:block;background:var(--panel);border:1px solid var(--line)}
+.chart text{font:11px var(--mono);fill:var(--mute)}.chart .axis{stroke:var(--line);stroke-width:1}
+.chart .data{fill:none;stroke-width:2;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+.legend{display:flex;gap:var(--s4);flex-wrap:wrap;font-size:11px;margin:var(--s3) 0}
+.key{display:inline-flex;align-items:center;gap:6px}.key:before{content:"";width:20px;height:2px;background:var(--key)}
+.key.dashed:before{height:0;border-top:2px dashed var(--key);background:none}
+.time-control{display:grid;grid-template-columns:auto minmax(100px,1fr) auto;gap:var(--s3);align-items:center;margin:var(--s4) 0}
+.time-control label{margin:0}.time-control output{font:12px var(--mono);min-width:72px;text-align:right}
+.facts{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;margin-top:var(--s4)}
+.facts td,.facts th{padding:8px 0;border-bottom:1px solid var(--line);text-align:left;font-size:12px}
+.facts th{font-weight:400}.facts td:last-child{text-align:right;font:13px var(--mono)}
+.facts .subject{color:var(--mute);font-size:11px}.facts strong{font-weight:600}
+.analysis{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--s5);margin-top:var(--s5)}
+.analysis>div{min-width:0}.analysis h3{margin-bottom:var(--s3)}.analysis .chart{margin-bottom:var(--s3)}
+.weighted-reference{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--s5);margin-top:var(--s5)}.weighted-reference>*{min-width:0}.weighted-reference h3{margin-bottom:var(--s3)}
+.equation{font:12px/1.7 var(--mono);margin:var(--s3) 0;color:var(--accent);overflow-wrap:anywhere}
+.band{font:12px/1.65 var(--mono);margin:var(--s3) 0}.note{border:1px solid var(--line);padding:var(--s4);margin-top:var(--s4);background:var(--wash);font-size:12px}
+.note p+p{margin-top:var(--s2)}.error-caption{font-size:12px;line-height:1.65}
+.mechanism{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin:var(--s5) 0}
+.mechanism>div{padding:var(--s4);border-right:1px solid var(--line);min-width:0}.mechanism>div:last-child{border-right:0}.mechanism.weighting{grid-template-columns:repeat(3,minmax(0,1fr))}
+.mechanism strong{display:block;font-size:12px;margin-bottom:var(--s2)}.mechanism p{font-size:11px;color:var(--mute)}
+.mechanism .step{font:11px var(--mono);display:block;color:var(--accent);margin-bottom:var(--s3)}
+.path{display:grid;grid-template-columns:1fr 1fr;gap:var(--s5)}.path h3{margin-bottom:var(--s2)}.path p{font-size:12px}
+code{font: .94em var(--mono);overflow-wrap:anywhere}.pill{display:inline-block;font:10px var(--mono);border:1px solid var(--line);padding:3px 6px;white-space:nowrap}
+.observations{margin-top:var(--s4);max-height:240px;overflow:auto}.observation{display:grid;grid-template-columns:70px 1fr;gap:var(--s3);padding:8px 0;border-top:1px solid var(--line);font-size:12px}
+.observation time{font:11px/1.8 var(--mono);color:var(--accent)}
+.wide{grid-column:1/-1;margin-top:var(--s7);padding-top:var(--s6);border-top:1px solid var(--ink)}
+.foot{margin-top:var(--s6);font-size:11px;color:var(--mute)}a{color:var(--accent);text-underline-offset:3px;overflow-wrap:anywhere}
+:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+@media(max-width:1000px){.bench{grid-template-columns:220px minmax(0,1fr);gap:var(--s5)}aside.controls{padding:var(--s4)}.analysis,.weighted-reference{grid-template-columns:1fr}.mechanism{grid-template-columns:repeat(2,minmax(0,1fr))}.mechanism>div:nth-child(2){border-right:0}.mechanism>div:nth-child(-n+2){border-bottom:1px solid var(--line)}}
+@media(max-width:680px){.mast,.bench{grid-template-columns:1fr}.mast{gap:var(--s4)}.controls{display:grid;grid-template-columns:1fr 1fr;column-gap:var(--s4)}.controls h2,.controls>.hint,.controls>details,.controls>button,.controls>.readout,.controls>.status{grid-column:1/-1}.controls>label{margin:0}.path{grid-template-columns:1fr}.row{gap:var(--s2)}.section-head .pill{white-space:normal}.mechanism.weighting{grid-template-columns:1fr}.mechanism.weighting>div{border-right:0;border-bottom:1px solid var(--line)}.mechanism.weighting>div:last-child{border-bottom:0}}
+@media(max-width:380px){.controls{grid-template-columns:1fr}.controls>*{grid-column:1!important}.mechanism{grid-template-columns:1fr}.mechanism>div{border-right:0;border-bottom:1px solid var(--line)}.mechanism>div:last-child{border-bottom:0}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+ <header class="mast">
+  <div>
+   <p class="stamp">Dial9 · fleet sampling laboratory · roster sampling + census history · October 28, 2026</p>
+   <h1>Sampling a changing fleet</h1>
+  </div>
+  <div>
+   <p>A process decides once at startup. A shared census adjusts admission for later startups. Fresh random thinning can stop excess profilers while preserving their expansion weights in expectation.</p>
+   <p class="stamp">One population unit = one live process or container capable of emitting Dial9 traces.</p>
+  </div>
+ </header>
+ <div class="bench">
+  <aside class="controls" aria-labelledby="fleet-controls">
+   <h2 id="fleet-controls">Choose a fleet</h2>
+   <label>Scenario<select id="scenario"><option value="cold">Cold start</option><option value="rolling">Rolling start</option><option value="minute">1 minute per host</option><option value="containers">Lots of containers</option></select></label>
+   <label>Physical hosts<input id="hosts" type="number" min="1" max="20000" value="1000"></label>
+   <label>Containers per host<input id="containers" type="number" min="1" max="100" value="1"></label>
+   <label>Target profilers<input id="target" type="number" min="1" max="2000" value="15"></label>
+   <label>Minimum pool population<input id="lower" type="number" min="0" max="1000000000" value="0"></label>
+   <p class="hint">A credible lower bound enables sparse tracking. Zero tracks every process. This bound is for one complete scope/dimension tuple.</p>
+   <label>Cold / unavailable roster<select id="fallback"><option value="disabled">Start profiling off</option><option value="assume">Assume a population</option></select></label>
+   <label id="assumed-label" hidden>Assumed processes<input id="assumed" type="number" min="1" value="1000"></label>
+   <details>
+    <summary>Churn, outages, and seed</summary>
+    <div class="row">
+     <label>Run, minutes<input id="duration" type="number" min="2" max="120" value="15"></label>
+     <label>Rollout, minutes<input id="rollout" type="number" min="1" max="120" value="10"></label>
+    </div>
+    <label>Process lifetime, seconds<input id="lifetime" type="number" min="0" max="7200" value="0"></label>
+    <p class="hint">Zero lives through the run. One minute per host means <em>one new host starts every minute</em>; use lifetime 60 for minute-long hosts.</p>
+    <label>Exits without cleanup, %<input id="crash" type="number" min="0" max="100" value="0"></label>
+    <div class="row">
+     <label>Outage starts, min<input id="outageStart" type="number" min="0" max="120" value="6"></label>
+     <label>Outage lasts, min<input id="outageDuration" type="number" min="0" max="60" value="0"></label>
+    </div>
+    <label>Random seed<input id="seed" type="number" min="0" max="4294967295" value="9"></label>
+   </details>
+   <button id="simulate" type="button">Simulate</button>
+   <div id="run-status" class="status" role="status" aria-live="polite"></div>
+   <p class="readout" id="tracking-readout"></p>
+  </aside>
+  <div class="workspace">
+   <section aria-labelledby="fleet-timeline">
+    <div class="section-head"><h2 id="fleet-timeline">The fleet over time</h2><span class="pill" id="scenario-name">Cold start</span></div>
+    <p id="scenario-copy" class="scenario-copy"></p>
+    <div class="legend">
+     <span class="key" style="--key:var(--process)">Actual live trace-emitting units</span>
+     <span class="key dashed" style="--key:var(--estimate)">Projected units: R / f</span>
+     <span class="key" style="--key:var(--profile)">Sum of trace expansion weights</span>
+     <span class="key" style="--key:var(--host)">Physical machines (context)</span>
+    </div>
+    <svg id="population-chart" class="chart" viewBox="0 0 900 265" role="img" aria-label="Timeline of actual physical hosts, actual processes, and census population estimate"></svg>
+    <div class="legend">
+     <span class="key" style="--key:var(--profile)">Trace units profiling now</span>
+     <span class="key dashed" style="--key:var(--host)">Distinct physical hosts profiling now</span>
+     <span class="key dashed" style="--key:var(--estimate)">Target / thinning trigger</span>
+    </div>
+    <svg id="profiling-chart" class="chart" viewBox="0 0 900 210" role="img" aria-label="Timeline of processes and physical hosts actively profiling, target, and soft thinning trigger"></svg>
+    <div class="time-control">
+     <label for="time">Inspect time slice</label>
+     <input id="time" type="range" min="0" max="1" value="0" step="1">
+     <output id="time-label" for="time"></output>
+    </div>
+    <table class="facts" aria-label="Actual and projected counts at selected time">
+     <tbody id="slice-facts"></tbody>
+    </table>
+    <p class="note" id="slice-reading"></p>
+   </section>
+   <section aria-labelledby="error-distributions">
+    <div class="section-head"><h2 id="error-distributions">Which errors have a bell curve?</h2><span class="pill">1,500 independent reference trials</span></div>
+    <p class="scenario-copy">The curves below isolate random tracking, admission, and thinning in complete, live reference cohorts. They do not predict a cold start, missing writes, bucket ghosts, a stale cutoff, or an outage.</p>
+    <div class="analysis">
+     <div>
+      <h3>Population: random census error</h3>
+      <svg id="census-error-chart" class="chart" viewBox="0 0 450 250" role="img" aria-label="Population error histogram overlaid with a Gaussian reference"></svg>
+      <p class="equation">N̂ = R / f &nbsp; · &nbsp; SD(N̂) = √[N(1−f)/f]</p>
+      <p id="census-error-band" class="band"></p>
+      <p id="census-error-caption" class="error-caption"></p>
+     </div>
+     <div>
+      <h3>Profilers: a fresh independent cohort</h3>
+      <svg id="profiler-error-chart" class="chart" viewBox="0 0 450 250" role="img" aria-label="Profiler count histogram overlaid with a Gaussian approximation"></svg>
+      <p class="equation">Anew | Rold ∼ Binomial(Nnew, min[f, T·f/Rold])</p>
+      <p id="profiler-error-band" class="band"></p>
+      <p id="profiler-error-caption" class="error-caption"></p>
+     </div>
+    </div>
+    <p class="note">Tracking uses the identity hash; admission uses a <strong>fresh independent draw</strong> among tracked processes. For a same census cohort, A | R ∼ Binomial(R, min[1, T/R]). The independent-next-cohort panel uses a different cohort intentionally. Low counts are discrete and skewed; the smooth Gaussian is an approximation.</p>
+    <div class="weighted-reference">
+     <div><h3>Expansion weights: the noisier estimate</h3><svg id="weighted-error-chart" class="chart" viewBox="0 0 450 250" role="img" aria-label="Weighted population error histogram with a moment-matched Gaussian approximation"></svg></div>
+     <div><p id="weighted-error-band" class="band"></p><p id="weighted-error-caption" class="error-caption"></p><p class="equation">Σ weights: each startup contributes 1/(f·r)<br>Survive a thinning round q → weight / q</p><p class="hint">Reference: independent old/new equal-size cohorts, followed by one simultaneous thinning round only if admission exceeds the soft trigger. The real timeline applies rounds asynchronously at polls. A fitted bell curve is descriptive; it is not a guaranteed confidence interval.</p></div>
+    </div>
+   </section>
+   <section aria-labelledby="post-hoc">
+    <h2 id="post-hoc">A fleet flamegraph needs the historical denominator</h2>
+    <p class="scenario-copy">Archive each census, then query an observation preceding the requested time slice with an explicit maximum age. That recovers a population estimate. Expanding captured stack samples uses their recorded conditional sampling weights at that time.</p>
+    <label style="max-width:220px">Maximum observation age, seconds<input id="history-age" type="number" min="0" max="7200" value="180"></label>
+    <table class="facts" aria-label="Historical census evidence at selected time"><tbody id="historical-facts"></tbody></table>
+    <p class="note" id="historical-reading"></p>
+    <p class="hint" id="archive-contract">Current implementation retains complete, guarded census observations before roster publication at <code>v2/census/&lt;pool&gt;/&lt;UTC day&gt;/&lt;time&gt;-&lt;ULID&gt;.json</code>. <code>sampling.population_at().store(...).at(...).max_age(...).call().await</code> returns a preceding observation with its age/window, R/f, and a random-error SE when f=1 or R≥30. Its <code>no_support</code> field identifies tracked members with zero startup admission probability. Missing or expired history returns no estimate. A counted admitted member is not proof its recorder emitted usable data.</p>
+    <div class="mechanism weighting">
+     <div><span class="step">captured samples</span><strong>Frame mass in this time slice</strong><p>Trace samples from the processes that actually recorded and whose data arrived.</p></div>
+     <div><span class="step">sampling weight</span><strong>Apply its recorded expansion weight</strong><p>Begin at 1/(f·r), then multiply by 1/q for each independent round actually applied and survived.</p></div>
+     <div><span class="step">fleet flamegraph</span><strong>Sum the weighted frame mass</strong><p>Requires positive sampling support and complete trace delivery. An estimated population by itself is insufficient.</p></div>
+    </div>
+    <p class="note" id="weighting-reading"></p>
+    <p class="hint">The sampler emits startup weight 1/(f·r), using a fresh admission draw independent of the census hash. A sealed fresh thinning round uses q and multiplies each survivor’s existing weight by 1/q once. This preserves weighted sample mass in expectation even when the cutoff depends on the census. It does not use R/f divided by the realized profiler count. Missing spans, zero-admission cohorts, or missing trace delivery still prevent reconstruction of the complete fleet.</p>
+    <details>
+     <summary>Use the weight at the frame’s time</summary>
+     <div class="observations" id="weight-log"></div>
+     <p class="hint">These examples show simulation-relative times. Production trace segments carry a merged <code>dial9.sampling.weight_history</code> in the frame clock’s <code>monotonic_ns</code> domain and an <code>observed_through_ns</code> checkpoint. Use the last change at or before each frame timestamp within that coverage. A terminal weight 0 excludes frames during asynchronous recorder-disable lag. Null or frames after the checkpoint have unknown weight. The latest weight must never be applied to a whole segment containing earlier samples.</p>
+    </details>
+   </section>
+  </div>
+  <section class="wide" aria-labelledby="mechanism">
+   <h2 id="mechanism">How a process reaches its decision</h2>
+   <div class="mechanism">
+    <div><span class="step">1 / identity</span><strong>One stable tracking hash</strong><p>Hash scope, dimensions, and the rank identity. Fresh default identities distinguish process incarnations. Simultaneously live ranks must be independent.</p></div>
+    <div><span class="step">2 / participation</span><strong>Only the lowest f slice does I/O</strong><p>f = 1 by default. A lower population bound may reduce f. Tracking uses this hash. Admission uses a separate independent random draw.</p></div>
+    <div><span class="step">3 / application startup</span><strong>One roster GET, then a frozen choice</strong><p>The default budget is 1,000 ms. A settled roster supplies admission probability r within the tracked slice. Selected traces begin with weight 1/(f·r).</p></div>
+    <div><span class="step">4 / background census</span><strong>Count, publish, optionally thin</strong><p>One fenced leader lists two buckets. Four plateau counts adjust future admissions. Over the soft trigger, a fresh round q = target / admitted count independently stops profilers. New startups skip earlier rounds.</p></div>
+   </div>
+   <div class="path">
+    <div><h3>Off stays off; stopped stays stopped</h3><p>Unarmed processes and trimmed carriers still count toward the tracked population. They cannot turn on later. A shrinking fleet can therefore fall below the target until future startups arrive. Automatic recorder registration connects terminal stop decisions to the recorder.</p></div>
+    <div><h3>The profiler count is probabilistic</h3><p>Target + ceil(3√target) triggers thinning. A simultaneous round retains Binomial(A, q) profilers, centered on the target; it can still exceed the trigger. Polls apply rounds asynchronously. Existing profilers keep running during storage failures, so an outage has no unconditional count cap.</p></div>
+   </div>
+   <details>
+    <summary>Simulation events and accuracy limits</summary>
+    <div class="observations" id="event-log"></div>
+    <p class="hint">Event model: independent uniform tracking ranks and separate admission draws; immediate successful storage operations and complete trace delivery; one abstract elected leader with a three-poll lease; 60-second polls with ±10% fixed jitter; per-incarnation heartbeat offsets within 300-second buckets; 11-second bucket-edge guard; four ≤2% growth readings; sealed fresh thinning rounds observed once at polls, with a 190-second cooldown while still above the trigger. A fresh census at or below the trigger clears the round. New joiners skip rounds already present at their startup. Optional crash/cleanup ghosts and storage outages model bias. Rolling fleets begin warm and overlap old/new processes by 15 seconds. This is not an S3 throughput, latency, or full concurrent-CAS benchmark. Partial LIST failures, delayed network responses, and clock-bound violations require separate adversarial checks.</p>
+   </details>
+   <footer class="foot">Standalone, offline artifact. Core implementation remains in PR #1093; simulation and review evidence are separate resources. Owner: rcoh. Reference cohort trials are recomputed for the live process count at the inspected slice.</footer>
+  </section>
+ </div>
+</main>
+<!-- SIMULATOR -->
+<script>
+/* UI is kept separate from the simulator for deterministic command-line checks. */
+(function () {
+ "use strict";
+ const S = SamplingSimulator, $ = id => document.getElementById(id);
+ const fmt = n => n === null || n === undefined ? "unavailable" : Number(n).toLocaleString(undefined,{maximumFractionDigits:1});
+ const pct = n => (n >= 0 ? "+" : "") + n.toFixed(1) + "%";
+ const duration = t => { const m=Math.floor(t/60),s=Math.floor(t%60);return m+":"+String(s).padStart(2,"0"); };
+ const number = id => Number($(id).value);
+ const chartColors = {hosts:"var(--host)",processes:"var(--process)",projected:"var(--estimate)",expanded:"var(--profile)",profiling:"var(--profile)",profiledHosts:"var(--host)"};
+ let result = null, selected = 0, distributionCache = new Map(), distFrame = null;
+ function setText(id, text) { $(id).textContent=text; }
+ function config() {
+  return {scenario:$("scenario").value,hosts:number("hosts"),containers:number("containers"),target:number("target"),
+   lower:number("lower"),fallback:$("fallback").value,assumed:number("assumed"),seed:number("seed"),
+   duration:number("duration")*60,rollout:number("rollout")*60,lifetime:number("lifetime"),crash:number("crash")/100,
+   outageStart:number("outageStart")*60,outageDuration:number("outageDuration")*60};
+ }
+ function preset() {
+  const p=S.presets[$("scenario").value];
+  ["hosts","containers","lifetime"].forEach(k=>$(k).value=p[k]);
+  $("duration").value=p.duration/60;$("rollout").value=p.rollout/60;$("crash").value=p.crash*100;
+  $("assumed").value=p.hosts*p.containers;
+  setText("scenario-copy",p.description);setText("scenario-name",p.name);
+ }
+ function svgText(x,y,text,anchor="start",color=null) {
+  return '<text x="'+x+'" y="'+y+'" text-anchor="'+anchor+'"'+(color?' style="fill:'+color+'"':'')+'>'+text+'</text>';
+ }
+ function timeChart(id, keys, height, references=[]) {
+  const svg=$(id), rows=result.snapshots,W=900,H=height,L=64,R=20,T=24,B=38;
+  const max=Math.max(1,...rows.flatMap(r=>keys.map(k=>r[k]??0)),...references.map(r=>r.value))*1.12;
+  const x=t=>L+t/result.config.duration*(W-L-R), y=v=>H-B-v/max*(H-T-B);
+  let html="";
+  if(result.config.outageDuration>0) {
+   const start=Math.min(result.config.duration,result.config.outageStart),end=Math.min(result.config.duration,start+result.config.outageDuration);
+   html+='<rect x="'+x(start)+'" y="'+T+'" width="'+(x(end)-x(start))+'" height="'+(H-T-B)+'" fill="var(--wash)"/>';
+   html+=svgText(x(start)+4,T+12,"storage outage");
+  }
+  for(let i=0;i<=3;i++) {const v=max*i/3, yy=y(v);html+='<line class="axis" x1="'+L+'" x2="'+(W-R)+'" y1="'+yy+'" y2="'+yy+'"/>'+svgText(L-8,yy+4,fmt(v),"end");}
+  for(let i=0;i<=4;i++) {const t=result.config.duration*i/4;html+=svgText(x(t),H-12,duration(t),i===4?"end":i===0?"start":"middle");}
+  references.forEach(ref=>{html+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+y(ref.value)+'" y2="'+y(ref.value)+'" stroke="var(--estimate)" stroke-width="1" stroke-dasharray="'+(ref.label==="target"?"2 4":"6 5")+'"/>';html+=svgText(L+4,y(ref.value)-5,ref.label+" "+ref.value);});
+  keys.forEach(k=>{
+   let d="",connected=false;
+   rows.forEach(r=>{if(r[k]===null){connected=false;return;}d+=(connected?"L":"M")+x(r.time).toFixed(2)+","+y(r[k]).toFixed(2)+" ";connected=true;});
+   html+='<path class="data" d="'+d+'" stroke="'+chartColors[k]+'"'+(k==="projected"||k==="profiledHosts"?' stroke-dasharray="7 5"':'')+'/>';
+  });
+  html+='<line id="'+id+'-cursor" x1="'+x(rows[selected].time)+'" x2="'+x(rows[selected].time)+'" y1="'+T+'" y2="'+(H-B)+'" stroke="var(--ink)" stroke-width="1" stroke-dasharray="2 3"/>';
+  svg.innerHTML=html;
+  svg.onclick=e=> {
+   const rect=svg.getBoundingClientRect(), t=Math.max(0,Math.min(1,((e.clientX-rect.left)/rect.width*W-L)/(W-L-R)));
+   selected=Math.round(t*(rows.length-1));$("time").value=selected;inspect();
+  };
+ }
+ function facts(id, rows) {
+  $(id).innerHTML=rows.map(([label,value,detail])=>'<tr><th scope="row">'+label+(detail?'<br><span class="subject">'+detail+'</span>':"")+'</th><td>'+value+'</td></tr>').join("");
+ }
+ function histogram(id, samples, mu, sigma, options) {
+  const svg=$(id),W=450,H=250,L=50,R=18,T=20,B=42;
+  let xmin=options.xmin,xmax=options.xmax;
+  const x=v=>L+(v-xmin)/(xmax-xmin)*(W-L-R);
+  const bins=options.discrete?Math.min(60,Math.ceil(xmax-xmin)+1):30;
+  const width=(xmax-xmin)/bins, counts=Array(bins).fill(0);
+  samples.forEach(v=>{if(v>=xmin&&v<=xmax){const b=Math.min(bins-1,Math.floor((v-xmin)/width));if(b>=0)counts[b]++;}});
+  const density=v=>sigma>0?Math.exp(-.5*((v-mu)/sigma)**2)/(sigma*Math.sqrt(2*Math.PI)):0;
+  const yMax=Math.max(1,...counts.map(c=>c/samples.length/width*100),sigma>0?density(mu)*100:0)*1.13;
+  const y=v=>H-B-v/yMax*(H-T-B);
+  let html="";
+  if(sigma>0) {
+   const a=Math.max(xmin,mu-1.96*sigma),b=Math.min(xmax,mu+1.96*sigma);
+   html+='<rect x="'+x(a)+'" y="'+T+'" width="'+(x(b)-x(a))+'" height="'+(H-T-B)+'" fill="var(--wash)"/>';
+  }
+  [0,yMax/2,yMax].forEach(v=>{html+='<line class="axis" x1="'+L+'" x2="'+(W-R)+'" y1="'+y(v)+'" y2="'+y(v)+'"/>'+svgText(L-7,y(v)+4,v.toFixed(1),"end");});
+  counts.forEach((c,i)=>{const v=c/samples.length/width*100;html+='<rect x="'+(x(xmin+i*width)+1)+'" y="'+y(v)+'" width="'+Math.max(1,x(xmin+width)-x(xmin)-2)+'" height="'+(H-B-y(v))+'" fill="var(--process)" opacity=".4"/>';});
+  if(sigma>0) {let d="";for(let i=0;i<=200;i++){const v=xmin+(xmax-xmin)*i/200;d+=(i?"L":"M")+x(v)+","+y(density(v)*100)+" ";}html+='<path class="data" d="'+d+'" stroke="var(--estimate)"/>';}
+  else if(sigma===0) {html+='<line x1="'+x(mu)+'" x2="'+x(mu)+'" y1="'+T+'" y2="'+(H-B)+'" stroke="var(--estimate)" stroke-width="2"/>';html+=svgText(x(mu)+6,T+15,"point mass");}
+  else {html+=svgText(L+6,T+16,"Gaussian unavailable for this population");}
+  for(let i=0;i<=4;i++){const v=xmin+(xmax-xmin)*i/4;html+=svgText(x(v),H-23,options.percent?v.toFixed(1)+"%":Math.round(v),i===4?"end":i===0?"start":"middle");}
+  html+=svgText(L,H-6,options.percent?"error relative to live N":"profilers before trimming");
+  html+=svgText(L,T-6,"density · % per "+(options.percent?"percentage point":"profiler"));
+  svg.innerHTML=html;
+ }
+ function errors(n) {
+  if(n===0) {
+   ["census-error-chart","profiler-error-chart","weighted-error-chart"].forEach(id=>$(id).innerHTML=svgText(32,80,"No live population for a reference distribution."));
+   setText("census-error-band","No live population.");
+   setText("profiler-error-band","No live population.");
+   setText("census-error-caption","An empty time slice supplies no reference distribution; it does not prove a complete observed census.");
+   setText("profiler-error-caption","Select a time with live processes to inspect independent cohort variation.");
+   setText("weighted-error-band","No live population.");setText("weighted-error-caption","Select a slice with live units.");
+   return;
+  }
+  const key=[n,result.config.target,result.fraction,result.config.seed].join("/");
+  let d=distributionCache.get(key);
+  if(!d) {d=S.distributions(n,result.config.target,result.fraction,result.config.seed);distributionCache.set(key,d);}
+  const sigma=d.censusSdPercent,range=Math.max(1,4.5*sigma);
+  const censusGaussian=result.fraction===1||n*result.fraction>=30;
+  const profilerGaussian=result.fraction===1?n>=result.config.target:n*result.fraction>=32*result.config.target;
+  histogram("census-error-chart",d.census,0,censusGaussian?sigma:null,{
+   xmin:Math.min(-range,...d.census),xmax:Math.max(range,...d.census),percent:true});
+  const m=d.profilerMoments,ps=d.profilerApproxSd;
+  const pmax=Math.max(result.config.target*1.3,result.config.target+4.5*ps,m.high+2,...d.selected,4);
+  histogram("profiler-error-chart",d.selected,d.referenceMean,profilerGaussian?ps:null,{xmin:-.5,xmax:Math.ceil(pmax)+.5,discrete:true});
+  setText("census-error-band",sigma===0?"f = 1: random census error is exactly zero.":
+   (censusGaussian?"Gaussian 95% band ≈ ±"+(1.96*sigma).toFixed(2)+"% · ":"Gaussian unavailable at this count · ")+"empirical "+pct(d.censusMoments.low)+" to "+pct(d.censusMoments.high));
+  setText("census-error-caption",sigma===0?"The point mass is for a complete live census. Any discrepancy in the fleet timeline comes from freshness, ghosts, missing participation, or counting a different unit.":"Bars are seeded complete-census trials; "+(censusGaussian?"the line is Gaussian.":"the Gaussian is suppressed.")+" SD = "+sigma.toFixed(2)+"%. Expected tracked count is "+fmt(n*result.fraction)+(n*result.fraction<30?"; a Gaussian is unreliable at this small count.":"."));
+  setText("profiler-error-band","Empirical mean "+m.mean.toFixed(2)+" · 95% "+fmt(m.low)+"–"+fmt(m.high)+" · "+(100*d.aboveCap).toFixed(2)+"% above "+d.cap);
+  const sparseWarning=profilerGaussian?" The orange line is Gaussian; sparse-census variance uses a delta-method approximation.":
+   " The Gaussian is suppressed: too little tracked population makes inverse-R, clipping, or missing old censuses dominate.";
+  setText("profiler-error-caption","Equal-size independent old and new cohorts, N = "+fmt(n)+"."+sparseWarning+" "+(result.config.target<30&&n>=result.config.target?"At this target the histogram shows discrete skew; 16 instead of 15 is ordinary.":"This is a reference before thinning, not a guarantee for the fleet path."));
+  const em=d.expandedMoments, expandedErrors=d.expanded.map(v=>(v-n)/n*100);
+  const es=em.sd/n*100,er=Math.max(10,4.5*es);
+  histogram("weighted-error-chart",expandedErrors,(em.mean-n)/n*100,profilerGaussian?es:null,{
+   xmin:Math.min(-Math.min(100,er),...expandedErrors),xmax:Math.max(er,...expandedErrors),percent:true});
+  setText("weighted-error-band","Empirical weighted mean "+fmt(em.mean)+" for N = "+fmt(n)+" · 95% "+fmt(em.low)+"–"+fmt(em.high));
+  setText("weighted-error-caption","Blue bars are errors of the sum of survivor weights; every simulated tail outcome is included. "+(profilerGaussian?"The orange curve is a moment-matched Gaussian fit, not a bound.":"The Gaussian is suppressed because zero-support/clipping dominate.")+" Weighting restores expected mass under positive independent inclusion; with a small target or unequal weights, errors can be skewed and heavy-tailed.");
+ }
+ function inspect() {
+  const r=result.snapshots[selected];
+  setText("time-label",duration(r.time));
+  ["population-chart","profiling-chart"].forEach(id=>{
+   const x=64+r.time/result.config.duration*(900-64-20),line=$(id+"-cursor");line.setAttribute("x1",x);line.setAttribute("x2",x);
+  });
+  facts("slice-facts",[
+   ["Process / container incarnations alive",fmt(r.processes),"Actual live trace-emitting population units"],
+   ["Projected processes",fmt(r.projected),"Counted tracked members R / tracking fraction f"],
+   ["Processes profiling now",fmt(r.profiling),"Actual recording, after permanent stops"],
+   ["Sum of current trace expansion weights",fmt(r.expanded),"Weighted-unit estimate; assumes complete trace delivery"],
+   ["Physical hosts alive",fmt(r.hosts),"Ancillary machine count; not the unsampling denominator"],
+   ["Distinct physical hosts profiling now",fmt(r.profiledHosts),"Deduplicated physical-host IDs in this simulated fleet"],
+   ["Processes that have ever started profiling",fmt(r.everSelected),"Cumulative starts, not concurrent profilers"]
+  ]);
+  const delta=r.projected!==null&&r.processes?(r.projected-r.processes)/r.processes*100:null;
+  let read=delta===null?"No census projection is available yet.": "At this slice, the census differs from live processes by "+pct(delta)+".";
+  if(r.age!==null)read+=" Its last observation is "+Math.floor(r.age)+" seconds old.";
+  if(r.ghosts)read+=" "+fmt(r.ghosts)+" stale tracked memberships are still visible in the two-bucket window.";
+  if(r.outage)read+=" Storage is unavailable; existing recording continues and startups use fallback.";
+  if(!r.cutoffSettled)read+=" No settled admission cutoff exists.";
+  if(result.config.fallback==="disabled"&&result.config.scenario==="cold"&&!result.config.lifetime)read+=" This original off cohort cannot start profiling after settlement.";
+  setText("slice-reading",read);
+  const before=result.archives.filter(o=>o.time<=r.time), last=before[before.length-1];
+  const age=last?r.time-last.time:null, maxAge=number("history-age");
+  const o=last&&age<=maxAge?last:null;
+  const se=o?(result.fraction===1?0:o.counted>=30?Math.sqrt(o.counted*(1-result.fraction))/result.fraction:null):null;
+  facts("historical-facts",[
+   ["Retained observations through this time",fmt(before.length)],
+   ["Closest accepted prior observation",o?duration(o.time)+" · "+Math.floor(age)+" s old":last?"older than maximum age":"none"],
+   ["Observation population estimate",o?fmt(o.population):"unavailable"],
+   ["Membership buckets listed",o?Math.max(0,o.bucket-1)+" and "+o.bucket:"unavailable"],
+   ["Random-error standard error",se!==null?fmt(se)+" units":"unavailable"],
+   ["Observed members with no sampling support",o?fmt(o.noSupport):"unavailable"]
+  ]);
+  setText("historical-reading",o?"Observation at "+duration(o.time)+" records R = "+o.counted+", f = "+result.fraction+", and R/f = "+fmt(o.population)+". It counts members visible in current and previous five-minute buckets; it is not proof of instantaneous liveness. The reported random-error SE covers rank sampling only. It excludes ghosts, missing membership, and changes since observation.":"No sufficiently recent preceding observation exists. An honest post hoc query returns no evidence; it cannot fill this slice with a future or latest roster.");
+  setText("weighting-reading",r.unsupported>0?"Coverage gap: "+fmt(r.unsupported)+" of "+fmt(r.processes)+" live units began with zero startup admission probability. Their missing samples cannot be recovered. The sum of weights "+fmt(r.expanded)+" estimates only the supported population of "+fmt(r.supported)+" units in expectation, assuming complete delivery and independent workload.":"This slice has "+fmt(r.profiling)+" actual profiling units. Their expansion weights sum to "+fmt(r.expanded)+" versus "+fmt(r.processes)+" actual live units. Startup weight is 1/(f·r); each fresh thinning round survived multiplies it by 1/q. Individual realizations vary, but the weighted mass is preserved in expectation. Delivered stack samples can use these time-varying weights.");
+  const examples=result.weightExamples.filter(p=>p.history[0][0]<=r.time);
+  $("weight-log").innerHTML=examples.length?examples.map(p=>'<div class="observation"><time>unit '+Number(p.incarnation)+'</time><span>'+p.history.filter(([t])=>t<=r.time).map(([t,w])=>duration(t)+': '+(w===0?'0 · terminal exclusion':fmt(w)+' ×')).join(' → ')+'</span></div>').join(""):'<p class="hint">No sampled trace unit has weight metadata in this slice.</p>';
+  if(distFrame!==null)cancelAnimationFrame(distFrame);
+  distFrame=requestAnimationFrame(()=>{errors(r.processes);distFrame=null;});
+ }
+ async function run() {
+  $("simulate").disabled=true;setText("run-status","Simulating fleet events…");
+  await new Promise(resolve=>setTimeout(resolve,15));
+  try {
+   const c=config();
+   if(Object.values(c).some(v=>typeof v==="number"&&!Number.isFinite(v)))throw new Error("Enter valid numeric settings.");
+   if(c.target<1||c.target>2000||c.lower<0||c.lifetime<0||c.crash<0||c.crash>1)throw new Error("Check target, population bound, lifetime, and crash percentage.");
+   result=S.simulate(c);distributionCache.clear();selected=result.snapshots.length-1;
+   $("time").max=selected;$("time").value=selected;
+   setText("scenario-name",S.presets[c.scenario].name);setText("scenario-copy",S.presets[c.scenario].description);
+   const f=result.fraction;
+   setText("tracking-readout","Tracked slice f = "+(result.bits?"1 / "+2**result.bits:"1")+" · target "+c.target+" · thinning trigger "+result.cap);
+   timeChart("population-chart",["hosts","processes","projected","expanded"],265);
+   timeChart("profiling-chart",["profiling","profiledHosts"],210,[{value:c.target,label:"target"},{value:result.cap,label:"thin trigger"}]);
+   $("event-log").innerHTML=result.notes.map(n=>'<div class="observation"><time>'+duration(n.time)+'</time><span>'+n.text+'</span></div>').join("");
+   inspect();
+   setText("run-status","Done. "+fmt(result.summary.everStarted)+" process starts, "+fmt(result.archives.length)+" census observations.");
+  } catch(error) {setText("run-status",error.message);}
+  finally {$("simulate").disabled=false;}
+ }
+ $("scenario").onchange=preset;$("fallback").onchange=()=>{$("assumed-label").hidden=$("fallback").value!=="assume";};
+ $("simulate").onclick=run;$("time").oninput=()=>{selected=number("time");inspect();};$("history-age").oninput=inspect;
+ preset();run();
+})();
+</script>
+</body>
+</html>

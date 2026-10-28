@@ -1,0 +1,10 @@
+{
+  "draw_assignments": 64,
+  "total_states": 627396,
+  "total_edges": 1731672,
+  "stale_cas_transitions": 504672,
+  "once_only": true,
+  "terminal_no_resume": true,
+  "startup_skips_old_rounds": true,
+  "note": "Small abstract model of guards, not an exhaustive model of all Rust/storage/timing behavior"
+}

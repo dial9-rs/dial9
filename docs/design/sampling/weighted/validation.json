@@ -1,0 +1,53 @@
+{
+  "implementation_commit": "1904be0b31d3bb49960afe2de4ae9b51f5ab8540",
+  "implementation_pr": "https://github.com/dial9-rs/dial9/pull/1093",
+  "protocol_schema": 3,
+  "trace_sampling_schema": 1,
+  "validation": {
+    "cargo_fmt": "passed",
+    "cargo_clippy_workspace_all_targets_all_features": "passed (existing unrelated warnings)",
+    "cargo_nextest_workspace_all_features_stress_seconds": 20,
+    "workspace_tests_passed": 1730,
+    "workspace_tests_skipped": 4,
+    "shuttle_passed": {
+      "sampler": 14,
+      "core": 41,
+      "telemetry": 2,
+      "utils": 3
+    },
+    "feature_builds": [
+      "bare",
+      "s3-only",
+      "dial9-only"
+    ],
+    "doctests": "passed",
+    "rustdoc": "passed",
+    "trace_encode_decode_expansion_weights": [
+      10,
+      20,
+      0
+    ]
+  },
+  "artifact": {
+    "url": "https://artifactory.amazon.dev/view/sampling-a-changing-fleet-census",
+    "id": "f9556d5f-655c-475f-8266-a9acdf4c8cc4"
+  },
+  "limits": [
+    "Control models abstract actual storage and clocks; no full Rust refinement proof.",
+    "Gaussian census uncertainty covers independent hash sampling of visible membership only.",
+    "Expanded totals require positive support, exogenous workload/lifetimes, independent randomness and usable trace delivery.",
+    "Current viewer does not yet apply expansion factors.",
+    "Security audit currently fails on base-lockfile advisories; dependency versions unchanged."
+  ],
+  "tla_control_safety": {
+    "distinct_states": 153715,
+    "generated_states": 417947,
+    "depth": 12,
+    "outcome": "no safety violations",
+    "negative_controls": [
+      "OnceOnly",
+      "CASFencing"
+    ],
+    "allowed_missed_round_witness": "NoMissedRound counterexample"
+  }
+}

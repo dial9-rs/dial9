@@ -1,0 +1,192 @@
+TLC2 Version 2026.10.23.135453 (rev: 2ef2af8)
+Running breadth-first search Model-Checking with fp 107 and seed 279746517368643599 with 2 workers on 64 cores with 1890MB heap and 64MB offheap memory [pid: 769] (Linux 5.10.270-283.1109.amzn2int.x86_64 amd64, Amazon.com Inc. 17.0.21 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /tmp/dial9-sampling-review-weighted-storage/tla/BernoulliControl.tla
+Parsing file /tmp/tlc-11542018008005202391/Naturals.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /tmp/tlc-11542018008005202391/Sequences.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /tmp/tlc-11542018008005202391/FiniteSets.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /tmp/tlc-11542018008005202391/TLC.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /tmp/tlc-11542018008005202391/_TLCTrace.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /tmp/tlc-11542018008005202391/TLCExt.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /tmp/tlc-11542018008005202391/Integers.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module BernoulliControl
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module BernoulliControl
+Starting... (2026-10-28 13:31:20)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-28 13:31:20.
+Error: Invariant OnceOnly is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ active = (p0 :> FALSE @@ p1 :> FALSE)
+/\ factors = (p0 :> <<>> @@ p1 :> <<>>)
+/\ terminal = (p0 :> FALSE @@ p1 :> FALSE)
+/\ currentRound = 0
+/\ weight = (p0 :> 0 @@ p1 :> 0)
+/\ lastEpoch = (p0 :> 0 @@ p1 :> 0)
+/\ startEpoch = (p0 :> 0 @@ p1 :> 0)
+/\ offAtStartup = (p0 :> FALSE @@ p1 :> FALSE)
+/\ applied = (p0 :> <<>> @@ p1 :> <<>>)
+/\ staleCommit = FALSE
+/\ pending = ( p0 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] @@
+  p1 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] )
+/\ holder = "none"
+/\ version = 0
+/\ started = (p0 :> FALSE @@ p1 :> FALSE)
+/\ rounds = << [id |-> 0, factor |-> 1, kept |-> {p0, p1}],
+   [id |-> 0, factor |-> 1, kept |-> {p0, p1}] >>
+
+State 2: <Prepare(p0) line 39, col 5 to line 50, col 48 of module BernoulliControl>
+/\ active = (p0 :> FALSE @@ p1 :> FALSE)
+/\ factors = (p0 :> <<>> @@ p1 :> <<>>)
+/\ terminal = (p0 :> FALSE @@ p1 :> FALSE)
+/\ currentRound = 0
+/\ weight = (p0 :> 0 @@ p1 :> 0)
+/\ lastEpoch = (p0 :> 0 @@ p1 :> 0)
+/\ startEpoch = (p0 :> 0 @@ p1 :> 0)
+/\ offAtStartup = (p0 :> FALSE @@ p1 :> FALSE)
+/\ applied = (p0 :> <<>> @@ p1 :> <<>>)
+/\ staleCommit = FALSE
+/\ pending = ( p0 :>
+      [ ready |-> TRUE,
+        base |-> 0,
+        epoch |-> 1,
+        round |-> [id |-> 1, factor |-> 1, kept |-> {p0, p1}] ] @@
+  p1 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] )
+/\ holder = "none"
+/\ version = 0
+/\ started = (p0 :> FALSE @@ p1 :> FALSE)
+/\ rounds = << [id |-> 0, factor |-> 1, kept |-> {p0, p1}],
+   [id |-> 0, factor |-> 1, kept |-> {p0, p1}] >>
+
+State 3: <Commit(p0) line 55, col 5 to line 67, col 58 of module BernoulliControl>
+/\ active = (p0 :> FALSE @@ p1 :> FALSE)
+/\ factors = (p0 :> <<>> @@ p1 :> <<>>)
+/\ terminal = (p0 :> FALSE @@ p1 :> FALSE)
+/\ currentRound = 1
+/\ weight = (p0 :> 0 @@ p1 :> 0)
+/\ lastEpoch = (p0 :> 0 @@ p1 :> 0)
+/\ startEpoch = (p0 :> 0 @@ p1 :> 0)
+/\ offAtStartup = (p0 :> FALSE @@ p1 :> FALSE)
+/\ applied = (p0 :> <<>> @@ p1 :> <<>>)
+/\ staleCommit = FALSE
+/\ pending = ( p0 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] @@
+  p1 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] )
+/\ holder = p0
+/\ version = 1
+/\ started = (p0 :> FALSE @@ p1 :> FALSE)
+/\ rounds = << [id |-> 1, factor |-> 1, kept |-> {p0, p1}],
+   [id |-> 0, factor |-> 1, kept |-> {p0, p1}] >>
+
+State 4: <Start(p0) line 71, col 5 to line 80, col 50 of module BernoulliControl>
+/\ active = (p0 :> TRUE @@ p1 :> FALSE)
+/\ factors = (p0 :> <<>> @@ p1 :> <<>>)
+/\ terminal = (p0 :> FALSE @@ p1 :> FALSE)
+/\ currentRound = 1
+/\ weight = (p0 :> 1 @@ p1 :> 0)
+/\ lastEpoch = (p0 :> 1 @@ p1 :> 0)
+/\ startEpoch = (p0 :> 1 @@ p1 :> 0)
+/\ offAtStartup = (p0 :> FALSE @@ p1 :> FALSE)
+/\ applied = (p0 :> <<>> @@ p1 :> <<>>)
+/\ staleCommit = FALSE
+/\ pending = ( p0 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] @@
+  p1 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] )
+/\ holder = p0
+/\ version = 1
+/\ started = (p0 :> TRUE @@ p1 :> FALSE)
+/\ rounds = << [id |-> 1, factor |-> 1, kept |-> {p0, p1}],
+   [id |-> 0, factor |-> 1, kept |-> {p0, p1}] >>
+
+State 5: <Apply(p0) line 85, col 5 to line 100, col 57 of module BernoulliControl>
+/\ active = (p0 :> TRUE @@ p1 :> FALSE)
+/\ factors = (p0 :> <<1>> @@ p1 :> <<>>)
+/\ terminal = (p0 :> FALSE @@ p1 :> FALSE)
+/\ currentRound = 1
+/\ weight = (p0 :> 1 @@ p1 :> 0)
+/\ lastEpoch = (p0 :> 1 @@ p1 :> 0)
+/\ startEpoch = (p0 :> 1 @@ p1 :> 0)
+/\ offAtStartup = (p0 :> FALSE @@ p1 :> FALSE)
+/\ applied = (p0 :> <<1>> @@ p1 :> <<>>)
+/\ staleCommit = FALSE
+/\ pending = ( p0 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] @@
+  p1 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] )
+/\ holder = p0
+/\ version = 1
+/\ started = (p0 :> TRUE @@ p1 :> FALSE)
+/\ rounds = << [id |-> 1, factor |-> 1, kept |-> {p0, p1}],
+   [id |-> 0, factor |-> 1, kept |-> {p0, p1}] >>
+
+State 6: <Apply(p0) line 85, col 5 to line 100, col 57 of module BernoulliControl>
+/\ active = (p0 :> TRUE @@ p1 :> FALSE)
+/\ factors = (p0 :> <<1, 1>> @@ p1 :> <<>>)
+/\ terminal = (p0 :> FALSE @@ p1 :> FALSE)
+/\ currentRound = 1
+/\ weight = (p0 :> 1 @@ p1 :> 0)
+/\ lastEpoch = (p0 :> 1 @@ p1 :> 0)
+/\ startEpoch = (p0 :> 1 @@ p1 :> 0)
+/\ offAtStartup = (p0 :> FALSE @@ p1 :> FALSE)
+/\ applied = (p0 :> <<1, 1>> @@ p1 :> <<>>)
+/\ staleCommit = FALSE
+/\ pending = ( p0 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] @@
+  p1 :>
+      [ ready |-> FALSE,
+        base |-> 0,
+        epoch |-> 0,
+        round |-> [id |-> 0, factor |-> 1, kept |-> {p0, p1}] ] )
+/\ holder = p0
+/\ version = 1
+/\ started = (p0 :> TRUE @@ p1 :> FALSE)
+/\ rounds = << [id |-> 1, factor |-> 1, kept |-> {p0, p1}],
+   [id |-> 0, factor |-> 1, kept |-> {p0, p1}] >>
+
+12193 states generated, 6897 distinct states found, 5543 states left on queue.
+The depth of the complete state graph search is 7.
+Finished in 00s at (2026-10-28 13:31:20)
+Trace exploration spec path: ./BernoulliControl_TTrace_1793194280.tla

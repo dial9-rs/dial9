@@ -1,0 +1,90 @@
+[
+  {
+    "config": "safety.cfg",
+    "exit_code": 0,
+    "outcome": "safe",
+    "invariant": null,
+    "states_generated": 417947,
+    "distinct_states": 153715,
+    "depth": 12,
+    "command": [
+      "java",
+      "-XX:+UseParallelGC",
+      "-Xmx2g",
+      "-cp",
+      "/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar",
+      "tlc2.TLC",
+      "-workers",
+      "2",
+      "-config",
+      "safety.cfg",
+      "BernoulliControl.tla"
+    ]
+  },
+  {
+    "config": "negative-duplicate-epoch.cfg",
+    "exit_code": 12,
+    "outcome": "expected counterexample",
+    "invariant": "OnceOnly",
+    "states_generated": 12193,
+    "distinct_states": 6897,
+    "depth": 7,
+    "command": [
+      "java",
+      "-XX:+UseParallelGC",
+      "-Xmx2g",
+      "-cp",
+      "/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar",
+      "tlc2.TLC",
+      "-workers",
+      "2",
+      "-config",
+      "negative-duplicate-epoch.cfg",
+      "BernoulliControl.tla"
+    ]
+  },
+  {
+    "config": "negative-stale-cas.cfg",
+    "exit_code": 12,
+    "outcome": "expected counterexample",
+    "invariant": "CASFencing",
+    "states_generated": 1132,
+    "distinct_states": 677,
+    "depth": 5,
+    "command": [
+      "java",
+      "-XX:+UseParallelGC",
+      "-Xmx2g",
+      "-cp",
+      "/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar",
+      "tlc2.TLC",
+      "-workers",
+      "2",
+      "-config",
+      "negative-stale-cas.cfg",
+      "BernoulliControl.tla"
+    ]
+  },
+  {
+    "config": "missed-round-witness.cfg",
+    "exit_code": 12,
+    "outcome": "expected counterexample",
+    "invariant": "NoMissedRound",
+    "states_generated": 49939,
+    "distinct_states": 25036,
+    "depth": 7,
+    "command": [
+      "java",
+      "-XX:+UseParallelGC",
+      "-Xmx2g",
+      "-cp",
+      "/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar",
+      "tlc2.TLC",
+      "-workers",
+      "2",
+      "-config",
+      "missed-round-witness.cfg",
+      "BernoulliControl.tla"
+    ]
+  }
+]

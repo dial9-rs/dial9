@@ -1,0 +1,32 @@
+[
+  {
+    "poll_ms": 100,
+    "bucket_ms": 1000,
+    "skew_ms": 0,
+    "uncertainty_ms": 1000,
+    "config_valid": true,
+    "safe_phase_count": 0,
+    "first_safe_phase": null,
+    "last_safe_phase": null
+  },
+  {
+    "poll_ms": 1000,
+    "bucket_ms": 10000,
+    "skew_ms": 2000,
+    "uncertainty_ms": 1000,
+    "config_valid": true,
+    "safe_phase_count": 0,
+    "first_safe_phase": null,
+    "last_safe_phase": null
+  },
+  {
+    "poll_ms": 60000,
+    "bucket_ms": 300000,
+    "skew_ms": 5000,
+    "uncertainty_ms": 1000,
+    "config_valid": true,
+    "safe_phase_count": 278000,
+    "first_safe_phase": 11000,
+    "last_safe_phase": 288999
+  }
+]

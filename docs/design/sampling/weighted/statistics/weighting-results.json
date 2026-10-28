@@ -1,0 +1,240 @@
+{
+  "seed": 84545998,
+  "trials_per_scenario": 60000,
+  "heterogeneous_admission": {
+    "adaptive_admission": false,
+    "units": 240,
+    "f": 0.5,
+    "target": 8,
+    "overshoot_reconciliation_trigger": 17,
+    "repeated_round_is_idempotent": true,
+    "weighted_work": {
+      "startup": {
+        "truth": 2080.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2070.141958333333,
+        "sd": 1262.5959219970835,
+        "monte_carlo_standard_error_of_mean": 5.154526267019542,
+        "mean_error_in_monte_carlo_standard_errors": -1.9125019751557075,
+        "central_95_estimator_interval": [
+          272.5,
+          4785.0
+        ]
+      },
+      "round1_lazy": {
+        "truth": 2080.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2072.08225,
+        "sd": 1512.757808246058,
+        "monte_carlo_standard_error_of_mean": 6.175807891023134,
+        "mean_error_in_monte_carlo_standard_errors": -1.2820589855958668,
+        "central_95_estimator_interval": [
+          154.0625,
+          5978.796875000003
+        ]
+      },
+      "round1_retry": {
+        "truth": 2080.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2072.08225,
+        "sd": 1512.757808246058,
+        "monte_carlo_standard_error_of_mean": 6.175807891023134,
+        "mean_error_in_monte_carlo_standard_errors": -1.2820589855958668,
+        "central_95_estimator_interval": [
+          154.0625,
+          5978.796875000003
+        ]
+      },
+      "round2_skipped": {
+        "truth": 2080.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2068.486090494792,
+        "sd": 2540.381049217623,
+        "monte_carlo_standard_error_of_mean": 10.371062204698893,
+        "mean_error_in_monte_carlo_standard_errors": -1.1101957811024876,
+        "central_95_estimator_interval": [
+          69.36718750000004,
+          7955.054687500004
+        ]
+      },
+      "alive_slice": {
+        "truth": 2040.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2028.323642578125,
+        "sd": 2540.2759879860137,
+        "monte_carlo_standard_error_of_mean": 10.370633294016907,
+        "mean_error_in_monte_carlo_standard_errors": -1.1259059201921142,
+        "central_95_estimator_interval": [
+          31.25,
+          7910.671875000003
+        ]
+      }
+    },
+    "expanded_unit_count_after_async_rounds": {
+      "truth": 240.0,
+      "trials": 60000,
+      "available_trials": 60000,
+      "mean": 239.500103515625,
+      "sd": 155.3765668576092,
+      "monte_carlo_standard_error_of_mean": 0.6343221779776307,
+      "mean_error_in_monte_carlo_standard_errors": -0.7880797830036286,
+      "central_95_estimator_interval": [
+        61.875,
+        621.875
+      ]
+    },
+    "naive_population_over_profiler_ratio_work": {
+      "truth": 2080.0,
+      "trials": 60000,
+      "available_trials": 60000,
+      "mean": 681.137659287137,
+      "sd": 359.5637890499325,
+      "monte_carlo_standard_error_of_mean": 1.46791302192344,
+      "mean_error_in_monte_carlo_standard_errors": -952.9599641264178,
+      "central_95_estimator_interval": [
+        232.0,
+        1540.0
+      ]
+    }
+  },
+  "census_endogenous_admission": {
+    "adaptive_admission": true,
+    "units": 240,
+    "f": 0.5,
+    "target": 8,
+    "overshoot_reconciliation_trigger": 17,
+    "repeated_round_is_idempotent": true,
+    "weighted_work": {
+      "startup": {
+        "truth": 2080.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2085.3565083333333,
+        "sd": 2211.1931821592,
+        "monte_carlo_standard_error_of_mean": 9.027158365018426,
+        "mean_error_in_monte_carlo_standard_errors": 0.5933770204021851,
+        "central_95_estimator_interval": [
+          46.875,
+          7175.646875000001
+        ]
+      },
+      "round1_lazy": {
+        "truth": 2080.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2085.4355611979167,
+        "sd": 2211.600512452821,
+        "monte_carlo_standard_error_of_mean": 9.028821283978676,
+        "mean_error_in_monte_carlo_standard_errors": 0.6020233457895497,
+        "central_95_estimator_interval": [
+          46.875,
+          7175.646875000001
+        ]
+      },
+      "round1_retry": {
+        "truth": 2080.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2085.4355611979167,
+        "sd": 2211.600512452821,
+        "monte_carlo_standard_error_of_mean": 9.028821283978676,
+        "mean_error_in_monte_carlo_standard_errors": 0.6020233457895497,
+        "central_95_estimator_interval": [
+          46.875,
+          7175.646875000001
+        ]
+      },
+      "round2_skipped": {
+        "truth": 2080.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2065.308505078125,
+        "sd": 3278.343432855959,
+        "monte_carlo_standard_error_of_mean": 13.383781020168772,
+        "mean_error_in_monte_carlo_standard_errors": -1.0977088537040058,
+        "central_95_estimator_interval": [
+          46.5,
+          10299.890625
+        ]
+      },
+      "alive_slice": {
+        "truth": 2040.0,
+        "trials": 60000,
+        "available_trials": 60000,
+        "mean": 2025.174533984375,
+        "sd": 3278.26741772553,
+        "monte_carlo_standard_error_of_mean": 13.383470689698303,
+        "mean_error_in_monte_carlo_standard_errors": -1.1077444976239643,
+        "central_95_estimator_interval": [
+          14.875,
+          10253.287500000002
+        ]
+      }
+    },
+    "expanded_unit_count_after_async_rounds": {
+      "truth": 240.0,
+      "trials": 60000,
+      "available_trials": 60000,
+      "mean": 239.386382421875,
+      "sd": 184.8400400211005,
+      "monte_carlo_standard_error_of_mean": 0.7546063034788629,
+      "mean_error_in_monte_carlo_standard_errors": -0.8131625395866967,
+      "central_95_estimator_interval": [
+        46.5,
+        735.3140625000001
+      ]
+    },
+    "naive_population_over_profiler_ratio_work": {
+      "truth": 2080.0,
+      "trials": 60000,
+      "available_trials": 59976,
+      "mean": 616.6416013845679,
+      "sd": 438.9086360344695,
+      "monte_carlo_standard_error_of_mean": 1.7921954782557117,
+      "mean_error_in_monte_carlo_standard_errors": -816.5171803913229,
+      "central_95_estimator_interval": [
+        222.0,
+        1751.5
+      ]
+    }
+  },
+  "negative_controls": {
+    "reused_admission_coin": {
+      "truth": 100.0,
+      "trials": 60000,
+      "available_trials": 60000,
+      "mean": 200.08306666666667,
+      "sd": 34.602790348885,
+      "monte_carlo_standard_error_of_mean": 0.1412653000521176,
+      "mean_error_in_monte_carlo_standard_errors": 708.4759429933791,
+      "central_95_estimator_interval": [
+        136.0,
+        272.0
+      ]
+    },
+    "duplicate_round_without_dedup": {
+      "truth": 100.0,
+      "trials": 60000,
+      "available_trials": 60000,
+      "mean": 200.33066666666667,
+      "sd": 53.24508859562124,
+      "monte_carlo_standard_error_of_mean": 0.21737216394759298,
+      "mean_error_in_monte_carlo_standard_errors": 461.56170525521264,
+      "central_95_estimator_interval": [
+        96.0,
+        304.0
+      ]
+    },
+    "disabled_cohort": {
+      "unobserved_work_units": 100,
+      "selection_probability": 0,
+      "inverse_weight": null,
+      "finite_unbiased_reconstruction_possible": false
+    }
+  }
+}

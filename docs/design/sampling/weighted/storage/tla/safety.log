@@ -1,0 +1,33 @@
+TLC2 Version 2026.10.23.135453 (rev: 2ef2af8)
+Running breadth-first search Model-Checking with fp 42 and seed 5555581270383480263 with 2 workers on 64 cores with 1890MB heap and 64MB offheap memory [pid: 62066] (Linux 5.10.270-283.1109.amzn2int.x86_64 amd64, Amazon.com Inc. 17.0.21 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /tmp/dial9-sampling-review-weighted-storage/tla/BernoulliControl.tla
+Parsing file /tmp/tlc-5582225970910214268/Naturals.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /tmp/tlc-5582225970910214268/Sequences.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /tmp/tlc-5582225970910214268/FiniteSets.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /tmp/tlc-5582225970910214268/TLC.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /tmp/tlc-5582225970910214268/_TLCTrace.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /tmp/tlc-5582225970910214268/TLCExt.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /tmp/tlc-5582225970910214268/Integers.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module BernoulliControl
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module BernoulliControl
+Starting... (2026-10-28 13:31:17)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-28 13:31:17.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 2.2E-9
+  based on the actual fingerprints:  val = 4.8E-10
+417947 states generated, 153715 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 12.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 18 and the 95th percentile is 3).
+Finished in 02s at (2026-10-28 13:31:19)

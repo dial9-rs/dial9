@@ -1,17 +1,26 @@
 # Sampling evidence archive
 
-These design notes, finite TLA+ models, reference simulator and generated results
-are tracked separately from the implementation PR. They describe implementation
-commit `d719cd52adb020349b119e098552226b124aee90`, which preserves the full source and original validation
-suite. The implementation is being simplified in PR #1093; the statistical and
-protocol assumptions in these resources remain useful, but code/API references
-may need updating independently. This branch intentionally contains only evidence.
+Proofs, models, reference simulations, review reports and the interactive
+visualization are tracked separately from implementation PR #1093.
+The current evidence describes schema-3 independent startup admission and
+Bernoulli thinning, with timestamped expansion factors embedded in traces.
+It is pinned to implementation commit
+`1904be0b` in [weighted/README.md](weighted/README.md).
 
-To reproduce the original Rust validation, check out that implementation commit
-in a separate worktree. To run the model and Python simulation checks, use the
-commands below.
+- [Current proof, model checks and validation](weighted/README.md)
+- [Sequential expansion-weight proof](weighted/statistics/weighting-proof.md)
+- [Independent storage/control review](weighted/storage/review.md)
+- [Interactive fleet laboratory](weighted/visualization/sampling-fleet-laboratory.html)
 
-# Roster sampling design and validation
+The files at this directory's root preserve the original evidence for commit
+`d719cd52adb020349b119e098552226b124aee90`. Its shared-rank admission and
+deterministic rank trimming have been superseded. Those statistical simulations
+and keep-cutoff arguments do **not** describe the current implementation or
+establish a current exact profiler cap. The original fencing, lifecycle and
+clock-boundary models remain historical evidence for their stated abstractions,
+rather than a refinement proof of the current Rust code.
+
+## Superseded rank-roster design and validation
 
 Startup reads one compatible roster and compares a stable 64-bit hash rank
 with its arm threshold. Missing/unsettled/error cases use the explicit caller
