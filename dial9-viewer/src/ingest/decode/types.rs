@@ -137,6 +137,8 @@ pub(crate) struct ResolvedSpan {
     pub(crate) parent_span_uid: Option<[u8; 16]>,
     /// Final close-time attributes.
     pub(crate) attributes: Vec<(String, String)>,
+    /// Producer-declared units; absent annotations remain absent.
+    pub(crate) attribute_units: Vec<(String, String)>,
     // ── Five-way time attribution (all nullable until effective metadata
     //    and wake classification are consumed) ─────────────────────────────
     /// Estimated on-CPU time. Null until profiler metadata is available.

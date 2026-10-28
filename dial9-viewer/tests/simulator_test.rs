@@ -179,6 +179,15 @@ async fn demo_simulator_drives_browser_objects_and_aggregate_views_without_s3() 
         !spans["span_types"].as_array().unwrap().is_empty(),
         "demo replay should expose aggregated spans"
     );
+    let selected = &spans["span_types"][0];
+    let uid = selected["span_type_uid"].as_str().unwrap();
+    let (status, body) = get(&app, &format!("/api/span-tail?{scope}&span_type_uid={uid}")).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let tail = json(&body);
+    assert_eq!(tail["report"]["count"], selected["count"]);
+    assert_eq!(tail["filesUsed"], 1);
+    assert_eq!(tail["filesMatched"], 1);
+    assert!(tail["report"]["examples"].as_array().unwrap().len() <= 8);
 
     let (status, body) = get(&app, &format!("/api/tokio-stats?{scope}")).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));

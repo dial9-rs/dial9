@@ -9,6 +9,7 @@ import {
   exemplarScopeKey,
   isAggregateMode,
   readScope,
+  readTailView,
   type PageScope,
   type ViewState,
 } from "./scope.js";
@@ -237,6 +238,60 @@ describe("buildBrowserQuery", () => {
     expect(p.get("min_span_ns")).toBe("12");
     expect(p.get("max_span_ns")).toBe("34");
     expect(p.get("max_files")).toBe("64");
+  });
+
+  it.each(["a=b&c / ✓", "", "(missing)"])("round-trips exact group values %j with the other analysis controls", groupValue => {
+    const state = {
+      ...readTailView(new URLSearchParams()), percentile: 99.9 as const,
+      groupKey: "phase / key", groupValue, property: "result / key",
+      mode: "overlay" as const, elapsedScale: "linear" as const, allFields: true,
+    };
+    const existing = new URLSearchParams("extra=one&extra=two&tail_group_key=old&tail_fields=old");
+    const query = new URLSearchParams(buildBrowserQuery(AGG_SCOPE, {
+      ...EMPTY_VIEW, selectedUid: "uid-1", bandMinNs: 12, bandMaxNs: 34,
+      attrFilters: [{ key: "status", value: "a=b" }],
+    }, state, existing));
+    expect(readTailView(query)).toEqual(state);
+    expect(query.getAll("extra")).toEqual(["one", "two"]);
+    expect(query.getAll("attr")).toEqual(["status=a=b"]);
+    expect(query.get("min_span_ns")).toBe("12");
+    expect(query.get("max_span_ns")).toBe("34");
+    expect(existing.get("tail_group_key")).toBe("old");
+  });
+
+  it("omits analysis defaults and clears a reset scope without disturbing source identity", () => {
+    const scope = {
+      ...AGG_SCOPE,
+      source: { ...AGG_SCOPE.source, credentials: { kind: "role" as const, roleArn: ROLE } },
+    };
+    const existing = new URLSearchParams("tail_group_key=phase&tail_group_value=value-a&tail_mode=overlay&tail_x_scale=linear&tail_fields=all&extra=keep");
+    const query = new URLSearchParams(buildBrowserQuery(scope, EMPTY_VIEW, readTailView(new URLSearchParams()), existing));
+    expect([...query.keys()].filter(key => key.startsWith("tail_"))).toEqual([]);
+    expect(query.get("aws_region")).toBe(scope.source.region);
+    expect(query.get("aws_role_arn")).toBe(ROLE);
+    expect(query.get("credential_mode")).toBe("role");
+    expect(query.has("aws_credential_mode")).toBe(false);
+    expect(query.get("extra")).toBe("keep");
+    expect(query.getAll("host")).toEqual(AGG_SCOPE.hosts);
+  });
+
+  it("keeps raw mode while serializing its grouped analysis state", () => {
+    const state = readTailView(new URLSearchParams("tail_group_key=phase&tail_group_value=value-a&tail_percentile=95"));
+    const query = new URLSearchParams(buildBrowserQuery({
+      ...AGG_SCOPE, trace: "/synthetic.bin",
+    }, EMPTY_VIEW, state));
+    expect(query.get("trace")).toBe("/synthetic.bin");
+    expect(query.has("api")).toBe(false);
+    expect(readTailView(query)).toEqual(state);
+  });
+});
+
+describe("readTailView", () => {
+  it("ignores invalid enum values and an incomplete group without losing valid controls", () => {
+    expect(readTailView(new URLSearchParams("tail_percentile=NaN&tail_mode=unknown&tail_x_scale=unknown&tail_fields=false&tail_group_key=phase&tail_property=result"))).toEqual({
+      percentile: 99, groupKey: null, groupValue: null, property: "result",
+      mode: "stacked", elapsedScale: "log", allFields: false,
+    });
   });
 });
 

@@ -234,6 +234,7 @@ pub(crate) struct SingleEventSpanEvent {
     /// Per-single-event-span wire ordinal for deterministic synthetic identity.
     pub(crate) decode_sequence: u64,
     pub(crate) attributes: Vec<(String, String)>,
+    pub(crate) attribute_units: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -599,6 +600,22 @@ impl SingleEventSpanLayout {
         let attributes = extract_attributes(ev, |index, _| {
             self.attribute_indices.binary_search(&index).is_ok()
         });
+        let attribute_units = ev
+            .schema
+            .annotations()
+            .iter()
+            .filter(|annotation| annotation.key() == "unit")
+            .filter_map(|annotation| {
+                let index = usize::from(annotation.field_index());
+                if self.attribute_indices.binary_search(&index).is_err() {
+                    return None;
+                }
+                ev.schema
+                    .fields()
+                    .get(index)
+                    .map(|field| (field.name().to_string(), annotation.value().to_string()))
+            })
+            .collect();
 
         Ok(SingleEventSpanEvent {
             schema_name: self.schema_name.clone(),
@@ -611,6 +628,7 @@ impl SingleEventSpanLayout {
             worker_id,
             decode_sequence,
             attributes,
+            attribute_units,
         })
     }
 }

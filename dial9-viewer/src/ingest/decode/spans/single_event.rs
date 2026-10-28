@@ -105,6 +105,7 @@ pub(crate) fn resolve_single_event_spans(
             scheduler_delay_ns: None,
             attribution_flags,
             parent_span_uid: None,
+            attribute_units: event.attribute_units.clone(),
             attributes: event.attributes.clone(),
             source_key: source_key.to_string(),
             host: host.to_string(),
@@ -209,6 +210,7 @@ mod tests {
             task_id: None,
             worker_id: None,
             decode_sequence,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
         assert_ne!(
@@ -229,6 +231,7 @@ mod tests {
             task_id: None,
             worker_id: None,
             decode_sequence: 0,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
         let resolution = resolve_single_event_spans(
@@ -266,6 +269,7 @@ mod tests {
             task_id: None,
             worker_id: None,
             decode_sequence,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
         let resolution = resolve_single_event_spans(
@@ -337,6 +341,7 @@ mod tests {
             task_id: None,
             worker_id: None,
             decode_sequence: 0,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
 
@@ -400,6 +405,7 @@ mod tests {
                 task_id: None,
                 worker_id,
                 decode_sequence: 0,
+                attribute_units: Vec::new(),
                 attributes: Vec::new(),
             };
 
@@ -447,6 +453,7 @@ mod tests {
             task_id: Some(1),
             worker_id: None,
             decode_sequence: 0,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
 

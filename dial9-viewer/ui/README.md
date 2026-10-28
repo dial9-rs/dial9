@@ -11,6 +11,7 @@ sources in this directory. Working on the UI requires Node (CI uses Node 24):
 
 ```bash
 npm ci            # lockfile-pinned install (never `npm install` in CI)
+npx playwright install --with-deps chromium  # mounted browser regressions
 npm run build     # vite build -> dist/ (what rust-embed embeds)
 npm run test      # vitest
 npx tsc --noEmit  # typecheck
@@ -320,6 +321,11 @@ Vitest is the single JavaScript test runner (ADR-0004 section 7):
   `src/**/*.test.ts` for TypeScript modules) run with `npm run test` and
   are auto-discovered — no registration needed. The `ui` job in
   `.github/workflows/ci.yml` runs them against the committed demo trace.
+- **Mounted browser suites** run Chromium through Playwright under Vitest.
+  Their temporary Vite server serves the real UI modules with fixture span
+  data. Install Chromium before running the suite; the UI CI job installs it
+  automatically. `DIAL9_TEST_CHROMIUM_EXECUTABLE` can select an existing local
+  Chromium executable.
 - **Trace-dependent suites** additionally run against a freshly regenerated
   demo trace: the `trace-integrity` CI job runs
   `../../scripts/e2e-trace-tests.sh`, which regenerates

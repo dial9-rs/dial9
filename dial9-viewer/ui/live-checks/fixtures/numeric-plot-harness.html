@@ -1,0 +1,23 @@
+<!doctype html>
+<!-- Mounts real plot/report modules via Vite; deliberately not a build entry. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Numeric plot details regression fixture</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #17212d; color: #e6edf5; font-family: monospace; }
+    .detail-panel { margin: 32px 16px; padding: 8px; box-sizing: border-box; }
+    #plots .detail-panel { width: min(880px, calc(100vw - 32px)); min-height: 460px; }
+    #plots .tail-plot { width: min(700px, 100%); }
+    #reports .detail-panel { width: min(880px, calc(100vw - 32px)); }
+  </style>
+</head>
+<body>
+  <button id="outside" type="button">Outside the plots</button>
+  <main id="plots"></main>
+  <div id="reports"></div>
+  <script type="module" src="./numeric-plot-harness.ts"></script>
+</body>
+</html>

@@ -430,6 +430,16 @@ fn api_router(state: AppState) -> Router {
         "/span-stats",
         axum::routing::get(span_stats::get_span_stats).merge(raw_span_stats_post),
     );
+    let raw_tail_post = axum::routing::post(span_stats::tail::post_tail)
+        .route_layer(DefaultBodyLimit::max(span_stats::RAW_SPAN_STATS_BODY_LIMIT))
+        .route_layer(raw_span_stats_concurrency_limit())
+        .route_layer(raw_span_stats_timeout(RAW_SPAN_STATS_REQUEST_TIMEOUT));
+    let span_tail_route = Router::new()
+        .route(
+            "/span-tail",
+            axum::routing::get(span_stats::tail::get_tail).merge(raw_tail_post),
+        )
+        .layer(raw_span_stats_timeout(RAW_SPAN_STATS_REQUEST_TIMEOUT));
 
     let router = Router::new()
         .route("/config", axum::routing::get(config::get_config))
@@ -451,6 +461,7 @@ fn api_router(state: AppState) -> Router {
     router
         .merge(upload_route)
         .merge(span_stats_route)
+        .merge(span_tail_route)
         // Permissive CORS so a page on another origin can POST a trace and read
         // it back via fetch(); also answers the OPTIONS preflight automatically.
         .layer(CorsLayer::permissive())

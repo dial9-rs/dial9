@@ -343,7 +343,7 @@ fn polls_schema() -> Arc<Schema> {
     ]))
 }
 
-/// Entry field names for the `metadata` and `attributes` map columns. Arrow 60
+/// Entry field names for the metadata, attributes and unit maps. Arrow 60
 /// changed the `MapBuilder` defaults to `key`/`value`; pin the names the
 /// schemas declare so part files keep the same layout.
 fn map_field_names() -> MapFieldNames {
@@ -369,7 +369,7 @@ fn enclosing_span_fields() -> Fields {
 
 /// Arrow schema for the `spans/` table (one row per span close summary).
 fn spans_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new("span_uid", DataType::FixedSizeBinary(16), false),
         Field::new("span_type_uid", DataType::FixedSizeBinary(16), false),
         Field::new("kind", DataType::Utf8, false),
@@ -424,7 +424,15 @@ fn spans_schema() -> Arc<Schema> {
         Field::new("host", DataType::Utf8, false),
         Field::new("service", DataType::Utf8, false),
         Field::new("date", DataType::Utf8, false),
-    ]))
+    ];
+    let attribute_type = fields
+        .iter()
+        .find(|field| field.name() == "attributes")
+        .expect("span schema always has an attributes map")
+        .data_type()
+        .clone();
+    fields.push(Field::new("attribute_units", attribute_type, false));
+    Arc::new(Schema::new(fields))
 }
 
 const SPAN_BATCH_ROWS: usize = 8 * 1024;
@@ -496,6 +504,11 @@ fn build_spans_batch(schema: Arc<Schema>, spans: &[ResolvedSpan]) -> anyhow::Res
         attr_keys_builder,
         attr_values_builder,
     );
+    let mut unit_map_builder = arrow::array::MapBuilder::new(
+        Some(map_field_names()),
+        StringBuilder::new(),
+        StringBuilder::new(),
+    );
 
     let mut source_key_builder = StringBuilder::with_capacity(n, 128 * n);
     let mut host_builder = StringBuilder::with_capacity(n, 64 * n);
@@ -546,6 +559,11 @@ fn build_spans_batch(schema: Arc<Schema>, spans: &[ResolvedSpan]) -> anyhow::Res
             attr_map_builder.values().append_value(v);
         }
         attr_map_builder.append(true)?;
+        for (key, unit) in &span.attribute_units {
+            unit_map_builder.keys().append_value(key);
+            unit_map_builder.values().append_value(unit);
+        }
+        unit_map_builder.append(true)?;
 
         source_key_builder.append_value(&span.source_key);
         host_builder.append_value(&span.host);
@@ -589,6 +607,7 @@ fn build_spans_batch(schema: Arc<Schema>, spans: &[ResolvedSpan]) -> anyhow::Res
             Arc::new(host_builder.finish()) as ArrayRef,
             Arc::new(service_builder.finish()) as ArrayRef,
             Arc::new(date_builder.finish()) as ArrayRef,
+            Arc::new(unit_map_builder.finish()) as ArrayRef,
         ],
     )?;
 
@@ -622,6 +641,7 @@ mod tests {
             details_complete,
             concurrent: false,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
             on_cpu_ns_est: None,
             blocked_ns_est: None,
@@ -860,6 +880,7 @@ mod tests {
             details_complete: true,
             concurrent: false,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: vec![("user_id".to_string(), "42".to_string())],
             on_cpu_ns_est: None,
             blocked_ns_est: None,
@@ -924,6 +945,7 @@ mod tests {
             details_complete: false,
             concurrent: true,
             parent_span_uid: Some([5u8; 16]),
+            attribute_units: Vec::new(),
             attributes: vec![
                 ("http.method".to_string(), "GET".to_string()),
                 ("http.status".to_string(), "200".to_string()),
@@ -993,6 +1015,7 @@ mod tests {
             "host",
             "service",
             "date",
+            "attribute_units",
         ];
         assert_eq!(
             batch
