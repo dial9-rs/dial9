@@ -367,7 +367,7 @@
     notes.sort((a, b) => a.time - b.time);
     const weightExamples = [...processes.values()].filter(p => p.weightHistory.length)
       .sort((a,b) => b.weightHistory.length - a.weightHistory.length || a.id.localeCompare(b.id))
-      .slice(0, 3).map(p => ({ incarnation: p.id, host: p.host, history: p.weightHistory,
+      .slice(0, 3).map(p => ({ processId: p.id, host: p.host, history: p.weightHistory,
         startEpoch: p.startEpoch, appliedEpochs: p.appliedEpochs }));
     return { config: cfg, fraction: f, bits, cap, snapshots, archives, notes, weightExamples,
       summary: snapshots[snapshots.length - 1] };

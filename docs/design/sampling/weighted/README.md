@@ -1,10 +1,10 @@
 # Weighted fleet sampling evidence
 
-Reviewed implementation: `1904be0b31d3bb49960afe2de4ae9b51f5ab8540`.
+Reviewed implementation: `6d9652ee858f1ed4f427fb7dc0afc083d9d15856`.
 Implementation PR: https://github.com/dial9-rs/dial9/pull/1093.
-Protocol schema: 3. Trace sampling metadata schema: 1.
+Protocol schema: 3. Trace sampling metadata is a scalar snapshot.
 
-The counted unit is a live process/container incarnation that could emit Dial9
+The counted unit is a live process/container run that could emit Dial9
 traces. Census rank, fresh invocation admission, and fresh salted thinning draws
 use separate entropy. Startup selects once; terminally stopped processes never
 resume. An expected target replaces any exact profiler-count claim.
@@ -17,16 +17,20 @@ survives multiplies that factor by `1/q` once. Missing rounds add nothing;
 new joiners skip previously published rounds. Failed coins write terminal zero
 before asynchronous recorder stopping.
 
-The existing roster refresh updates timestamped trace metadata. A decoder needs
-one factor for the interval containing each sample, rather than the full roster
-or an external join. The full change timeline repeats in rotated segments;
-missing/null factors or timestamps beyond an observed checkpoint are unknown.
+The existing roster refresh updates one shared current weight. When the recorder
+evaluates source metadata, it captures `dial9.sampling.weight` and
+`dial9.sampling.pool`. The writer repeats its latest captured value in each segment.
+Existing `boot_id` metadata and clock events provide identity and time. Zero
+means stopped at evaluation; null or missing means unknown. Applying a snapshot
+across a segment approximates changes within that segment. There is no change
+timeline, coverage checkpoint, or exact segment-boundary synchronization.
 Independent retained census observations answer the separate visible-population
 question and do not substitute for a trace's expansion factor.
 
 [The proof](statistics/weighting-proof.md) establishes sequential conditional
 expansion factors under explicit support, independence and delivery assumptions.
-It does not assert that the factor is an exact marginal inclusion probability.
+It does not assert that the factor is an exact marginal inclusion probability
+or prove exact weighting of every frame using a coarse segment snapshot.
 A cold Disabled cohort has zero support; choose a positive AssumePopulation
 fallback if all startup cohorts must be represented. Missing trace delivery,
 manual pauses, churn and census ghosts need separate treatment.
@@ -47,6 +51,8 @@ manual pauses, churn and census ghosts need separate treatment.
 - [Protocol/clock review](protocol/review.md).
 - [Resolution notes](resolution-notes.md) record fixes to findings in the preserved
   reports, including the actual Worker duplicate/fresh/startup epoch regressions.
+- [Complexity review](complexity/review.md) records the four implemented small
+  cleanups and the deferred recorder-listener refactor.
 - [Validation manifest](validation.json) records final Rust results and limits.
 
 For a heterogeneous fleet workload of 2,080, 60,000 seeded trials estimated
@@ -106,5 +112,5 @@ node check-browser.js
 The browser check uses locally installed Playwright/Chromium and forbids network
 requests. These resources and dependencies are not part of the implementation PR.
 
-The current viewer does not yet apply these trace factors. The sampler now emits
-the input needed by a weighted flamegraph reader.
+The current viewer does not yet apply these trace factors. The sampler emits
+the scalar input needed by a weighted flamegraph reader.

@@ -1,14 +1,27 @@
 {
-  "implementation_commit": "1904be0b31d3bb49960afe2de4ae9b51f5ab8540",
+  "implementation_commit": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
   "implementation_pr": "https://github.com/dial9-rs/dial9/pull/1093",
   "protocol_schema": 3,
-  "trace_sampling_schema": 1,
   "validation": {
+    "status": "passed",
     "cargo_fmt": "passed",
     "cargo_clippy_workspace_all_targets_all_features": "passed (existing unrelated warnings)",
+    "focused_sampler_stress_seconds": 20,
+    "focused_sampler_test_count": 108,
+    "focused_sampler_iterations": 91,
+    "trace_encode_decode_snapshot": {
+      "startup_weight": 10,
+      "evaluated_weight": 20,
+      "sampling_key_count": 2,
+      "existing_boot_id": "preserved",
+      "clock_sync_events": "present"
+    },
+    "visualization_offline_checks": "passed",
+    "visualization_responsive_browser_checks": "passed",
     "cargo_nextest_workspace_all_features_stress_seconds": 20,
-    "workspace_tests_passed": 1730,
+    "workspace_tests_passed": 1728,
     "workspace_tests_skipped": 4,
+    "workspace_stress_iterations": 1,
     "shuttle_passed": {
       "sampler": 14,
       "core": 41,
@@ -21,21 +34,19 @@
       "dial9-only"
     ],
     "doctests": "passed",
-    "rustdoc": "passed",
-    "trace_encode_decode_expansion_weights": [
-      10,
-      20,
-      0
-    ]
+    "rustdoc": "passed"
   },
   "artifact": {
     "url": "https://artifactory.amazon.dev/view/sampling-a-changing-fleet-census",
-    "id": "f9556d5f-655c-475f-8266-a9acdf4c8cc4"
+    "id": "f9556d5f-655c-475f-8266-a9acdf4c8cc4",
+    "version": 2,
+    "sha256": "90e5061a84c503a7c186ac033b270ccc02548ee00239ce58ccf86c8f09c1fbc4"
   },
   "limits": [
     "Control models abstract actual storage and clocks; no full Rust refinement proof.",
     "Gaussian census uncertainty covers independent hash sampling of visible membership only.",
     "Expanded totals require positive support, exogenous workload/lifetimes, independent randomness and usable trace delivery.",
+    "The scalar trace weight is correct at source metadata evaluation; applying it to a whole segment approximates weight changes within that segment. Models evaluate instantaneous weights, not this additional temporal approximation.",
     "Current viewer does not yet apply expansion factors.",
     "Previous security audit failed on base-lockfile advisories; the weighted-sampling commit changes no dependency versions."
   ],
@@ -50,7 +61,11 @@
     ],
     "allowed_missed_round_witness": "NoMissedRound counterexample"
   },
-  "ci": {
+  "trace_sampling_metadata": [
+    "dial9.sampling.pool",
+    "dial9.sampling.weight"
+  ],
+  "previous_revision_ci": {
     "verified_at": "2026-10-28T13:50:12.694675+00:00",
     "implementation_commit": "1904be0b31d3bb49960afe2de4ae9b51f5ab8540",
     "pr_state": "OPEN",
@@ -67,5 +82,23 @@
       "url": "https://github.com/dial9-rs/dial9/actions/runs/40696712884"
     },
     "security_audit": "Not retriggered: Cargo manifests/lockfile unchanged by the weighted-sampling commit. Previous audit failed on advisory/package versions already present in the base lockfile; those findings remain."
+  },
+  "ci": {
+    "verified_at": "2026-10-28T15:02:30.864431+00:00",
+    "implementation_commit": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+    "pr_state": "OPEN",
+    "ci": {
+      "headSha": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+      "status": "queued",
+      "conclusion": "",
+      "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088"
+    },
+    "benchmarks": {
+      "headSha": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/dial9-rs/dial9/actions/runs/40710093710"
+    },
+    "security_audit": "Not retriggered: Cargo manifests/lockfile are unchanged by the cleanup. Previous base-lockfile advisory findings remain."
   }
 }

@@ -30,7 +30,7 @@ are examples, not throughput or latency measurements.
 - One frozen startup choice from an independent admission draw, conditional on
   tracking, with weight `1/(f*r)`.
 - Explicit Disabled or AssumePopulation startup fallback.
-- Membership of unarmed, admitted, and terminal carrier incarnations in current
+- Membership of unarmed, admitted, and terminal carrier processes in current
   and previous five-minute buckets.
 - Minute polls with fixed per-process jitter, randomized heartbeat offsets,
   guarded census windows, and four-count plateau settlement.
@@ -69,3 +69,8 @@ fully delivered. Population history alone does not supply trace inclusion
 weights. The simulation treats operations and trace delivery as instantaneous;
 it does not implement full concurrent storage CAS schedules or partial LIST
 failures.
+
+Production metadata is now one evaluated scalar snapshot, as described in the
+artifact's weight examples. The simulator evaluates instantaneous factors at
+the cursor; it does not model additional error from applying one captured
+weight to a whole trace segment.

@@ -27,7 +27,7 @@ assert(bootstrap.archives.every(o => o.noSupport === 0));
 const rolling = S.simulate({ scenario: "rolling", hosts: 500, seed: 4 });
 assert.equal(rolling.summary.hosts, 500);
 assert.equal(rolling.summary.processes, 500);
-assert(rolling.snapshots.some(r => r.processes > r.hosts), "overlapping incarnations count separately");
+assert(rolling.snapshots.some(r => r.processes > r.hosts), "overlapping process runs count separately");
 assert.equal(rolling.summary.projected, 500);
 
 const minute = S.simulate({ scenario: "minute", hosts: 20, seed: 4 });

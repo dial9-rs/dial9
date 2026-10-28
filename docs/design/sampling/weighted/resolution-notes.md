@@ -20,9 +20,20 @@ retain their findings and evidence rather than silently rewriting them.
   published round. No exact-count invariant is claimed.
 - Trace weights integration: callbacks stop metadata even for fallback sessions
   without a maintenance worker. Conflicting source registration fails closed.
-  The real encode/decode test exercises 10 → 20 → 0 inside one segment.
+  The real encode/decode test now verifies one evaluated weight, the existing
+  boot ID, normal clock data, and exactly two sampling metadata keys.
 
 The count archive is observational evidence and does not prove a roster CAS
 succeeded. Full roster history is not needed by a decoder: traces already carry
-the expansion factor and its local effective timestamp, updated by the existing
-roster refresh. Retained census history answers the separate population question.
+the evaluated expansion factor, updated by the existing roster refresh. A
+segment snapshot approximates changes within a file; exact frame-time weighting
+is not claimed. Retained census history answers the separate population question.
+
+- Metadata simplification: replaced the timeline and checkpoint with one weight
+  captured at source evaluation. Reused existing boot ID and clock events, and
+  removed schema/unit/known labels.
+- Complexity review: flattened the obsolete `Boundary` wrapper, derived roster
+  debug fields at logging time, removed unused LIST timestamps, represented 409
+  uncertainty with the existing unknown-write error, and fixed the cleanup
+  budget without shared mutable configuration. Internal fresh invocation IDs
+  remain necessary for pre-recorder admission entropy and cleanup ownership.

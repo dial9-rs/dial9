@@ -183,16 +183,16 @@ code{font: .94em var(--mono);overflow-wrap:anywhere}.pill{display:inline-block;f
     <p class="note" id="weighting-reading"></p>
     <p class="hint">The sampler emits startup weight 1/(f·r), using a fresh admission draw independent of the census hash. A sealed fresh thinning round uses q and multiplies each survivor’s existing weight by 1/q once. This preserves weighted sample mass in expectation even when the cutoff depends on the census. It does not use R/f divided by the realized profiler count. Missing spans, zero-admission cohorts, or missing trace delivery still prevent reconstruction of the complete fleet.</p>
     <details>
-     <summary>Use the weight at the frame’s time</summary>
+     <summary>Simulated weight changes and the segment snapshot</summary>
      <div class="observations" id="weight-log"></div>
-     <p class="hint">These examples show simulation-relative times. Production trace segments carry a merged <code>dial9.sampling.weight_history</code> in the frame clock’s <code>monotonic_ns</code> domain and an <code>observed_through_ns</code> checkpoint. Use the last change at or before each frame timestamp within that coverage. A terminal weight 0 excludes frames during asynchronous recorder-disable lag. Null or frames after the checkpoint have unknown weight. The latest weight must never be applied to a whole segment containing earlier samples.</p>
+     <p class="hint">These examples show simulated weight changes. Production metadata carries one <code>dial9.sampling.weight</code> snapshot captured when the recorder evaluates its source, plus the pool key. Existing <code>boot_id</code> metadata and normal trace clocks supply identity and time. A reader can apply the scalar to its segment; this approximates changes within the segment. Zero means stopped when evaluated, and null or missing means unknown. The simulation evaluates weights at the selected instant; it does not measure the extra error from coarse segment snapshots.</p>
     </details>
    </section>
   </div>
   <section class="wide" aria-labelledby="mechanism">
    <h2 id="mechanism">How a process reaches its decision</h2>
    <div class="mechanism">
-    <div><span class="step">1 / identity</span><strong>One stable tracking hash</strong><p>Hash scope, dimensions, and the rank identity. Fresh default identities distinguish process incarnations. Simultaneously live ranks must be independent.</p></div>
+    <div><span class="step">1 / identity</span><strong>One stable tracking hash</strong><p>Hash scope, dimensions, and the rank identity. Fresh default identities distinguish process runs. Simultaneously live ranks must be independent.</p></div>
     <div><span class="step">2 / participation</span><strong>Only the lowest f slice does I/O</strong><p>f = 1 by default. A lower population bound may reduce f. Tracking uses this hash. Admission uses a separate independent random draw.</p></div>
     <div><span class="step">3 / application startup</span><strong>One roster GET, then a frozen choice</strong><p>The default budget is 1,000 ms. A settled roster supplies admission probability r within the tracked slice. Selected traces begin with weight 1/(f·r).</p></div>
     <div><span class="step">4 / background census</span><strong>Count, publish, optionally thin</strong><p>One fenced leader lists two buckets. Four plateau counts adjust future admissions. Over the soft trigger, a fresh round q = target / admitted count independently stops profilers. New startups skip earlier rounds.</p></div>
@@ -204,7 +204,7 @@ code{font: .94em var(--mono);overflow-wrap:anywhere}.pill{display:inline-block;f
    <details>
     <summary>Simulation events and accuracy limits</summary>
     <div class="observations" id="event-log"></div>
-    <p class="hint">Event model: independent uniform tracking ranks and separate admission draws; immediate successful storage operations and complete trace delivery; one abstract elected leader with a three-poll lease; 60-second polls with ±10% fixed jitter; per-incarnation heartbeat offsets within 300-second buckets; 11-second bucket-edge guard; four ≤2% growth readings; sealed fresh thinning rounds observed once at polls, with a 190-second cooldown while still above the trigger. A fresh census at or below the trigger clears the round. New joiners skip rounds already present at their startup. Optional crash/cleanup ghosts and storage outages model bias. Rolling fleets begin warm and overlap old/new processes by 15 seconds. This is not an S3 throughput, latency, or full concurrent-CAS benchmark. Partial LIST failures, delayed network responses, and clock-bound violations require separate adversarial checks.</p>
+    <p class="hint">Event model: independent uniform tracking ranks and separate admission draws; immediate successful storage operations and complete trace delivery; one abstract elected leader with a three-poll lease; 60-second polls with ±10% fixed jitter; per-process heartbeat offsets within 300-second buckets; 11-second bucket-edge guard; four ≤2% growth readings; sealed fresh thinning rounds observed once at polls, with a 190-second cooldown while still above the trigger. A fresh census at or below the trigger clears the round. New joiners skip rounds already present at their startup. Optional crash/cleanup ghosts and storage outages model bias. Rolling fleets begin warm and overlap old/new processes by 15 seconds. This is not an S3 throughput, latency, or full concurrent-CAS benchmark. Partial LIST failures, delayed network responses, and clock-bound violations require separate adversarial checks.</p>
    </details>
    <footer class="foot">Standalone, offline artifact. Core implementation remains in PR #1093; simulation and review evidence are separate resources. Owner: rcoh. Reference cohort trials are recomputed for the live process count at the inspected slice.</footer>
   </section>
@@ -580,7 +580,7 @@ code{font: .94em var(--mono);overflow-wrap:anywhere}.pill{display:inline-block;f
     notes.sort((a, b) => a.time - b.time);
     const weightExamples = [...processes.values()].filter(p => p.weightHistory.length)
       .sort((a,b) => b.weightHistory.length - a.weightHistory.length || a.id.localeCompare(b.id))
-      .slice(0, 3).map(p => ({ incarnation: p.id, host: p.host, history: p.weightHistory,
+      .slice(0, 3).map(p => ({ processId: p.id, host: p.host, history: p.weightHistory,
         startEpoch: p.startEpoch, appliedEpochs: p.appliedEpochs }));
     return { config: cfg, fraction: f, bits, cap, snapshots, archives, notes, weightExamples,
       summary: snapshots[snapshots.length - 1] };
@@ -712,7 +712,7 @@ code{font: .94em var(--mono);overflow-wrap:anywhere}.pill{display:inline-block;f
    const x=64+r.time/result.config.duration*(900-64-20),line=$(id+"-cursor");line.setAttribute("x1",x);line.setAttribute("x2",x);
   });
   facts("slice-facts",[
-   ["Process / container incarnations alive",fmt(r.processes),"Actual live trace-emitting population units"],
+   ["Process / container instances alive",fmt(r.processes),"Actual live trace-emitting population units"],
    ["Projected processes",fmt(r.projected),"Counted tracked members R / tracking fraction f"],
    ["Processes profiling now",fmt(r.profiling),"Actual recording, after permanent stops"],
    ["Sum of current trace expansion weights",fmt(r.expanded),"Weighted-unit estimate; assumes complete trace delivery"],
@@ -743,7 +743,7 @@ code{font: .94em var(--mono);overflow-wrap:anywhere}.pill{display:inline-block;f
   setText("historical-reading",o?"Observation at "+duration(o.time)+" records R = "+o.counted+", f = "+result.fraction+", and R/f = "+fmt(o.population)+". It counts members visible in current and previous five-minute buckets; it is not proof of instantaneous liveness. The reported random-error SE covers rank sampling only. It excludes ghosts, missing membership, and changes since observation.":"No sufficiently recent preceding observation exists. An honest post hoc query returns no evidence; it cannot fill this slice with a future or latest roster.");
   setText("weighting-reading",r.unsupported>0?"Coverage gap: "+fmt(r.unsupported)+" of "+fmt(r.processes)+" live units began with zero startup admission probability. Their missing samples cannot be recovered. The sum of weights "+fmt(r.expanded)+" estimates only the supported population of "+fmt(r.supported)+" units in expectation, assuming complete delivery and independent workload.":"This slice has "+fmt(r.profiling)+" actual profiling units. Their expansion weights sum to "+fmt(r.expanded)+" versus "+fmt(r.processes)+" actual live units. Startup weight is 1/(f·r); each fresh thinning round survived multiplies it by 1/q. Individual realizations vary, but the weighted mass is preserved in expectation. Delivered stack samples can use these time-varying weights.");
   const examples=result.weightExamples.filter(p=>p.history[0][0]<=r.time);
-  $("weight-log").innerHTML=examples.length?examples.map(p=>'<div class="observation"><time>unit '+Number(p.incarnation)+'</time><span>'+p.history.filter(([t])=>t<=r.time).map(([t,w])=>duration(t)+': '+(w===0?'0 · terminal exclusion':fmt(w)+' ×')).join(' → ')+'</span></div>').join(""):'<p class="hint">No sampled trace unit has weight metadata in this slice.</p>';
+  $("weight-log").innerHTML=examples.length?examples.map(p=>'<div class="observation"><time>unit '+Number(p.processId)+'</time><span>'+p.history.filter(([t])=>t<=r.time).map(([t,w])=>duration(t)+': '+(w===0?'0 · terminal exclusion':fmt(w)+' ×')).join(' → ')+'</span></div>').join(""):'<p class="hint">No sampled trace unit has weight metadata in this slice.</p>';
   if(distFrame!==null)cancelAnimationFrame(distFrame);
   distFrame=requestAnimationFrame(()=>{errors(r.processes);distFrame=null;});
  }

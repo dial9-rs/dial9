@@ -1,5 +1,7 @@
 /* Functional browser checks only; no remote dependencies or screenshots. */
 const assert = require("node:assert/strict");
+const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { chromium } = require("/tmp/dial9-fleet-browser/node_modules/playwright");
 let browser;
 (async () => {
@@ -11,7 +13,7 @@ let browser;
   page.on("pageerror", e => errors.push(e.message));
   await page.route("http://**/*", route => route.abort());
   await page.route("https://**/*", route => route.abort());
-  await page.goto("file:///tmp/dial9-sampling-visualization/sampling-fleet-laboratory.html");
+  await page.goto(pathToFileURL(path.join(__dirname, "sampling-fleet-laboratory.html")).href);
   await page.waitForFunction(() => document.getElementById("run-status").textContent.startsWith("Done."));
   const count = async text => page.locator("#slice-facts tr").filter({ hasText: text }).locator("td").textContent();
   assert.equal(await count("Physical hosts alive"), "1,000");
@@ -40,7 +42,7 @@ let browser;
     if (scenario === "rolling") assert.match(await page.locator("#weight-log").textContent(), /terminal exclusion/);
   }
   assert.equal(await count("Physical hosts alive"), "250");
-  assert.equal(await count("Process / container incarnations alive"), "5,000");
+  assert.equal(await count("Process / container instances alive"), "5,000");
   await page.locator("#time").fill("0");
   await page.locator("#time").dispatchEvent("input");
   assert.equal(await page.locator("#time-label").textContent(), "0:00");
