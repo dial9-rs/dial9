@@ -1,3 +1,7 @@
+> Historical implementation, superseded by normal recorder `disable()`.
+> The current policy and removal of the sampler-specific core API are recorded
+> in [resolution notes](../resolution-notes.md) and pinned in `../validation.json`.
+
 Implemented the terminal recorder fix in shared checkout, without committing or pushing.
 
 Files changed:

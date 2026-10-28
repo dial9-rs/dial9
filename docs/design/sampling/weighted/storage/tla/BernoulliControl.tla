@@ -99,7 +99,8 @@ Apply(p) ==
     /\ UNCHANGED <<version, holder, currentRound, rounds, pending,
          started, offAtStartup, startEpoch, staleCommit>>
 
-\* enable() requests cannot revive a sampler's terminal permanent disable.
+\* Application enable() leaves the sampler's choice unchanged. Recorder
+\* enable/disable state is outside this model; explicit override is allowed.
 EnableRequest(p) == /\ terminal[p] /\ UNCHANGED vars
 
 Next == \E p \in Workers : Prepare(p) \/ Commit(p) \/ Start(p)

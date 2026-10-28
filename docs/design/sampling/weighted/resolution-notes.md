@@ -3,9 +3,14 @@
 The reviewed implementation is pinned in `validation.json`; original reports
 retain their findings and evidence rather than silently rewriting them.
 
-- Lifecycle review: weak sampling stops are permanently terminal; ordinary
-  pause/resume still works. Recorder ownership and normal shutdown remain with
-  the application. Concurrent permanent-stop/resume checks passed Shuttle.
+- Lifecycle policy: sampling calls a cloned recorder handle's normal `disable()`.
+  The sampler never reselects a trimmed process, but the application retains
+  normal `enable()` control and owns recorder shutdown. Explicit enables override
+  the sampling decision and its weight estimates. Cleanup disables recorders
+  again even after a manual enable. The sampler-specific core API/state and
+  one-shot callback guard are removed; the core crate matches the PR base.
+  Original lifecycle findings and implementation notes below are historical;
+  the enforced permanent-disable remedy was superseded by this policy.
 - Protocol review: backend timestamp uncertainty participates in the census
   guard and impossible windows are rejected before backend work. Complete
   observations survive membership cleanup and roster replacement.

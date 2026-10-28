@@ -1,13 +1,16 @@
 # Weighted fleet sampling evidence
 
-Reviewed implementation: `6d9652ee858f1ed4f427fb7dc0afc083d9d15856`.
+Reviewed implementation: `2492892acf6195ca18a88ca2f0428f515eed9869`.
 Implementation PR: https://github.com/dial9-rs/dial9/pull/1093.
 Protocol schema: 3. Trace sampling metadata is a scalar snapshot.
 
 The counted unit is a live process/container run that could emit Dial9
 traces. Census rank, fresh invocation admission, and fresh salted thinning draws
-use separate entropy. Startup selects once; terminally stopped processes never
-resume. An expected target replaces any exact profiler-count claim.
+use separate entropy. Startup selects once; the sampler never reselects a
+trimmed process. Registered recorders use ordinary `disable()` and retain
+application-controlled `enable()`. Explicit enables override the sampling
+policy and its weight estimates. An expected target replaces any exact
+profiler-count claim.
 
 ## How weighting works
 
@@ -46,7 +49,7 @@ manual pauses, churn and census ghosts need separate treatment.
 - [Schema-3 TLA+ model](storage/tla/README.md): 153,715 distinct states with no
   safety violation. Negative controls detect duplicate application and stale
   CAS acceptance; an additional witness demonstrates allowed missed rounds.
-- [Lifecycle](lifecycle/review.md), [permanent stop integration](lifecycle/implementation.md),
+- [Lifecycle](lifecycle/review.md), [historical stop integration](lifecycle/implementation.md),
   and [trace metadata](lifecycle/trace-weights.md).
 - [Protocol/clock review](protocol/review.md).
 - [Resolution notes](resolution-notes.md) record fixes to findings in the preserved

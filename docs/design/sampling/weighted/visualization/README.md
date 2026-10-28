@@ -37,7 +37,9 @@ are examples, not throughput or latency measurements.
 - One abstract fenced census leader, with delayed takeover of a departed leader.
 - Sealed fresh thinning rounds when admitted counts exceed the soft trigger.
   Each observed round is applied at most once. Successful survivors multiply
-  their weight by `1/q`; unsuccessful processes stop permanently.
+  their weight by `1/q`; unsuccessful processes become carriers and the sampler
+  does not reselect them. Automatic registration calls normal `disable()`;
+  explicit application `enable()` overrides are outside the simulation.
 - A 190-second thinning-round cooldown for the default poll/skew settings while
   above the trigger. A new fresh census at/below the trigger clears the round.
   New joiners skip rounds present when they start.

@@ -22,7 +22,7 @@ not recover exact recording-time factors for arbitrary older frames. The source
 adds no segment-boundary synchronization or independent metadata heartbeat.
 
 Tests cover immutable prior snapshots, fresh values after updates, unchanged
-emission suppression, overflow/null, terminal zero and forbidden resume,
+emission suppression, overflow/null, terminal zero and no sampler re-selection,
 idempotent/conflicting attachment, and weak recorder ownership. A real encoded
 and decoded segment captures weight 20 after an update from 10, with exactly two
 sampling keys, the existing boot ID, and a normal clock-sync event. Shuttle checks

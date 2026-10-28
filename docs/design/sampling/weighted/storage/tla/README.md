@@ -12,8 +12,11 @@ A publisher can pause with an old version while another takes over, then lose
 its CAS. Workers can start after a round was already published, repeatedly read
 one round, or miss an earlier round while not polling. A survivor applies only
 the latest eligible epoch, exactly once, and records its factor. A failed coin
-records terminal zero and cannot resume, including an explicit enable request.
-An initially off startup remains off. New startups initialize their last epoch
+records terminal zero and the sampler never reselects it. `EnableRequest` is
+an application action that leaves the modeled sampler choice unchanged;
+recorder enable/disable state is not modeled. Actual recorders use ordinary
+`disable()` and permit explicit application `enable()` overrides, outside the
+sampler's count and weight estimates. An initially off startup remains off. New startups initialize their last epoch
 from the roster and skip all already-published rounds.
 
 The safety configuration checks typing, once-only decisions, no terminal or
@@ -23,7 +26,7 @@ count/cap invariant is present: Bernoulli trimming has a probabilistic count.
 
 The model deliberately abstracts storage timeouts, clock skew, guarded census
 pagination, membership ghosts, cleanup, cooldown, startup selection rates,
-cryptographic entropy, and trace checkpoint ordering. It overapproximates which
+cryptographic entropy, recorder controls and metadata evaluation timing. It overapproximates which
 publisher may attempt a write; lease expiry is not needed for its CAS safety
 property. The production tests and prior roster/census models cover the
 storage/timing concerns. This is bounded safety exploration, not a liveness

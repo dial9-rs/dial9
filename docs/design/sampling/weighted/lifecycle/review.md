@@ -1,3 +1,7 @@
+> Historical review. The application may now explicitly override sampling with
+> ordinary `enable()`. See [resolution notes](../resolution-notes.md) for the
+> current lifecycle policy; the permanent-disable recommendation was superseded.
+
 # Lifecycle/API review of 95b4639cd015d52d5e0e30d5cd93dc359bd29036
 
 Reviewed the actual public entry point, recorder bridge, session cleanup, worker cancellation, facade example, feature manifests, public API regressions, paused-time regressions and Shuttle registration tests. No implementation or external systems were changed.

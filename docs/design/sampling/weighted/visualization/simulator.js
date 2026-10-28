@@ -286,7 +286,7 @@
         if (time <= cfg.duration) heap.push(time, "start", { host: "host-" + h,
           seat: h * cfg.containers + c }, 0);
       }
-      emit(0, cfg.fallback === "disabled" ? "No roster: this cohort starts off and will never turn on." :
+      emit(0, cfg.fallback === "disabled" ? "No roster: this cohort starts off; the sampler never turns it on." :
         "No roster: rank uses the explicit assumed population for startup.");
     }
     if (cfg.outageDuration > 0) {

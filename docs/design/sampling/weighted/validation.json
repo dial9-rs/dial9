@@ -1,5 +1,5 @@
 {
-  "implementation_commit": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+  "implementation_commit": "2492892acf6195ca18a88ca2f0428f515eed9869",
   "implementation_pr": "https://github.com/dial9-rs/dial9/pull/1093",
   "protocol_schema": 3,
   "validation": {
@@ -7,8 +7,8 @@
     "cargo_fmt": "passed",
     "cargo_clippy_workspace_all_targets_all_features": "passed (existing unrelated warnings)",
     "focused_sampler_stress_seconds": 20,
-    "focused_sampler_test_count": 108,
-    "focused_sampler_iterations": 91,
+    "focused_sampler_test_count": 109,
+    "focused_sampler_iterations": 101,
     "trace_encode_decode_snapshot": {
       "startup_weight": 10,
       "evaluated_weight": 20,
@@ -19,12 +19,12 @@
     "visualization_offline_checks": "passed",
     "visualization_responsive_browser_checks": "passed",
     "cargo_nextest_workspace_all_features_stress_seconds": 20,
-    "workspace_tests_passed": 1728,
+    "workspace_tests_passed": 1727,
     "workspace_tests_skipped": 4,
     "workspace_stress_iterations": 1,
     "shuttle_passed": {
-      "sampler": 14,
-      "core": 41,
+      "sampler": 12,
+      "core": 39,
       "telemetry": 2,
       "utils": 3
     },
@@ -34,13 +34,16 @@
       "dial9-only"
     ],
     "doctests": "passed",
-    "rustdoc": "passed"
+    "rustdoc": "passed",
+    "recorder_controls": "Normal disable and explicit enable verified after thinning/maintenance termination and for both startup fallback choices. Callback cleanup disables registered recorders again after manual enable.",
+    "core_crate_diff_against_pr_base": "empty",
+    "workspace_regression_included": "fallback_recorder_controls_and_cleanup::case_2 (initially off, explicit enable, callback cleanup)"
   },
   "artifact": {
     "url": "https://artifactory.amazon.dev/view/sampling-a-changing-fleet-census",
     "id": "f9556d5f-655c-475f-8266-a9acdf4c8cc4",
-    "version": 2,
-    "sha256": "90e5061a84c503a7c186ac033b270ccc02548ee00239ce58ccf86c8f09c1fbc4"
+    "version": 3,
+    "sha256": "a768fa3ec854eec7872ff09ddd468cdc4dca56bcea19f6998354aa1fb4fff8f5"
   },
   "limits": [
     "Control models abstract actual storage and clocks; no full Rust refinement proof.",
@@ -48,7 +51,8 @@
     "Expanded totals require positive support, exogenous workload/lifetimes, independent randomness and usable trace delivery.",
     "The scalar trace weight is correct at source metadata evaluation; applying it to a whole segment approximates weight changes within that segment. Models evaluate instantaneous weights, not this additional temporal approximation.",
     "Current viewer does not yet apply expansion factors.",
-    "Previous security audit failed on base-lockfile advisories; the weighted-sampling commit changes no dependency versions."
+    "Previous security audit failed on base-lockfile advisories; the weighted-sampling commit changes no dependency versions.",
+    "Explicit recorder enables override sampling; count and weight models describe sampler-controlled recording only."
   ],
   "tla_control_safety": {
     "distinct_states": 153715,
@@ -65,61 +69,138 @@
     "dial9.sampling.pool",
     "dial9.sampling.weight"
   ],
-  "previous_revision_ci": {
-    "verified_at": "2026-10-28T13:50:12.694675+00:00",
-    "implementation_commit": "1904be0b31d3bb49960afe2de4ae9b51f5ab8540",
-    "pr_state": "OPEN",
-    "ci": {
-      "conclusion": "success",
-      "headSha": "1904be0b31d3bb49960afe2de4ae9b51f5ab8540",
-      "status": "completed",
-      "url": "https://github.com/dial9-rs/dial9/actions/runs/40696712754"
+  "ci_history": [
+    {
+      "verified_at": "2026-10-28T13:50:12.694675+00:00",
+      "implementation_commit": "1904be0b31d3bb49960afe2de4ae9b51f5ab8540",
+      "pr_state": "OPEN",
+      "ci": {
+        "conclusion": "success",
+        "headSha": "1904be0b31d3bb49960afe2de4ae9b51f5ab8540",
+        "status": "completed",
+        "url": "https://github.com/dial9-rs/dial9/actions/runs/40696712754"
+      },
+      "benchmarks": {
+        "conclusion": "success",
+        "headSha": "1904be0b31d3bb49960afe2de4ae9b51f5ab8540",
+        "status": "completed",
+        "url": "https://github.com/dial9-rs/dial9/actions/runs/40696712884"
+      },
+      "security_audit": "Not retriggered: Cargo manifests/lockfile unchanged by the weighted-sampling commit. Previous audit failed on advisory/package versions already present in the base lockfile; those findings remain."
     },
-    "benchmarks": {
-      "conclusion": "success",
-      "headSha": "1904be0b31d3bb49960afe2de4ae9b51f5ab8540",
-      "status": "completed",
-      "url": "https://github.com/dial9-rs/dial9/actions/runs/40696712884"
-    },
-    "security_audit": "Not retriggered: Cargo manifests/lockfile unchanged by the weighted-sampling commit. Previous audit failed on advisory/package versions already present in the base lockfile; those findings remain."
-  },
+    {
+      "verified_at": "2026-10-28T15:13:07.997330+00:00",
+      "implementation_commit": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+      "pr_state": "OPEN",
+      "ci": {
+        "headSha": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+        "status": "in_progress",
+        "conclusion": "",
+        "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088"
+      },
+      "required_gate": {
+        "name": "CI Pass",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/dial9-rs/dial9/actions/runs/40710094088/job/122903525291",
+        "completedAt": "2026-10-28T15:09:54Z"
+      },
+      "benchmarks": {
+        "conclusion": "success",
+        "headSha": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+        "status": "completed",
+        "url": "https://github.com/dial9-rs/dial9/actions/runs/40710093710"
+      },
+      "nonblocking_nightly_canaries": [
+        {
+          "name": "Build (macos-latest, nightly)",
+          "status": "in_progress",
+          "conclusion": "",
+          "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088/job/122894145495"
+        },
+        {
+          "name": "Build (ubuntu-latest, nightly)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088/job/122894145555"
+        }
+      ],
+      "security_audit": "Not retriggered: Cargo manifests/lockfile unchanged by the cleanup. Previous base-lockfile advisory findings remain."
+    }
+  ],
   "ci": {
-    "verified_at": "2026-10-28T15:13:07.997330+00:00",
-    "implementation_commit": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+    "verified_at": "2026-10-28T16:09:34.734715+00:00",
+    "implementation_commit": "2492892acf6195ca18a88ca2f0428f515eed9869",
     "pr_state": "OPEN",
     "ci": {
-      "headSha": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+      "headSha": "2492892acf6195ca18a88ca2f0428f515eed9869",
       "status": "in_progress",
       "conclusion": "",
-      "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088"
+      "url": "https://github.com/dial9-rs/dial9/actions/runs/40719714868"
     },
     "required_gate": {
       "name": "CI Pass",
       "status": "COMPLETED",
       "conclusion": "SUCCESS",
-      "detailsUrl": "https://github.com/dial9-rs/dial9/actions/runs/40710094088/job/122903525291",
-      "completedAt": "2026-10-28T15:09:54Z"
+      "detailsUrl": "https://github.com/dial9-rs/dial9/actions/runs/40719714868/job/122938146414",
+      "completedAt": "2026-10-28T16:07:41Z"
     },
     "benchmarks": {
       "conclusion": "success",
-      "headSha": "6d9652ee858f1ed4f427fb7dc0afc083d9d15856",
+      "headSha": "2492892acf6195ca18a88ca2f0428f515eed9869",
       "status": "completed",
-      "url": "https://github.com/dial9-rs/dial9/actions/runs/40710093710"
+      "url": "https://github.com/dial9-rs/dial9/actions/runs/40719719073"
     },
     "nonblocking_nightly_canaries": [
       {
-        "name": "Build (macos-latest, nightly)",
+        "name": "Build (ubuntu-latest, nightly)",
         "status": "in_progress",
         "conclusion": "",
-        "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088/job/122894145495"
+        "url": "https://github.com/dial9-rs/dial9/actions/runs/40719714868/job/122927141953"
       },
       {
-        "name": "Build (ubuntu-latest, nightly)",
+        "name": "Build (macos-latest, nightly)",
         "status": "completed",
         "conclusion": "success",
-        "url": "https://github.com/dial9-rs/dial9/actions/runs/40710094088/job/122894145555"
+        "url": "https://github.com/dial9-rs/dial9/actions/runs/40719714868/job/122927142296"
       }
     ],
-    "security_audit": "Not retriggered: Cargo manifests/lockfile unchanged by the cleanup. Previous base-lockfile advisory findings remain."
+    "security_audit": {
+      "run_url": "https://github.com/dial9-rs/dial9/actions/runs/40718867380",
+      "head_sha": "d553eb0b7751059dd8f42310debb9c594e764dbe",
+      "status": "failed on five advisory/package versions present in the PR base; latest commit changes no Cargo files",
+      "findings": [
+        {
+          "id": "RUSTSEC-2026-0387",
+          "package": "crypto-bigint",
+          "version": "0.5.5",
+          "present_in_base": true
+        },
+        {
+          "id": "RUSTSEC-2026-0391",
+          "package": "zstd",
+          "version": "0.13.3",
+          "present_in_base": true
+        },
+        {
+          "id": "RUSTSEC-2026-0403",
+          "package": "zstd-safe",
+          "version": "7.3.0",
+          "present_in_base": true
+        },
+        {
+          "id": "RUSTSEC-2026-0398",
+          "package": "zstd-safe",
+          "version": "7.3.0",
+          "present_in_base": true
+        },
+        {
+          "id": "RUSTSEC-2026-0410",
+          "package": "zstd-sys",
+          "version": "2.1.0+zstd.1.5.7",
+          "present_in_base": true
+        }
+      ]
+    }
   }
 }

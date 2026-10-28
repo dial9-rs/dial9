@@ -31,3 +31,9 @@ regressions. The scalar snapshot preserves terminal zero, unknown overflow and
 attachment ownership. Invocation keys, carrier deduplication, epoch handling,
 CAS fencing, uncertainty reconciliation, pagination and GET timing remain
 intact. Fixed cleanup is bounded in the worker and caller.
+
+A subsequent lifecycle simplification removes the sampler-specific permanent
+recorder state/callback and the one-shot callback wrapper. Sampling now calls
+normal `disable()`; explicit application `enable()` overrides sampling. Cleanup
+can call disable again after that override. The core crate matches the PR base.
+See `../validation.json` for the implementation revision and checks.

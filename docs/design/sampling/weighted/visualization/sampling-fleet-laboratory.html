@@ -198,7 +198,7 @@ code{font: .94em var(--mono);overflow-wrap:anywhere}.pill{display:inline-block;f
     <div><span class="step">4 / background census</span><strong>Count, publish, optionally thin</strong><p>One fenced leader lists two buckets. Four plateau counts adjust future admissions. Over the soft trigger, a fresh round q = target / admitted count independently stops profilers. New startups skip earlier rounds.</p></div>
    </div>
    <div class="path">
-    <div><h3>Off stays off; stopped stays stopped</h3><p>Unarmed processes and trimmed carriers still count toward the tracked population. They cannot turn on later. A shrinking fleet can therefore fall below the target until future startups arrive. Automatic recorder registration connects terminal stop decisions to the recorder.</p></div>
+    <div><h3>The sampler never reselects an off process</h3><p>Unarmed processes and trimmed carriers still count toward the tracked population. The sampler does not turn them on later, so a shrinking fleet can fall below the target until future startups arrive. Recorder registration uses normal disable. An application can explicitly enable recording again; that overrides the sampling policy and its weight estimates, and is outside this simulation.</p></div>
     <div><h3>The profiler count is probabilistic</h3><p>Target + ceil(3√target) triggers thinning. A simultaneous round retains Binomial(A, q) profilers, centered on the target; it can still exceed the trigger. Polls apply rounds asynchronously. Existing profilers keep running during storage failures, so an outage has no unconditional count cap.</p></div>
    </div>
    <details>
@@ -499,7 +499,7 @@ code{font: .94em var(--mono);overflow-wrap:anywhere}.pill{display:inline-block;f
         if (time <= cfg.duration) heap.push(time, "start", { host: "host-" + h,
           seat: h * cfg.containers + c }, 0);
       }
-      emit(0, cfg.fallback === "disabled" ? "No roster: this cohort starts off and will never turn on." :
+      emit(0, cfg.fallback === "disabled" ? "No roster: this cohort starts off; the sampler never turns it on." :
         "No roster: rank uses the explicit assumed population for startup.");
     }
     if (cfg.outageDuration > 0) {
@@ -714,7 +714,7 @@ code{font: .94em var(--mono);overflow-wrap:anywhere}.pill{display:inline-block;f
   facts("slice-facts",[
    ["Process / container instances alive",fmt(r.processes),"Actual live trace-emitting population units"],
    ["Projected processes",fmt(r.projected),"Counted tracked members R / tracking fraction f"],
-   ["Processes profiling now",fmt(r.profiling),"Actual recording, after permanent stops"],
+   ["Processes profiling now",fmt(r.profiling),"Actual recording, following sampler decisions"],
    ["Sum of current trace expansion weights",fmt(r.expanded),"Weighted-unit estimate; assumes complete trace delivery"],
    ["Physical hosts alive",fmt(r.hosts),"Ancillary machine count; not the unsampling denominator"],
    ["Distinct physical hosts profiling now",fmt(r.profiledHosts),"Deduplicated physical-host IDs in this simulated fleet"],
