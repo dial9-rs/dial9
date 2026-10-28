@@ -390,6 +390,7 @@ pub(crate) async fn prepare_using(
     );
     tracing::debug!(
         population = ?observed.as_ref().and_then(|o| {
+            o.roster.census_computed_at_ms?;
             o.roster.counts.tracked.checked_mul(1u64 << config.slice_bits())
         }),
         "sampling startup roster"
@@ -970,9 +971,13 @@ impl Worker {
         let published = self.replace(&roster, Some(&previous.version)).await?;
         if let Some(observed) = &published {
             tracing::debug!(tracked = observed.roster.counts.tracked, active = observed.roster.counts.active,
-                population = ?observed.roster.counts.tracked.checked_mul(1u64 << self.config.slice_bits()),
+                population = ?observed.roster.census_computed_at_ms.and_then(|_| {
+                    observed.roster.counts.tracked.checked_mul(1u64 << self.config.slice_bits())
+                }),
                 settled = observed.roster.settled,
-                slice_too_small = observed.roster.counts.tracked < u64::from(self.config.target()) * 4,
+                slice_too_small = ?observed.roster.census_computed_at_ms.map(|_| {
+                    observed.roster.counts.tracked < u64::from(self.config.target()) * 4
+                }),
                 "sampling census published");
             self.observed = Some(observed.clone());
         }
