@@ -2,11 +2,19 @@
 
 Proofs, models, reference simulations, review reports and the interactive
 visualization are tracked separately from implementation PR #1093.
-The current evidence describes schema-3 independent startup admission and
-Bernoulli thinning, with timestamped expansion factors embedded in traces.
-It is pinned to implementation commit
-`1904be0b` in [weighted/README.md](weighted/README.md).
 
+The proposed next design is [automatic population discovery](automatic-reporting.md):
+callers configure a target, while a learned reporting fraction replaces
+`minimum_population`. It specifies fraction handoffs, quiet-process recovery
+and profiling admission independent of census eligibility. This revision is
+not implemented or validated by the existing models and visualizations.
+
+The implementation evidence describes schema-3 independent startup admission
+within a configured census subset and Bernoulli thinning, with a scalar current
+expansion weight embedded in traces. Its source revision is recorded in
+[weighted/README.md](weighted/README.md).
+
+- [Proposed automatic reporting design and implementation checklist](automatic-reporting.md)
 - [Current proof, model checks and validation](weighted/README.md)
 - [Sequential expansion-weight proof](weighted/statistics/weighting-proof.md)
 - [Independent storage/control review](weighted/storage/review.md)

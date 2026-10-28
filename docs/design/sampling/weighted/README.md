@@ -4,6 +4,10 @@ Reviewed implementation: `2492892acf6195ca18a88ca2f0428f515eed9869`.
 Implementation PR: https://github.com/dial9-rs/dial9/pull/1093.
 Protocol schema: 3. Trace sampling metadata is a scalar snapshot.
 
+The proposed [automatic reporting revision](../automatic-reporting.md) replaces
+the caller's minimum-population assumption with a learned reporting fraction.
+The evidence below validates the existing implementation, not that proposal.
+
 The counted unit is a live process/container run that could emit Dial9
 traces. Census rank, fresh invocation admission, and fresh salted thinning draws
 use separate entropy. Startup selects once; the sampler never reselects a
