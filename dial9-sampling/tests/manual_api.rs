@@ -381,12 +381,14 @@ fn registered_recorder_emits_evaluated_weight_and_existing_trace_metadata(
             recorder.handle().record_event(SamplingMarker {
                 timestamp_ns: dial9_core::clock::clock_monotonic_ns(),
             });
-            if !after_cleanup {
+            if after_cleanup {
+                Some(recorder)
+            } else {
                 recorder.graceful_shutdown(Duration::ZERO);
+                None
             }
-            recorder
         });
-    if after_cleanup {
+    if let Some(recorder) = recorder {
         recorder.graceful_shutdown(Duration::ZERO);
     }
     let bytes = std::fs::read(&sealed).unwrap();
