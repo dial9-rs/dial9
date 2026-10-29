@@ -10,29 +10,51 @@ has statistical error while storage and the census are healthy.
 
 Enable `s3` for the native backend and `dial9` for recorder registration.
 
-```rust,ignore
-let s3 = dial9::s3::S3Config::builder()
-    .bucket("trace-bucket")
-    .service_name("checkout")
-    .build();
+```rust,no_run
+use dial9::{Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions};
+use dial9_sampling::{Sampling, SamplingStatus, StartupFailure, s3::S3SamplingStore};
+use std::{io, time::Duration};
 
-Sampling::builder()
-    .add_dimension("environment", "production")
-    .add_dimension("instance-type", "m7i.large")
-    .add_dimension("az", "us-east-1a")
-    .num_target_profilers(15)
-    .if_failed(StartupFailure::disabled())
-    .build()
-    .with_storage(async {
-        S3SamplingStore::builder().config(s3.clone()).build().await
-    })
-    .start_application(|status| {
-        let SamplingStatus { enabled, .. } = status;
-        let (recorder, runtime) = configure_application(enabled, &s3)?;
-        status.register_recorder(&recorder);
-        // Run main, drop the application runtime, and drain the recorder here.
-        Ok(())
-    })
+fn main() -> io::Result<()> {
+    let s3 = dial9_destinations_s3::S3Config::builder()
+        .bucket("trace-bucket")
+        .service_name("checkout")
+        .build();
+
+    Sampling::builder()
+        .add_dimension("environment", "production")
+        .add_dimension("instance-type", "m7i.large")
+        .add_dimension("az", "us-east-1a")
+        .num_target_profilers(15)
+        .if_failed(StartupFailure::disabled())
+        .build()
+        .with_storage(async {
+            S3SamplingStore::builder().config(s3.clone()).build().await
+        })
+        .start_application(|status| {
+            let SamplingStatus { enabled, .. } = status;
+            let recorder = if enabled {
+                dial9::recorder(MemoryBuffer::new(16 * 1024 * 1024)?).build()
+            } else {
+                dial9::recorder_disabled()
+            };
+            status.register_recorder(&recorder);
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.enable_all();
+            let runtime = recorder.handle().attach_tokio_runtime(
+                builder,
+                TokioAttachOptions::default(),
+            )?;
+            dial9::block_on(&runtime, async {
+                dial9::spawn(async {
+                    // Run the application's async work here.
+                }).await.expect("application task");
+            });
+            drop(runtime);
+            recorder.graceful_shutdown(Duration::from_secs(5));
+            Ok(())
+        })
+}
 ```
 
 See the [complete runnable example](../dial9/examples/manual_sampling.rs) for

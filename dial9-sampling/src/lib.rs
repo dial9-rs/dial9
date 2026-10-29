@@ -57,6 +57,11 @@
     allow(clippy::unwrap_used, reason = "Test assertions fail immediately.")
 )]
 
+// Compile the feature-dependent README examples during all-features doctests.
+#[cfg(all(feature = "s3", feature = "dial9"))]
+#[doc = include_str!("../README.md")]
+mod readme {}
+
 pub mod history;
 mod protocol;
 
