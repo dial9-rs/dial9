@@ -1,8 +1,62 @@
-#![doc = include_str!("../README.md")]
+//! Startup-probability backed by object storage
+//!
+//! `dial9-sampling` provides an automatic mechanism to achieve behaviors like "about 4 hosts have profiling enabled for each set of properties I care about."
+//!
+//! ```no_run
+//! # #[cfg(feature = "s3")]
+//! # fn example() -> std::io::Result<()> {
+//! use dial9::{Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions};
+//! use dial9_sampling::{Sampling, SamplingStatus, StartupFailure, s3::S3SamplingStore};
+//! use std::time::Duration;
+//!
+//! let s3 = dial9_destinations_s3::S3Config::builder()
+//!     .bucket("trace-bucket")
+//!     .service_name("checkout")
+//!     .build();
+//! let sampling = Sampling::builder()
+//!     .add_dimension("environment", "production")
+//!     .add_dimension("instance-type", "m7i.large")
+//!     .add_dimension("az", "us-east-1a")
+//!     .num_target_profilers(15)
+//!     .startup_timeout(Duration::from_secs(5))
+//!     .if_failed(StartupFailure::disabled())
+//!     .build();
+//! sampling.with_storage(async {
+//!     S3SamplingStore::builder().config(s3.clone()).build().await
+//! }).start_application(|status| {
+//!     let SamplingStatus { enabled, .. } = status;
+//!     let recorder = if enabled {
+//!         dial9::recorder(MemoryBuffer::new(16 * 1024 * 1024)?).build()
+//!     } else {
+//!         dial9::recorder_disabled()
+//!     };
+//!     status.register_recorder(&recorder);
+//!     let mut builder = tokio::runtime::Builder::new_multi_thread();
+//!     builder.enable_all();
+//!     let runtime = recorder.handle().attach_tokio_runtime(
+//!         builder,
+//!         TokioAttachOptions::default(),
+//!     )?;
+//!     dial9::block_on(&runtime, async {
+//!         dial9::spawn(async {
+//!             // Run the application's async work here.
+//!         }).await.expect("application task");
+//!     });
+//!     drop(runtime);
+//!     recorder.graceful_shutdown(Duration::from_secs(5));
+//!     Ok(())
+//! })
+//! # }
+//! ```
 #![cfg_attr(
     test,
     allow(clippy::unwrap_used, reason = "Test assertions fail immediately.")
 )]
+
+// Compile the feature-dependent README examples during all-features doctests.
+#[cfg(feature = "s3")]
+#[doc = include_str!("../README.md")]
+mod readme {}
 
 mod protocol;
 
@@ -17,8 +71,6 @@ mod test_store;
 
 pub mod backend;
 
-/// TODO_REWRITE
-///
 /// Native S3 backend
 #[cfg(feature = "s3")]
 pub mod s3;
@@ -29,16 +81,14 @@ use backend::SamplingStore;
 use std::{future::Future, io, sync::Arc, time::Duration};
 use tokio::runtime::Runtime;
 
-/// TODO_REWRITE
+/// Startup admission controller
 ///
-/// Startup admission for one complete caller-provided dimension tuple.
+/// Dimensions allow grouping processes into separate groups. This allows having
+/// a target population for e.g. a specific instance type, cell, etc.
 ///
-/// Dimensions group processes within the chosen storage namespace. Native S3
-/// storage uses the configured uploader service to isolate unrelated services;
-/// no separate scope or service dimension is required.
-/// The target is an expected count, not a reservation of exactly that many
-/// profilers. The failure policy is required. Defaults are a 1000ms startup
-/// budget and automatic population discovery. There is no periodic rotation.
+/// If a decision can't be reached within `startup_timeout` (default 1s), the `if_failed` behavior will be used.
+///
+/// //TODO(agent): link to the full example
 ///
 /// ```compile_fail
 /// use dial9_sampling::Sampling;
@@ -60,23 +110,20 @@ pub struct Sampling {
 
     #[builder(skip)]
     invocation_id: String,
+    // TODO(agent): refactor these into internal settings all settings below here.
     /// Additional admitted profilers tolerated before randomized thinning.
     /// Defaults to the ceiling of three times the square root of the target.
     max_overshoot: Option<u32>,
     /// Polling interval for the leader to check the profiler roster
     #[builder(default = Duration::from_secs(60))]
     poll_interval: Duration,
-    /// TODO_REWRITE
-    ///
     /// Membership bucket width; defaults to five minutes.
     /// Must cover two polls plus twice the clock skew, and be at most one day.
-    /// Use whole milliseconds.
     #[builder(default = Duration::from_secs(300))]
     bucket_width: Duration,
-    /// TODO_REWRITE
-    ///
     /// Assumed maximum wall-clock skew; defaults to five seconds.
-    /// Use whole milliseconds.
+    ///
+    /// If the real offset exceeds this, counting of active instances can become unreliable
     #[builder(default = Duration::from_secs(5))]
     max_clock_skew: Duration,
 }
@@ -90,16 +137,9 @@ impl<S: sampling_builder::State> SamplingBuilder<S> {
 }
 
 impl Sampling {
-    /// TODO_REWRITE
+    /// Configure storage to use with `Sampling`
     ///
-    /// Supplies storage initialization for a synchronous application invocation.
-    ///
-    /// Nothing runs until [`SamplingStartup::start_application`] is called.
-    /// Storage initialization and maintenance use the same private, uninstrumented
-    /// Tokio runtime, which stays alive until the application returns.
-    /// Construct executor-dependent resources inside the supplied future.
-    /// Storage initialization should be asynchronous and cancellation-safe. The
-    /// timeout is cooperative and cannot interrupt blocking code.
+    /// This is inert until [`SamplingStartup::start_application`] is called.
     pub fn with_storage<S: SamplingStore, F: Future<Output = io::Result<S>>>(
         &self,
         backend: F,
@@ -202,8 +242,6 @@ impl Sampling {
     }
 }
 
-/// TODO_REWRITE
-///
 /// Lazy storage initialization and admission for one application invocation.
 ///
 /// The storage future and application callback may borrow local values and need

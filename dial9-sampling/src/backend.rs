@@ -2,13 +2,12 @@
 use bytes::Bytes;
 use std::{future::Future, pin::Pin, time::SystemTime};
 
-/// TODO_REWRITE
-///
-/// A boxed, sendable storage operation; it borrows the store for its lifetime.
+/// Type alias for Future
 pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>> + Send + 'a>>;
 
-/// TODO_REWRITE
+/// SamplingStore trait
 ///
+/// ## Requirements
 /// Strong per-key reads and atomic conditional writes are required.
 ///
 /// Keys are relative to this store's coordination namespace. Implementations
@@ -47,8 +46,6 @@ pub trait SamplingStore: Send + Sync + 'static {
     /// is a [`PutOutcome::PreconditionFailed`], rather than an error.
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome>;
 
-    /// TODO_REWRITE
-    ///
     /// Lists a bounded page of keys in UTF-8 byte lexicographic order.
     ///
     /// Keys are relative to the store namespace and must match the requested
@@ -81,14 +78,10 @@ pub trait SamplingStore: Send + Sync + 'static {
 /// Opaque object version used for conditional writes; callers must not interpret it.
 pub struct VersionToken(String);
 impl VersionToken {
-    /// TODO_REWRITE
-    ///
     /// Wraps the backend's opaque object-version token.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-    /// TODO_REWRITE
-    ///
     /// Returns the backend-provided opaque token string.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -98,14 +91,10 @@ impl VersionToken {
 /// Opaque backend cursor for continuing a listing.
 pub struct ContinuationToken(String);
 impl ContinuationToken {
-    /// TODO_REWRITE
-    ///
     /// Wraps the backend's opaque listing cursor.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-    /// TODO_REWRITE
-    ///
     /// Returns the backend-provided opaque token string.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -220,9 +209,7 @@ pub struct ListRequest {
     /// Prefix to filter the List by
     #[builder(into)]
     prefix: String,
-    /// TODO_REWRITE
-    ///
-    /// Positive maximum number of objects returned in one page.
+    /// Maximum number of objects returned in one page.
     #[builder(default = 256)]
     page_size: usize,
     /// Optional continuation token to paginate
@@ -234,11 +221,7 @@ impl ListRequest {
         &self.prefix
     }
 
-    /// TODO_REWRITE
-    ///
-    /// Returns the requested maximum number of objects in one page; listing
-    /// requires a positive value.
-    /// Backends may return fewer objects and provide a continuation cursor.
+    /// Returns the requested maximum number of objects in one page
     pub fn page_size(&self) -> usize {
         self.page_size
     }
@@ -261,8 +244,6 @@ impl ListedObject {
     }
 }
 #[derive(Clone, Debug, bon::Builder)]
-/// TODO_REWRITE
-///
 /// One bounded listing page in key order, and an optional continuation cursor.
 pub struct ListPage {
     #[builder(default)]
@@ -270,15 +251,11 @@ pub struct ListPage {
     continuation: Option<ContinuationToken>,
 }
 impl ListPage {
-    /// TODO_REWRITE
-    ///
     /// Returns objects in strictly increasing UTF-8 byte lexicographic key order.
     pub fn objects(&self) -> &[ListedObject] {
         &self.objects
     }
 
-    /// TODO_REWRITE
-    ///
     /// Returns the opaque cursor for continuing this listing, if present.
     /// Only `None` indicates exhaustion, including when this page is short or empty.
     pub fn continuation(&self) -> Option<&ContinuationToken> {
