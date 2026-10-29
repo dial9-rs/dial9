@@ -1,6 +1,4 @@
-//! TODO_REWRITE
-//!
-//! Native S3 conditional operations, independent of upload circuit breaking.
+//! S3-backed implementation of  `SamplingStore`
 use crate::backend::{
     ContinuationToken, ListPage, ListRequest, ListedObject, PutOutcome, PutRequest, SamplingStore,
     StoreError, StoreErrorKind, StoreFuture, StoredObject, VersionToken, WriteCondition,
