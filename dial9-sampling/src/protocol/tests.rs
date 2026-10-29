@@ -885,6 +885,88 @@ async fn slow_leader_requests_do_not_block_either_observation_channel() {
     assert_eq!(store.active.load(Ordering::SeqCst), 0);
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test(start_paused = true)]
+async fn a_fast_leaders_promoted_control_waits_for_the_local_future_boundary(
+    #[case] present_at_startup: bool,
+) {
+    let inner = store_at(600_000);
+    let policy = config_for(15, "overlap-48");
+    let future = Control {
+        source_window: Some(9),
+        effective_window: 11,
+        reporting: Cutoff::threshold(1),
+    };
+    let mut roster = Roster::initial(&policy, &nonce());
+    roster.epoch = 1;
+    if present_at_startup {
+        roster.control = future.clone();
+    }
+    roster.population = Some(Population {
+        window: 8,
+        estimate: 15.0,
+        computed_ms: 562_000,
+    });
+    let previous = publish(inner.as_ref(), &policy, &roster, WriteCondition::absent()).await;
+    let (puts, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let store = Arc::new(NotifyingStore {
+        inner: inner.clone(),
+        puts,
+        active: AtomicUsize::new(0),
+    });
+    let prepared =
+        prepare_using(policy.clone(), store, Duration::from_secs(1), inner.clone()).await;
+    assert!(prepared.enabled);
+    let session = prepared.into_session().unwrap();
+    if !present_at_startup {
+        sleep_until(&inner, 605_000).await;
+        let incumbent = roster.holder.clone();
+        roster.mutate(&incumbent).unwrap();
+        // A faster leader has promoted this control; the local clock is still
+        // in window 10, with an already-frozen full-support opportunity.
+        roster.control = future;
+        publish(
+            inner.as_ref(),
+            &policy,
+            &roster,
+            WriteCondition::matching(previous),
+        )
+        .await;
+    }
+    let frozen = census::report_key(
+        &policy,
+        "census",
+        10,
+        policy.draw("census-rank", "10"),
+        &Cutoff(None),
+    );
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let (key, completed) = events.recv().await.unwrap();
+            if completed && key == frozen {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("a current-window control GET changed the frozen cutoff");
+    assert!(inner.objects().contains_key(&frozen));
+    assert!(policy.draw("census-rank", "11") >= 1);
+    let next_instant =
+        660_000 + (u128::from(policy.draw("census-instant", "11")) * 60_000 / SPACE) as u64;
+    sleep_until(&inner, next_instant + 1).await;
+    assert!(
+        !inner.operation_log().iter().any(|(_, op)| {
+            matches!(op, StoreOperation::Put { key, .. } if key.starts_with(&policy.report_prefix("census", 11)))
+        }),
+        "the future cutoff did not become effective at its own boundary"
+    );
+    assert!(*session.recording_changes().borrow());
+    session.shutdown(Duration::from_secs(1)).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn forced_shutdown_joins_pending_report_and_controller_requests() {
     let inner = store_at(600_000);
@@ -942,8 +1024,14 @@ async fn forced_shutdown_joins_pending_report_and_controller_requests() {
     assert_eq!(inner.operation_count(), attempts);
 }
 
+#[rstest::rstest]
+#[case(0u128, false)]
+#[case(1u128, true)]
 #[tokio::test(start_paused = true)]
-async fn common_trim_boundary_is_independent_of_a_slow_many_page_leader_round() {
+async fn common_trim_boundary_is_independent_of_a_slow_many_page_leader_round(
+    #[case] salt: u128,
+    #[case] survives: bool,
+) {
     let store = store_at(480_000);
     let policy = config_for(400, "boundary-11");
     let mut roster = Roster::initial(&policy, &policy.invocation_id);
@@ -965,6 +1053,7 @@ async fn common_trim_boundary_is_independent_of_a_slow_many_page_leader_round() 
     .into_session()
     .unwrap();
     let weights = session.weights().unwrap();
+    let recording = session.recording_changes();
     sleep_until(&store, 562_000).await;
     let observed = decode(
         store
@@ -979,19 +1068,20 @@ async fn common_trim_boundary_is_independent_of_a_slow_many_page_leader_round() 
     roster.mutate(&policy.invocation_id).unwrap();
     roster.trim = Some(Trim {
         epoch: roster.epoch,
-        salt: ulid::Ulid::from(1u128).to_string(),
+        salt: ulid::Ulid::from(salt).to_string(),
         source_window: 8,
         effective_window: 11,
         created_ms: 562_000,
         survival: Cutoff::threshold(SPACE / 2),
     });
-    assert!(
+    assert_eq!(
         roster
             .trim
             .as_ref()
             .unwrap()
             .survival
-            .includes(policy.draw("trim", &roster.trim.as_ref().unwrap().salt))
+            .includes(policy.draw("trim", &roster.trim.as_ref().unwrap().salt)),
+        survives
     );
     publish(
         store.as_ref(),
@@ -1012,9 +1102,10 @@ async fn common_trim_boundary_is_independent_of_a_slow_many_page_leader_round() 
     sleep_until(&store, 660_001).await;
     assert_eq!(
         metadata_weight(&weights),
-        "2",
+        if survives { "2" } else { "0" },
         "leader storage work postponed the common thinning boundary"
     );
+    assert_eq!(*recording.borrow(), survives);
     let log = store.operation_log();
     assert!(
         log.iter().any(|(at, operation)| {
@@ -1031,7 +1122,12 @@ async fn common_trim_boundary_is_independent_of_a_slow_many_page_leader_round() 
         "active control polls must run during that leader round"
     );
     sleep_until(&store, 680_001).await;
-    assert_eq!(metadata_weight(&weights), "2", "thinning applied twice");
+    assert_eq!(
+        metadata_weight(&weights),
+        if survives { "2" } else { "0" },
+        "thinning applied twice or re-enabled an excluded recorder"
+    );
+    assert_eq!(*recording.borrow(), survives);
     session.shutdown(Duration::from_secs(1)).await;
 }
 
