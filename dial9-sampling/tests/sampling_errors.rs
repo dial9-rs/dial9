@@ -266,11 +266,7 @@ async fn unordered_and_duplicate_list_entries_reach_the_census(
     #[case] first: &str,
     #[case] second: &str,
 ) {
-    use sha2::{Digest, Sha256};
-    let prefix = format!(
-        "coord/_dial9_sampling/service={:x}/",
-        Sha256::digest(b"sampled")
-    );
+    let prefix = "coord/_dial9_sampling/service=sampled/";
     let mut fixture = response(200);
     fixture.body = format!(
         "<ListBucketResult><IsTruncated>false</IsTruncated>\
@@ -354,7 +350,6 @@ async fn requested_write_condition_is_preserved_on_the_wire(
 
 #[tokio::test(start_paused = true)]
 async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_client() {
-    use sha2::{Digest, Sha256};
     let fixture = RecordingFixture::new(std::iter::repeat_n(response(200), 6));
     let bootstrap = sdk_client(fixture.clone(), 1);
     let client = aws_sdk_s3::Client::from_conf(
@@ -396,10 +391,7 @@ async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_cli
             .await
             .unwrap();
     }
-    let membership_key = format!(
-        "v3/members/{}/01M623S6ZY8ND5FEG3ACCRG99H/0000000005977399/575c86b7dbf19363.a.01M623S6ZY8ND5FEG3ACCRG99J",
-        "0".repeat(64)
-    );
+    let membership_key = "v3/members/environment=production/01M623S6ZY8ND5FEG3ACCRG99H/0000000005977399/575c86b7dbf19363.a.01M623S6ZY8ND5FEG3ACCRG99J";
     let store = S3SamplingStore::builder()
         .config(
             dial9_destinations_s3::S3Config::builder()
@@ -415,7 +407,7 @@ async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_cli
     store
         .put(
             PutRequest::builder()
-                .key(&membership_key)
+                .key(membership_key)
                 .body(bytes::Bytes::new())
                 .condition(WriteCondition::unconditional())
                 .build(),
@@ -429,12 +421,11 @@ async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_cli
         "explicit regions need no discovery request"
     );
     for (request, (service, prefix)) in requests.iter().zip(namespaces) {
-        let service_hash = format!("{:x}", Sha256::digest(service.as_bytes()));
         let prefix = prefix.map_or_else(String::new, |prefix| format!("{prefix}/"));
         assert_eq!(
             request.uri.split('?').next().unwrap(),
             format!(
-                "https://custom.test/shared-traces/{prefix}_dial9_sampling/service%3D{service_hash}/v3/pools/pool/roster.json"
+                "https://custom.test/shared-traces/{prefix}_dial9_sampling/service%3D{service}/v3/pools/pool/roster.json"
             )
         );
         assert!(
@@ -452,12 +443,62 @@ async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_cli
     assert_eq!(
         requests[5].uri.split('?').next().unwrap(),
         format!(
-            "https://custom.test/shared-traces/_dial9_sampling/service%3D{:x}/{membership_key}",
-            Sha256::digest(b"checkout")
+            "https://custom.test/shared-traces/_dial9_sampling/service%3Dcheckout/{}",
+            membership_key.replace('=', "%3D")
         )
     );
     assert!(requests[5].if_match.is_none());
     assert!(requests[5].if_none_match.is_none());
+}
+
+#[rstest::rstest]
+#[case("checkout", "checkout")]
+#[case("payments/api=50%", "payments%252Fapi%253D50%2525")]
+#[case("payments%2Fapi", "payments%25252Fapi")]
+#[case("東京", "%E6%9D%B1%E4%BA%AC")]
+#[tokio::test(start_paused = true)]
+async fn service_and_grouping_keys_use_hive_escaping_before_sdk_url_encoding(
+    #[case] service: &str,
+    #[case] service_uri: &str,
+) {
+    let fixture = RecordingFixture::new([response(200)]);
+    let bootstrap = sdk_client(fixture.clone(), 1);
+    let client = aws_sdk_s3::Client::from_conf(
+        bootstrap
+            .config()
+            .to_builder()
+            .endpoint_url("https://example.test")
+            .build(),
+    );
+    let store = S3SamplingStore::builder()
+        .config(
+            dial9_destinations_s3::S3Config::builder()
+                .bucket("traces")
+                .service_name(service)
+                .region("us-east-1")
+                .build(),
+        )
+        .client(client)
+        .build()
+        .await
+        .unwrap();
+    store
+        .put(
+            PutRequest::builder()
+                .key("v3/pools/a%2Fb=c%3Dd%25雪/roster.json")
+                .body("roster".into())
+                .build(),
+        )
+        .await
+        .unwrap();
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].uri.split('?').next().unwrap(),
+        format!(
+            "https://example.test/traces/_dial9_sampling/service%3D{service_uri}/v3/pools/a%252Fb%3Dc%253Dd%2525%E9%9B%AA/roster.json"
+        )
+    );
 }
 
 #[rstest::rstest]

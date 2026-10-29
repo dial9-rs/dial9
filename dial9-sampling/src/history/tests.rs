@@ -22,7 +22,7 @@ fn observation(
 ) -> CensusObservation {
     CensusObservation {
         schema: 2,
-        pool: sampling.pool_hash(),
+        pool: sampling.pool_path(),
         started_ms: completed_ms - 1,
         completed_ms,
         bucket: completed_ms / 300_000,

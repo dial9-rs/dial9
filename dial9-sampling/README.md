@@ -145,8 +145,16 @@ relative to storage UTC, with a safe window after backend timestamp uncertainty.
 Crashes or failed cleanup can leave membership visible for two bucket widths.
 
 S3 coordination lives under
-`{configured_prefix}/_dial9_sampling/service={sha256(service_name)}/`, omitting
-the configured prefix when absent. An explicit config region avoids discovery;
+`{configured_prefix}/_dial9_sampling/service={escaped_service_name}/`, omitting
+the configured prefix when absent. Pools use sorted `name=value/` dimension
+components, for example
+`v3/pools/az=us-east-1a/environment=production/roster.json`.
+Names and values use the same Hive path escaping as trace keys: `/`, `=` and
+`%` become `%2F`, `%3D` and `%25`; Unicode remains readable. A pool with no
+extra dimensions uses `v3/pools/roster.json`. Membership keys use the same
+dimension path beneath `v3/members/`.
+The configured prefix remains opaque and is inserted verbatim.
+An explicit config region avoids discovery;
 otherwise initialization uses `HeadBucket`, including redirect region headers.
 Supply a custom `.client(...)` to the store builder inside `with_storage` for
 custom credentials or endpoints. Trace `key_fn`, instance path and boot identity
@@ -216,8 +224,9 @@ reporting protocol. Process runs use fresh identities with separate hash domains
 for census reporting, admission and thinning draws.
 
 The source emits `dial9.sampling.weight` and `dial9.sampling.pool`. The latter
-hashes sorted extra dimensions and is interpreted within the configured storage
-namespace; existing trace metadata supplies service, bucket and prefix. It remains
+contains the sorted, escaped dimension path (or an empty string for no extra
+dimensions) and is interpreted within the configured storage namespace;
+existing trace metadata supplies service, bucket and prefix. It remains
 known even when storage initialization fails. The source evaluates
 the weight when the recorder polls source metadata, and the writer carries the
 latest snapshot into trace segments. Unchanged weights produce no metadata

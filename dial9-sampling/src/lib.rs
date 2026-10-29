@@ -265,7 +265,7 @@ impl Sampling {
             weights: initial_expansion_weight.map(|weight| {
                 _maintenance
                     .and_then(protocol::SamplingSession::weights)
-                    .unwrap_or_else(|| trace_weights::TraceWeights::new(self.pool_hash(), weight))
+                    .unwrap_or_else(|| trace_weights::TraceWeights::new(self.pool_path(), weight))
             }),
         }
     }

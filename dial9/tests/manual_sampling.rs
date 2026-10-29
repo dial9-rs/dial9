@@ -242,7 +242,10 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
         .unwrap();
     assert!(found);
     assert_eq!(metadata["dial9.sampling.weight"], "1");
-    assert!(metadata.contains_key("dial9.sampling.pool"));
+    assert_eq!(
+        metadata["dial9.sampling.pool"],
+        "az=a/environment=customer%2Fprod/"
+    );
     assert_eq!(metadata["service_name"], config.service_name());
     assert_eq!(metadata["bucket"], config.bucket());
 }
@@ -309,8 +312,8 @@ fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
 }
 
 #[rstest::rstest]
-#[case(None, "_dial9_sampling/service=")]
-#[case(Some("sampling"), "sampling/_dial9_sampling/service=")]
+#[case(None, "_dial9_sampling/service=manual-test/")]
+#[case(Some("sampling"), "sampling/_dial9_sampling/service=manual-test/")]
 #[test]
 fn s3_adapter_enforces_etag_conditions_and_complete_pagination(
     #[case] prefix: Option<&str>,

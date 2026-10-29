@@ -6,6 +6,7 @@ pub(crate) use rate_limit::rate_limited;
 mod storage_shuttle_tests;
 
 use crate::backend::SamplingStore;
+use dial9_trace_format::object_key::hive_escape;
 pub(crate) use engine::{DecisionReason, PreparedSampling, SamplingSession};
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
@@ -145,17 +146,19 @@ impl Config {
         }
         Ok(())
     }
-    pub(crate) fn pool_hash(&self) -> String {
+    pub(crate) fn pool_path(&self) -> String {
         let mut dimensions = self.dimensions.clone();
         dimensions.sort();
-        let canonical = serde_json::to_vec(&dimensions).expect("string tuple serializes");
-        format!("{:x}", Sha256::digest(canonical))
+        dimensions
+            .into_iter()
+            .map(|(name, value)| format!("{}={}/", hive_escape(&name), hive_escape(&value)))
+            .collect()
     }
     pub(crate) fn pool_prefix(&self) -> String {
-        format!("v3/pools/{}/", self.pool_hash())
+        format!("v3/pools/{}", self.pool_path())
     }
     fn members_prefix(&self) -> String {
-        format!("v3/members/{}/", self.pool_hash())
+        format!("v3/members/{}", self.pool_path())
     }
     fn overshoot(&self) -> u32 {
         self.max_overshoot

@@ -90,7 +90,7 @@ pub(crate) struct CensusObservation {
 }
 
 pub(crate) fn prefix(pool: &str, day: u64) -> String {
-    format!("v3/census/{pool}/{day:016}/")
+    format!("v3/census/{pool}{day:016}/")
 }
 
 impl CensusObservation {
@@ -195,7 +195,7 @@ impl Sampling {
             .map_err(invalid)?;
         let age_ms = u64::try_from(max_age.as_millis()).map_err(invalid)?;
         let earliest = requested.saturating_sub(age_ms);
-        let pool = self.pool_hash();
+        let pool = self.pool_path();
         let mut best: Option<(String, CensusObservation)> = None;
         // Search newest day first; once a day has a qualifying observation,
         // preceding days cannot improve it. Page order is never assumed.

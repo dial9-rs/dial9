@@ -168,7 +168,7 @@ impl Policy {
     fn new(config: &Config) -> Self {
         Self {
             schema: 4,
-            pool: config.pool_hash(),
+            pool: config.pool_path(),
             target: config.target(),
             max_overshoot: config.overshoot(),
             poll_ms: config.poll_interval.as_millis() as u64,
@@ -469,7 +469,7 @@ pub(crate) async fn prepare_using(
     );
     #[cfg(feature = "dial9")]
     let weights = recording.then(|| {
-        crate::trace_weights::TraceWeights::new(config.pool_hash(), 1.0 / startup_probability)
+        crate::trace_weights::TraceWeights::new(config.pool_path(), 1.0 / startup_probability)
     });
     let (signal, changes) = watch::channel(recording);
     let stop = CancellationToken::new();
@@ -1151,7 +1151,7 @@ impl Worker {
             }
             let observation = crate::history::CensusObservation {
                 schema: 2,
-                pool: self.config.pool_hash(),
+                pool: self.config.pool_path(),
                 started_ms: started,
                 completed_ms: now,
                 bucket,

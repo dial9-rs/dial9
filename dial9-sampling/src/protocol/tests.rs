@@ -747,6 +747,57 @@ fn policy_namespace_and_rank_use_unambiguous_sorted_dimensions() {
     assert_eq!(two.rank(), three.rank());
 }
 
+#[rstest::rstest]
+#[case(
+    vec![("environment", "prod"), ("az", "us-east-1a")],
+    "az=us-east-1a/environment=prod/"
+)]
+#[case(
+    vec![("zone/name=%雪", "production/api=50%東京")],
+    "zone%2Fname%3D%25雪=production%2Fapi%3D50%25東京/"
+)]
+#[case(vec![("a", "x\nb=y")], "a=x%0Ab%3Dy/")]
+#[case(vec![], "")]
+#[test]
+fn pool_paths_are_sorted_readable_and_escape_names_and_values(
+    #[case] dimensions: Vec<(&str, &str)>,
+    #[case] expected: &str,
+) {
+    let mut policy = config(1, "node");
+    policy.dimensions = dimensions
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+    assert!(policy.validate().is_ok());
+    assert_eq!(policy.pool_path(), expected);
+    assert_eq!(policy.pool_prefix(), format!("v3/pools/{expected}"));
+    assert_eq!(policy.members_prefix(), format!("v3/members/{expected}"));
+    policy.dimensions.reverse();
+    assert_eq!(policy.pool_path(), expected);
+}
+
+#[rstest::rstest]
+#[case(vec![("a/b", "c")], vec![("a", "b/c")])]
+#[case(vec![("a=b", "c")], vec![("a", "b=c")])]
+#[case(vec![("a", "%2F")], vec![("a", "/")])]
+#[case(vec![("a", "b/c=d")], vec![("a", "b"), ("c", "d")])]
+#[case(vec![], vec![("ungrouped", "default")])]
+#[test]
+fn distinct_dimension_tuples_never_alias_path_delimiters(
+    #[case] first: Vec<(&str, &str)>,
+    #[case] second: Vec<(&str, &str)>,
+) {
+    let make = |dimensions: Vec<(&str, &str)>| {
+        let mut policy = config(1, "node");
+        policy.dimensions = dimensions
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        policy
+    };
+    assert_ne!(make(first).pool_path(), make(second).pool_path());
+}
+
 #[test]
 fn fallback_admission_is_independent_of_reporting_eligibility() {
     let policy = config(15, "node");
@@ -772,7 +823,7 @@ async fn survivor_weights_apply_each_new_epoch_once_and_new_joiners_skip_old_rou
     let store = Arc::new(MemoryStore::new());
     let policy = config(3, "weighted-worker");
     let mut active = worker(&policy, store.clone(), store.clone());
-    let weights = crate::trace_weights::TraceWeights::new(policy.pool_hash(), 10.0);
+    let weights = crate::trace_weights::TraceWeights::new(policy.pool_path(), 10.0);
     active.weights = Some(weights.clone());
     let mut roster = Roster::initial(&policy, &nonce());
     roster.census_computed_at_ms = Some(millis(store.now()).unwrap());
@@ -806,7 +857,7 @@ async fn survivor_weights_apply_each_new_epoch_once_and_new_joiners_skip_old_rou
             signal,
             true,
         );
-        let joining_weights = crate::trace_weights::TraceWeights::new(policy.pool_hash(), 10.0);
+        let joining_weights = crate::trace_weights::TraceWeights::new(policy.pool_path(), 10.0);
         joining.weights = Some(joining_weights.clone());
         joining.apply_trim().await.unwrap();
         assert_eq!(joining_weights.current_expansion_weight(), Some(10.0));
@@ -1171,7 +1222,7 @@ async fn pending_epochs_change_reporting_without_rerolling_profiling(#[case] pro
     #[cfg(feature = "dial9")]
     if profiling {
         process.weights = Some(crate::trace_weights::TraceWeights::new(
-            policy.pool_hash(),
+            policy.pool_path(),
             10.0,
         ));
     }

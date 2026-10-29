@@ -6,7 +6,7 @@ use crate::backend::{
     StoreError, StoreErrorKind, StoreFuture, StoredObject, VersionToken, WriteCondition,
 };
 use dial9_destinations_s3::S3Config;
-use sha2::{Digest, Sha256};
+use dial9_trace_format::object_key::hive_escape;
 use std::{
     io,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -17,7 +17,7 @@ use std::{
 /// Native S3 implementation of the sampler's conditional storage primitives.
 ///
 /// Reuses the recorder's [`S3Config`], including its bucket, prefix and service.
-/// Coordination keys live below `{prefix}/_dial9_sampling/service={hash}/`;
+/// Coordination keys live below `{prefix}/_dial9_sampling/service={escaped_service}/`;
 /// configured services are isolated without a caller-supplied sampling scope.
 /// Initialize inside [`crate::Sampling::with_storage`] so SDK resources belong
 /// to the sampler's long-lived runtime.
@@ -108,7 +108,7 @@ impl S3SamplingStore {
             Some(prefix) => format!("{prefix}/_dial9_sampling/"),
             None => "_dial9_sampling/".to_owned(),
         };
-        let service = format!("{:x}", Sha256::digest(config.service_name().as_bytes()));
+        let service = hive_escape(config.service_name());
         Ok(Self {
             client,
             bucket: config.bucket().to_owned(),
