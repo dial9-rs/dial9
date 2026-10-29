@@ -561,3 +561,77 @@ fn cold_disabled_recorder_stays_off_when_later_startups_use_the_live_census() {
             assert!(!recorder.handle().is_enabled());
         });
 }
+
+#[test]
+fn maintenance_termination_disables_registered_recorder_after_status_drop() {
+    use backend::{
+        ListPage, ListRequest, PutOutcome, PutRequest, SamplingStore, StoreFuture, StoredObject,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct EndMaintenance {
+        inner: MemoryStore,
+        trigger: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+    impl SamplingStore for EndMaintenance {
+        fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
+            self.inner.get(key)
+        }
+        fn put(&self, _: PutRequest) -> StoreFuture<'_, PutOutcome> {
+            Box::pin(async move {
+                let trigger = self.trigger.lock().unwrap().take().unwrap();
+                trigger.await.unwrap();
+                panic!("terminate the maintenance task after public registration")
+            })
+        }
+        fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+            self.inner.list_page(request)
+        }
+        fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+            self.inner.delete(key)
+        }
+    }
+
+    let (trigger, end) = oneshot::channel();
+    let recorder = policy()
+        .with_storage(async {
+            Ok(EndMaintenance {
+                inner: MemoryStore::new(),
+                trigger: Mutex::new(Some(end)),
+            })
+        })
+        .start_application(|status| {
+            assert!(status.enabled);
+            let recorder = dial9_core::recorder::recorder(
+                dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+            )
+            .build();
+            status.register_recorder(&recorder);
+            drop(status);
+            assert!(recorder.handle().is_enabled());
+            trigger.send(()).unwrap();
+            let app = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            app.block_on(async {
+                // Await the recorder's public state; the timeout is only a
+                // watchdog, not an assumed maintenance or notification delay.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while recorder.handle().is_enabled() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            });
+            recorder.enable();
+            assert!(recorder.handle().is_enabled());
+            recorder
+        });
+    assert!(
+        !recorder.handle().is_enabled(),
+        "application cleanup still disables"
+    );
+}
