@@ -74,12 +74,12 @@ TODO: HUMAN
 
 ## Implementation details
 
-When nodes start, they upload a metadata file into S3. Nodes end up being divided into two classes:
+Processes read a shared roster at startup and on a fixed schedule: once a minute while profiling, and once every five minutes otherwise. Processes fall into two classes:
 
-1. A subset of nodes are "reporting": These nodes report merely that they are alive. This set of nodes is used to estimate the total population size.
-2. A smaller subset of nodes are "profiling": These nodes actually have profiling enabled
+1. A subset of nodes are "reporting": Each minute, processes make a fresh sampling decision and report once at a randomly chosen instant. These reports estimate the mean number of live processes during that completed minute.
+2. A smaller subset of nodes are "profiling": These nodes have profiling enabled. The startup decision stays fixed; the sampler may later stop an enabled profiler.
 
-Lastly, 1 node becomes the leader and coordinates a roster file that tracks how many nodes are currently active.
+One leader updates the roster using a bounded sample of the lowest random hashes from the completed minute. Reports remain immutable after a process exits, and old windows expire through the storage lifecycle policy.
 
 ## Fleet flamegraph weights
 

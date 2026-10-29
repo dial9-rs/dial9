@@ -14,6 +14,21 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+#[cfg(not(shuttle))]
+#[derive(Clone, Debug)]
+pub(crate) enum StoreOperation {
+    Get(String),
+    Put {
+        key: String,
+        body: Vec<u8>,
+    },
+    List {
+        prefix: String,
+        limit: usize,
+        continuation: Option<String>,
+    },
+}
+
 #[derive(Debug, Default)]
 /// Atomic in-memory storage with injectable latency, partitions and lost acknowledgements.
 pub(crate) struct MemoryStore {
@@ -22,6 +37,8 @@ pub(crate) struct MemoryStore {
     latency_ms: AtomicU64,
     lost_writes: AtomicU64,
     operations: AtomicU64,
+    #[cfg(not(shuttle))]
+    log: Mutex<Vec<(SystemTime, StoreOperation)>>,
     clock_origin: Mutex<Option<(SystemTime, tokio::time::Instant)>>,
 }
 impl MemoryStore {
@@ -41,6 +58,17 @@ impl MemoryStore {
             clock_origin: Mutex::new(Some((time, tokio::time::Instant::now()))),
             ..Self::default()
         }
+    }
+    #[cfg(not(shuttle))]
+    pub(crate) fn operation_log(&self) -> Vec<(SystemTime, StoreOperation)> {
+        self.log.lock().expect("operation log lock").clone()
+    }
+    #[cfg(not(shuttle))]
+    fn record(&self, operation: StoreOperation) {
+        self.log
+            .lock()
+            .expect("operation log lock")
+            .push((self.now(), operation));
     }
     /// Makes all subsequent operations fail while enabled.
     #[cfg(not(shuttle))]
@@ -85,12 +113,19 @@ impl MemoryStore {
 impl SamplingStore for MemoryStore {
     fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
         Box::pin(async move {
+            #[cfg(not(shuttle))]
+            self.record(StoreOperation::Get(key.clone()));
             self.before().await?;
             Ok(self.objects.lock().expect("store lock").get(&key).cloned())
         })
     }
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
         Box::pin(async move {
+            #[cfg(not(shuttle))]
+            self.record(StoreOperation::Put {
+                key: request.key().into(),
+                body: request.body().to_vec(),
+            });
             self.before().await?;
             let mut objects = self.objects.lock().expect("store lock");
             let existing = objects.get(request.key());
@@ -136,6 +171,14 @@ impl SamplingStore for MemoryStore {
     }
     fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
         Box::pin(async move {
+            #[cfg(not(shuttle))]
+            self.record(StoreOperation::List {
+                prefix: request.prefix().into(),
+                limit: request.page_size(),
+                continuation: request
+                    .continuation()
+                    .map(|token| token.as_str().to_owned()),
+            });
             if request.page_size() == 0 {
                 return Err(StoreError::new(
                     StoreErrorKind::unsupported(),
