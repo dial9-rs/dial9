@@ -1,12 +1,12 @@
+use super::census::{self, Cutoff, SPACE};
 use super::{Config, rate_limited};
 use crate::backend::{
-    ListRequest, PutOutcome, PutRequest, SamplingStore, StoreError, StoreErrorKind, StoredObject,
-    VersionToken, WriteCondition,
+    PutOutcome, PutRequest, SamplingStore, StoreError, StoreErrorKind, StoredObject, VersionToken,
+    WriteCondition,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -124,28 +124,6 @@ fn serialize(value: &impl Serialize) -> Bytes {
     Bytes::from(serde_json::to_vec(value).expect("sampling record serializes"))
 }
 
-/// A null threshold means the entire 64-bit space; zero means nobody.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(transparent)]
-struct Cutoff(Option<u64>);
-impl Cutoff {
-    fn value(&self) -> u128 {
-        self.0.map_or(1u128 << 64, u128::from)
-    }
-    fn probability(&self) -> f64 {
-        self.value() as f64 / (1u128 << 64) as f64
-    }
-    fn threshold(value: u128) -> Self {
-        Self(if value >= (1u128 << 64) {
-            None
-        } else {
-            Some(value as u64)
-        })
-    }
-    fn includes(&self, rank: u64) -> bool {
-        self.0.is_none_or(|threshold| rank < threshold)
-    }
-}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Policy {
     schema: u32,
@@ -153,87 +131,104 @@ struct Policy {
     target: u32,
     max_overshoot: u32,
     poll_ms: u64,
-    bucket_ms: u64,
+    window_ms: u64,
     skew_ms: u64,
 }
 impl Policy {
     fn new(config: &Config) -> Self {
         Self {
-            schema: 4,
+            schema: 5,
             pool: config.pool_path(),
             target: config.target(),
             max_overshoot: config.overshoot(),
             poll_ms: config.settings.poll_interval.as_millis() as u64,
-            bucket_ms: config.settings.bucket_width.as_millis() as u64,
+            window_ms: config.settings.bucket_width.as_millis() as u64,
             skew_ms: config.settings.max_clock_skew.as_millis() as u64,
         }
     }
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct Counts {
-    observed: u64,
-    tracked: u64,
-    active: u64,
-    carriers: u64,
-    unarmed: u64,
+// Margins derive from the private window setting, including in paused-time tests.
+// Defaults: 3s operation, 2s dispatch, end+11s write, end+22s collection.
+struct Timing {
+    width: u64,
+    poll: u64,
+    operation: Duration,
+    dispatch: u64,
+    submission: u64,
+    closure: u64,
+    age: u64,
 }
-/// Membership from different fractions must never share a counting namespace.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct ReportingEpoch {
-    id: String,
-    cutoff: Cutoff,
+impl Timing {
+    fn new(config: &Config) -> Self {
+        let width = config.settings.bucket_width.as_millis() as u64;
+        let op = width / 20;
+        let dispatch = width / 30;
+        let submission = dispatch + 3 * op;
+        Self {
+            width,
+            poll: width * 5,
+            operation: Duration::from_millis(op),
+            dispatch,
+            submission,
+            closure: submission
+                + 2 * config.settings.max_clock_skew.as_millis() as u64
+                + width / 60,
+            age: width * 10,
+        }
+    }
+    fn end(&self, window: u64) -> Option<u64> {
+        window.checked_add(1)?.checked_mul(self.width)
+    }
+    fn completed(&self, now: u64) -> Option<u64> {
+        now.checked_sub(self.closure)?
+            .checked_div(self.width)?
+            .checked_sub(1)
+    }
 }
-impl ReportingEpoch {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Control {
+    source_window: Option<u64>,
+    effective_window: u64,
+    reporting: Cutoff,
+}
+impl Control {
     fn bootstrap() -> Self {
         Self {
-            id: "bootstrap".into(),
-            cutoff: Cutoff(None),
+            source_window: None,
+            effective_window: 0,
+            reporting: Cutoff(None),
         }
     }
     fn valid(&self) -> bool {
-        ((self.id == "bootstrap" && self.cutoff.0.is_none())
-            || self.id.parse::<ulid::Ulid>().is_ok())
-            && self.cutoff.value() > 0
+        self.reporting.value() > 0 && self.source_window.is_none_or(|w| w < self.effective_window)
     }
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Handoff {
-    reporting: ReportingEpoch,
-    created_ms: u64,
-    collect_after_ms: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Population {
-    reporting: ReportingEpoch,
-    reporters: u64,
+    window: u64,
+    estimate: f64,
     computed_ms: u64,
 }
 impl Population {
-    fn estimate(&self) -> f64 {
-        self.reporters as f64 / self.reporting.cutoff.probability()
+    fn fresh(&self, now: u64, config: &Config) -> bool {
+        let timing = Timing::new(config);
+        timing.end(self.window).is_some_and(|end| {
+            self.computed_ms >= end
+                && self.computed_ms
+                    <= now.saturating_add(config.settings.max_clock_skew.as_millis() as u64 * 2)
+                && now <= end.saturating_add(timing.age)
+        })
     }
     fn admission(&self, target: u32) -> Cutoff {
-        Cutoff::threshold(
-            u128::from(target) * self.reporting.cutoff.value() / u128::from(self.reporters),
-        )
+        Cutoff::from_probability(f64::from(target) / self.estimate)
     }
-    fn fresh(&self, now: u64, config: &Config) -> bool {
-        let skew = config.settings.max_clock_skew.as_millis() as u64 * 2;
-        self.computed_ms <= now.saturating_add(skew)
-            && now <= self.computed_ms.saturating_add(observation_age_ms(config))
-    }
-}
-// Keep the preceding observation usable through a healthy reporting handoff,
-// while rejecting arbitrarily stale startup probabilities during outages.
-fn observation_age_ms(config: &Config) -> u64 {
-    config.settings.bucket_width.as_millis() as u64 * 2
-        + config.settings.poll_interval.as_millis() as u64 * 6
-        + config.settings.max_clock_skew.as_millis() as u64 * 2
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Trim {
     epoch: u64,
     salt: String,
+    source_window: u64,
+    effective_window: u64,
     created_ms: u64,
     survival: Cutoff,
 }
@@ -241,17 +236,15 @@ struct Trim {
 struct Roster {
     policy: Policy,
     holder: String,
-    // Fresh on every mutation: body-based ETags must never repeat (ABA).
+    // Every mutation includes fresh entropy so a body-based ETag cannot suffer ABA.
     revision: String,
     epoch: u64,
-    settled: bool,
-    reporting: ReportingEpoch,
-    pending: Option<Handoff>,
-    outside_budget: u8,
+    control: Control,
+    next_control: Option<Control>,
     population: Option<Population>,
     trim: Option<Trim>,
-    counts: Counts,
-    census_computed_at_ms: Option<u64>,
+    // Reserve each completed source before LIST. Takeover never repeats that work.
+    last_window: Option<u64>,
 }
 impl Roster {
     fn initial(config: &Config, invocation_id: &str) -> Self {
@@ -260,14 +253,11 @@ impl Roster {
             holder: invocation_id.into(),
             revision: nonce(),
             epoch: 0,
-            settled: false,
-            reporting: ReportingEpoch::bootstrap(),
-            pending: None,
-            outside_budget: 0,
+            control: Control::bootstrap(),
+            next_control: None,
             population: None,
             trim: None,
-            counts: Counts::default(),
-            census_computed_at_ms: None,
+            last_window: None,
         }
     }
     fn validate(&self, config: &Config) -> Result<(), StoreError> {
@@ -277,34 +267,22 @@ impl Roster {
                 "incompatible sampling roster policy",
             ));
         }
-        if !self.reporting.valid()
-            || self.holder.parse::<ulid::Ulid>().is_err()
+        if self.holder.parse::<ulid::Ulid>().is_err()
             || self.revision.parse::<ulid::Ulid>().is_err()
-            || (self.trim.is_some() && self.census_computed_at_ms.is_none())
+            || !self.control.valid()
             || self
-                .counts
-                .active
-                .checked_add(self.counts.carriers)
-                .and_then(|n| n.checked_add(self.counts.unarmed))
-                != Some(self.counts.observed)
-            || self.counts.tracked > self.counts.observed
-            || self.outside_budget > 3
-            || self.pending.as_ref().is_some_and(|pending| {
-                !pending.reporting.valid()
-                    || pending.reporting.id == self.reporting.id
-                    || pending.collect_after_ms
-                        < pending.created_ms.saturating_add(
-                            config.settings.poll_interval.as_millis() as u64 * 5
-                                + config.settings.max_clock_skew.as_millis() as u64 * 2,
-                        )
-            })
-            || self.population.as_ref().is_some_and(|population| {
-                !population.reporting.valid() || population.reporters == 0
-            })
-            || self.trim.as_ref().is_some_and(|trim| {
-                trim.epoch > self.epoch
-                    || trim.salt.parse::<ulid::Ulid>().is_err()
-                    || trim.survival.value() == 0
+                .next_control
+                .as_ref()
+                .is_some_and(|c| !c.valid() || c.effective_window <= self.control.effective_window)
+            || self
+                .population
+                .as_ref()
+                .is_some_and(|p| !p.estimate.is_finite() || p.estimate <= 0.0)
+            || self.trim.as_ref().is_some_and(|t| {
+                t.epoch > self.epoch
+                    || t.salt.parse::<ulid::Ulid>().is_err()
+                    || t.source_window >= t.effective_window
+                    || t.survival.value() == 0
             })
         {
             return Err(invalid("invalid sampling roster fields"));
@@ -314,8 +292,23 @@ impl Roster {
     fn admission(&self, config: &Config, now: u64) -> Option<Cutoff> {
         self.population
             .as_ref()
-            .filter(|population| population.fresh(now, config))
-            .map(|population| population.admission(config.target()))
+            .filter(|p| p.fresh(now, config))
+            .map(|p| p.admission(config.target()))
+    }
+    fn applicable(&self, window: u64) -> &Control {
+        self.next_control
+            .as_ref()
+            .filter(|c| c.effective_window <= window)
+            .unwrap_or(&self.control)
+    }
+    fn promote(&mut self, window: u64) {
+        if self
+            .next_control
+            .as_ref()
+            .is_some_and(|c| c.effective_window <= window)
+        {
+            self.control = self.next_control.take().expect("present future control");
+        }
     }
     fn mutate(&mut self, invocation_id: &str) -> Result<(), StoreError> {
         self.holder = invocation_id.into();
@@ -348,13 +341,12 @@ fn expired(
     store: &dyn SamplingStore,
     now: SystemTime,
 ) -> bool {
-    // Server LastModified determines lease age. Conservative precision/skew
-    // margins only delay takeover.
+    // Server LastModified determines lease age. Precision/skew margins only delay takeover.
     observed
         .modified_at
         .checked_add(config.settings.poll_interval.saturating_mul(3))
-        .and_then(|time| time.checked_add(config.settings.max_clock_skew))
-        .and_then(|time| time.checked_add(store.modification_time_uncertainty()))
+        .and_then(|t| t.checked_add(config.settings.max_clock_skew))
+        .and_then(|t| t.checked_add(store.modification_time_uncertainty()))
         .is_some_and(|deadline| now > deadline)
 }
 
@@ -367,21 +359,6 @@ pub(crate) async fn prepare_using(
     if let Err(message) = config.validate() {
         return PreparedSampling::disabled(DecisionReason::invalid_configuration(message), false);
     }
-    let guard_ms = config
-        .settings
-        .max_clock_skew
-        .saturating_mul(2)
-        .saturating_add(store.modification_time_uncertainty())
-        .as_nanos()
-        .div_ceil(1_000_000);
-    if config.settings.bucket_width.as_millis() <= guard_ms.saturating_mul(2) {
-        return PreparedSampling::disabled(
-            DecisionReason::invalid_configuration(
-                "bucket width must exceed twice the census guard (two clock skews plus backend timestamp uncertainty)",
-            ),
-            false,
-        );
-    }
     if config.target() == 0 {
         return PreparedSampling::disabled(DecisionReason::TargetZero, false);
     }
@@ -392,16 +369,20 @@ pub(crate) async fn prepare_using(
         );
     };
     let fallback = config.failure_decision();
-    let mut startup_probability = config.failure_cutoff() as f64 / (1u128 << 64) as f64;
-    let key = format!("{}roster.json", config.pool_prefix());
+    let mut startup_probability = config.failure_cutoff() as f64 / SPACE as f64;
     let result = if timeout.is_zero() {
         None
     } else {
-        Some(tokio::time::timeout_at(deadline, store.get(key)).await)
+        Some(
+            tokio::time::timeout_at(
+                deadline,
+                store.get(format!("{}roster.json", config.pool_prefix())),
+            )
+            .await,
+        )
     };
     let (recording, reason, observed) = match result {
-        None => (fallback, DecisionReason::Timeout, None),
-        Some(Err(_)) => (fallback, DecisionReason::Timeout, None),
+        None | Some(Err(_)) => (fallback, DecisionReason::Timeout, None),
         Some(Ok(Err(error))) => (
             fallback,
             DecisionReason::store_failure(error.to_string()),
@@ -427,10 +408,10 @@ pub(crate) async fn prepare_using(
                     None => (fallback, DecisionReason::UnsettledRoster, Some(observed)),
                     Some(cutoff) => {
                         startup_probability = cutoff.probability();
-                        let active = config.selects(cutoff.value());
+                        let enabled = config.selects(cutoff.value());
                         (
-                            active,
-                            if active {
+                            enabled,
+                            if enabled {
                                 DecisionReason::Roster
                             } else {
                                 DecisionReason::OutsideCutoff
@@ -443,330 +424,71 @@ pub(crate) async fn prepare_using(
         },
     };
     if reason == DecisionReason::IncompatiblePolicy {
-        // Known mismatches cannot safely contribute to this policy's census.
         return PreparedSampling::disabled(reason, recording);
     }
-    let mut prepared = PreparedSampling::disabled(reason, recording);
-    let membership_allowed = matches!(
-        prepared.reason,
+    let authoritative = matches!(
+        reason,
         DecisionReason::MissingRoster
             | DecisionReason::Roster
             | DecisionReason::OutsideCutoff
             | DecisionReason::UnsettledRoster
     );
-    tracing::debug!(
-        population = ?observed.as_ref().and_then(|o| o.roster.population.as_ref()).map(Population::estimate),
-        "sampling startup roster"
-    );
     let weights = recording.then(|| {
         crate::trace_weights::TraceWeights::new(config.pool_path(), 1.0 / startup_probability)
     });
-    let (signal, changes) = watch::channel(recording);
+    let (signal, recording_changes) = watch::channel(recording);
     let stop = CancellationToken::new();
-    let mut worker = Worker::new(config, store, clock, observed, signal, membership_allowed);
+    let mut worker = Worker::new(config, store, clock, observed, signal, authoritative);
     worker.weights = weights.clone();
     let cancellation = stop.clone();
     let task = tokio::spawn(async move {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {},
-            () = worker.run() => {},
-        }
+        tokio::select! { biased; () = cancellation.cancelled() => {}, () = worker.run() => {} }
         if let Some(weights) = &worker.weights {
             weights.stop();
         }
         worker.signal.send_replace(false);
-        if tokio::time::timeout(super::CLEANUP_TIMEOUT, worker.cleanup())
-            .await
-            .is_err()
-        {
-            tracing::debug!("sampling member cleanup timed out");
-        }
+        // Historical reports remain immutable after exit; storage lifecycle owns expiry.
     });
-    prepared.session = Some(SamplingSession {
-        stop,
-        task: Some(task),
-        startup_probability,
-        weights,
-        recording: changes,
-    });
-    prepared
+    PreparedSampling {
+        enabled: recording,
+        reason,
+        session: Some(SamplingSession {
+            stop,
+            task: Some(task),
+            recording: recording_changes,
+            startup_probability,
+            weights,
+        }),
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum MemberState {
-    Unarmed,
-    Active,
-    Carrier,
+struct WindowPlan {
+    window: u64,
+    cutoff: Cutoff,
+    census_rank: u64,
+    census_at: u64,
+    profiler_rank: u64,
+    profiler_at: u64,
+    census_done: bool,
+    profiler_done: bool,
 }
-impl MemberState {
-    fn code(&self) -> char {
-        match self {
-            Self::Unarmed => 'u',
-            Self::Active => 'a',
-            Self::Carrier => 'c',
-        }
-    }
-    fn parse(value: &str) -> Result<Self, StoreError> {
-        match value {
-            "u" => Ok(Self::Unarmed),
-            "a" => Ok(Self::Active),
-            "c" => Ok(Self::Carrier),
-            _ => Err(invalid("invalid member state")),
-        }
-    }
-}
-#[derive(Clone, Debug)]
-struct Member {
-    rank: u64,
-    invocation_id: String,
-    bucket: u64,
-    state: MemberState,
-}
-fn member_key(
-    config: &Config,
-    epoch: &str,
-    bucket: u64,
-    rank: u64,
-    state: &MemberState,
-    invocation_id: &str,
-) -> String {
-    format!(
-        "{}{epoch}/{:016}/{rank:016x}.{}.{invocation_id}",
-        config.members_prefix(),
-        bucket,
-        state.code()
-    )
-}
-fn parse_member(key: &str, prefix: &str, bucket: u64) -> Result<Member, StoreError> {
-    let suffix = key
-        .strip_prefix(prefix)
-        .ok_or_else(|| invalid("member outside requested prefix"))?;
-    let mut parts = suffix.split('.');
-    let rank_hex = parts.next().ok_or_else(|| invalid("missing member rank"))?;
-    let rank = u64::from_str_radix(rank_hex, 16).map_err(invalid)?;
-    let state = MemberState::parse(
-        parts
-            .next()
-            .ok_or_else(|| invalid("missing member state"))?,
-    )?;
-    let invocation_id = parts
-        .next()
-        .ok_or_else(|| invalid("missing invocation identity"))?;
-    if rank_hex.len() != 16
-        || format!("{rank:016x}") != rank_hex
-        || parts.next().is_some()
-        || invocation_id.parse::<ulid::Ulid>().is_err()
-    {
-        return Err(invalid("invalid sampling member key"));
-    }
-    Ok(Member {
-        rank,
-        invocation_id: invocation_id.into(),
-        bucket,
-        state,
-    })
-}
-async fn list_bucket(
-    store: &dyn SamplingStore,
-    config: &Config,
-    epoch: &str,
-    bucket: u64,
-) -> Result<Vec<Member>, StoreError> {
-    let prefix = format!("{}{epoch}/{:016}/", config.members_prefix(), bucket);
-    let mut continuation = None;
-    let mut seen = HashSet::new();
-    let mut members = Vec::new();
-    loop {
-        let page = store
-            .list_sorted_page(
-                ListRequest::builder()
-                    .prefix(&prefix)
-                    .page_size(1000)
-                    .maybe_continuation(continuation)
-                    .build(),
-            )
-            .await?;
-        for object in page.objects() {
-            members.push(parse_member(object.key(), &prefix, bucket)?);
-        }
-        continuation = page.continuation().cloned();
-        match &continuation {
-            None => return Ok(members),
-            Some(token) if !seen.insert(token.as_str().to_owned()) => {
-                return Err(invalid("repeated LIST continuation token"));
-            }
-            Some(_) => {}
-        }
-    }
-}
-async fn census(
-    store: &dyn SamplingStore,
-    config: &Config,
-    reporting: &ReportingEpoch,
-    bucket: u64,
-) -> Result<Vec<Member>, StoreError> {
-    let current = list_bucket(store, config, &reporting.id, bucket);
-    let previous = async {
-        if bucket == 0 {
-            Ok(Vec::new())
-        } else {
-            list_bucket(store, config, &reporting.id, bucket - 1).await
-        }
-    };
-    let (current, previous) = tokio::try_join!(current, previous)?;
-    let mut unique: HashMap<String, Member> = HashMap::new();
-    for member in previous.into_iter().chain(current) {
-        match unique.entry(member.invocation_id.clone()) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(member);
-            }
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let old = entry.get();
-                if old.rank != member.rank {
-                    return Err(invalid("invocation identity has inconsistent ranks"));
-                }
-                // State is terminal within an application run. A delayed active
-                // PUT or backwards clock adjustment cannot outrank a carrier.
-                if (&member.state, member.bucket) > (&old.state, old.bucket) {
-                    entry.insert(member);
-                }
-            }
-        }
-    }
-    Ok(unique.into_values().collect())
-}
-fn compute(
-    roster: &mut Roster,
-    config: &Config,
-    members: &[Member],
-    history: &mut VecDeque<u64>,
-    now: u64,
-    collection_delay_ms: u64,
-) {
-    let counts = count_members(members, &roster.reporting);
-    let settled = settle(history, counts.tracked);
-    if settled && counts.tracked > 0 {
-        roster.population = Some(Population {
-            reporting: roster.reporting.clone(),
-            reporters: counts.tracked,
-            computed_ms: now,
-        });
-    }
-    let budget = u64::from(config.target()) * 32;
-    let outside = counts.tracked < budget / 2 || counts.tracked > budget * 2;
-    roster.outside_budget = if outside {
-        (roster.outside_budget + 1).min(3)
-    } else {
-        0
-    };
-    if counts.tracked == 0
-        && roster
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.reporting.cutoff.0.is_some())
-    {
-        // A smaller pending subset can also have lost every reporter. Recovery
-        // must not wait forever for that abandoned census to become nonempty.
-        roster.pending = None;
-    }
-    if roster.pending.is_none() {
-        let next = if counts.tracked == 0 {
-            // Zero sampled reporters is loss of visibility, not an empty fleet.
-            Some(Cutoff(None))
-        } else if settled && roster.outside_budget == 3 {
-            Some(Cutoff::threshold(
-                (u128::from(budget) * roster.reporting.cutoff.value() / u128::from(counts.tracked))
-                    .max(1),
-            ))
-        } else {
-            None
-        };
-        if let Some(cutoff) = next
-            && cutoff != roster.reporting.cutoff
-        {
-            roster.pending = Some(Handoff {
-                reporting: ReportingEpoch {
-                    id: nonce(),
-                    cutoff,
-                },
-                created_ms: now,
-                collect_after_ms: now.saturating_add(collection_delay_ms),
-            });
-        }
-    }
-    let cap = u64::from(config.target()) + u64::from(config.overshoot());
-    if counts.active <= cap {
-        roster.trim = None;
-    } else if roster.trim.as_ref().is_none_or(|trim| {
-        now.saturating_sub(trim.created_ms)
-            >= config.settings.poll_interval.as_millis() as u64 * 3
-                + config.settings.max_clock_skew.as_millis() as u64 * 2
-    }) {
-        roster.trim = Some(Trim {
-            epoch: roster.epoch,
-            salt: nonce(),
-            created_ms: now,
-            survival: Cutoff::threshold(
-                (u128::from(config.target()) << 64) / u128::from(counts.active),
-            ),
-        });
-    }
-    roster.settled = settled && counts.tracked > 0;
-    roster.counts = counts;
-    roster.census_computed_at_ms = Some(now);
-}
-fn count_members(members: &[Member], reporting: &ReportingEpoch) -> Counts {
-    let mut counts = Counts::default();
-    for member in members {
-        counts.observed += 1;
-        if reporting.cutoff.includes(member.rank) {
-            counts.tracked += 1;
-        }
-        match member.state {
-            MemberState::Unarmed => counts.unarmed += 1,
-            MemberState::Carrier => counts.carriers += 1,
-            MemberState::Active => {
-                counts.active += 1;
-            }
-        }
-    }
-    counts
-}
-fn settle(history: &mut VecDeque<u64>, tracked: u64) -> bool {
-    history.push_back(tracked);
-    if history.len() > 4 {
-        history.pop_front();
-    }
-    // This only detects a plateau; it cannot certify LIST snapshot completeness
-    // or that a future cohort has the same population.
-    history.len() == 4
-        && history
-            .iter()
-            .zip(history.iter().skip(1))
-            .all(|(&a, &b)| u128::from(b) * 100 <= u128::from(a) * 102)
-}
-
 struct Worker {
     config: Config,
     store: Arc<dyn SamplingStore>,
     clock: Arc<dyn Clock>,
-    invocation_id: String,
-    rank: u64,
-    state: MemberState,
     observed: Option<Observed>,
     leader: Option<Observed>,
-    history: VecDeque<u64>,
-    pending_history: VecDeque<u64>,
-    pending_history_epoch: Option<String>,
     signal: watch::Sender<bool>,
-    keys: BTreeMap<(String, u64), HashSet<String>>,
-    written_buckets: BTreeMap<String, u64>,
-    terminal_until_bucket: Option<u64>,
-    offset_ms: u64,
-    poll_ms: u64,
-    membership_allowed: bool,
+    born_ms: u64,
+    next_poll_ms: u64,
+    next_pass_ms: u64,
+    cutoff: Cutoff,
+    pending_control: Option<Control>,
+    plan: Option<WindowPlan>,
+    pending_trim: Option<Trim>,
     last_trim_epoch: u64,
+    compatible: bool,
+    election_needed: bool,
     weights: Option<crate::trace_weights::TraceWeights>,
 }
 impl Worker {
@@ -776,406 +498,232 @@ impl Worker {
         clock: Arc<dyn Clock>,
         observed: Option<Observed>,
         signal: watch::Sender<bool>,
-        membership_allowed: bool,
+        authoritative: bool,
     ) -> Self {
-        let recording = *signal.borrow();
-        let invocation_id = config.invocation_id.clone();
+        let timing = Timing::new(&config);
+        let born_ms = millis(clock.now()).expect("validated clock after epoch");
+        let window = born_ms / timing.width;
+        let phase = config.draw("roster-phase", "") % timing.poll;
+        let next_poll_ms = born_ms / timing.poll * timing.poll + phase;
+        let next_poll_ms = if next_poll_ms <= born_ms {
+            next_poll_ms + timing.poll
+        } else {
+            next_poll_ms
+        };
+        let cutoff = observed.as_ref().map_or(Cutoff(None), |o| {
+            o.roster.applicable(window).reporting.clone()
+        });
+        let pending_control = observed
+            .as_ref()
+            .and_then(|o| o.roster.next_control.clone())
+            .filter(|c| c.effective_window > window);
         let last_trim_epoch = observed.as_ref().map_or(0, |o| o.roster.epoch);
-        let entropy = invocation_id
-            .parse::<ulid::Ulid>()
-            .expect("fresh invocation identity")
-            .random() as u64;
-        let offset_ms = entropy % config.settings.bucket_width.as_millis() as u64;
-        // A fixed per-run jitter also spreads polls and remains testable.
-        let poll_ms =
-            (config.settings.poll_interval.as_millis() as u64 * (900 + entropy % 201)) / 1000;
-        let rank = config.rank();
+        let election_needed = authoritative
+            && observed
+                .as_ref()
+                .is_none_or(|o| expired(o, &config, store.as_ref(), clock.now()));
         Self {
             config,
             store,
             clock,
-            invocation_id,
-            rank,
-            state: if recording {
-                MemberState::Active
-            } else {
-                MemberState::Unarmed
-            },
             observed,
             leader: None,
-            history: VecDeque::new(),
-            pending_history: VecDeque::new(),
-            pending_history_epoch: None,
             signal,
-            keys: BTreeMap::new(),
-            written_buckets: BTreeMap::new(),
-            terminal_until_bucket: None,
-            offset_ms,
-            poll_ms,
-            membership_allowed,
+            born_ms,
+            next_poll_ms,
+            next_pass_ms: born_ms,
+            cutoff,
+            pending_control,
+            plan: None,
+            pending_trim: None,
             last_trim_epoch,
+            compatible: true,
+            election_needed,
             weights: None,
         }
     }
-    fn bucket(&self) -> Result<u64, StoreError> {
-        Ok(millis(self.clock.now())? / self.config.settings.bucket_width.as_millis() as u64)
+    fn now(&self) -> Result<u64, StoreError> {
+        millis(self.clock.now())
     }
-    fn reporting_epochs(&self) -> Vec<ReportingEpoch> {
-        let Some(observed) = &self.observed else {
-            return vec![ReportingEpoch::bootstrap()];
-        };
-        std::iter::once(observed.roster.reporting.clone())
-            .chain(
-                observed
-                    .roster
-                    .pending
-                    .as_ref()
-                    .map(|p| p.reporting.clone()),
-            )
-            .collect()
-    }
-    fn should_report(&self, epoch: &ReportingEpoch, bucket: u64) -> bool {
-        epoch.cutoff.includes(self.config.reporting_rank(&epoch.id))
-            || self.state == MemberState::Active
-            || (self.state == MemberState::Carrier
-                && self
-                    .terminal_until_bucket
-                    .is_some_and(|until| bucket <= until))
-    }
-    async fn write_member(&mut self, epoch: &str, bucket: u64) -> Result<(), StoreError> {
-        let key = member_key(
-            &self.config,
-            epoch,
-            bucket,
-            self.config.reporting_rank(epoch),
-            &self.state,
-            &self.invocation_id,
-        );
-        // Track even an unacknowledged PUT: cleanup is safe because every key
-        // belongs to this run, and never to a replacement process.
-        self.keys.retain(|(_, b), _| *b >= bucket.saturating_sub(1));
-        self.keys
-            .entry((epoch.into(), bucket))
-            .or_default()
-            .insert(key.clone());
-        match self
-            .store
-            .put(
-                PutRequest::builder()
-                    .key(key)
-                    .body(Bytes::new())
-                    .condition(WriteCondition::unconditional())
-                    .build(),
-            )
-            .await?
-        {
-            PutOutcome::Stored { .. } => {
-                self.written_buckets.insert(epoch.into(), bucket);
-                Ok(())
-            }
-            other => Err(invalid(format!(
-                "unconditional membership PUT returned {other:?}"
-            ))),
-        }
-    }
-    async fn refresh_member(&mut self, immediate: bool) -> Result<(), StoreError> {
-        if !self.membership_allowed {
+    fn ensure_plan(&mut self, now: u64) -> Result<(), StoreError> {
+        let timing = Timing::new(&self.config);
+        let window = now / timing.width;
+        if self.plan.as_ref().is_some_and(|p| p.window >= window) {
             return Ok(());
         }
-        let now = millis(self.clock.now())?;
-        let width = self.config.settings.bucket_width.as_millis() as u64;
-        let bucket = now / width;
-        let epochs = self.reporting_epochs();
-        self.written_buckets
-            .retain(|id, _| epochs.iter().any(|epoch| &epoch.id == id));
-        for epoch in epochs {
-            if self.should_report(&epoch, bucket)
-                && (immediate
-                    || !self.written_buckets.contains_key(&epoch.id)
-                    || (self.written_buckets.get(&epoch.id) != Some(&bucket)
-                        && now % width >= self.offset_ms))
-            {
-                self.write_member(&epoch.id, bucket).await?;
-            }
+        if self
+            .pending_control
+            .as_ref()
+            .is_some_and(|c| c.effective_window <= window)
+        {
+            self.cutoff = self
+                .pending_control
+                .take()
+                .expect("pending control")
+                .reporting;
         }
+        self.apply_trim(window, now)?;
+        let label = window.to_string();
+        let start = window * timing.width;
+        let census_at = start
+            + (u128::from(self.config.draw("census-instant", &label)) * u128::from(timing.width)
+                / SPACE) as u64;
+        let profiler_at = start
+            + (u128::from(self.config.draw("profiler-instant", &label)) * u128::from(timing.width)
+                / SPACE) as u64;
+        self.plan = Some(WindowPlan {
+            window,
+            cutoff: self.cutoff.clone(),
+            census_rank: self.config.draw("census-rank", &label),
+            census_at,
+            profiler_rank: self.config.draw("profiler-rank", &label),
+            profiler_at,
+            census_done: census_at < self.born_ms
+                || now > census_at.saturating_add(timing.dispatch),
+            profiler_done: profiler_at < self.born_ms
+                || now > profiler_at.saturating_add(timing.dispatch),
+        });
         Ok(())
     }
+    fn learn(&mut self, observed: Option<Observed>, now: u64) {
+        let window = now / Timing::new(&self.config).width;
+        if let Some(current) = &observed {
+            let selected = current
+                .roster
+                .next_control
+                .as_ref()
+                .unwrap_or(&current.roster.control);
+            if selected.source_window.is_none_or(|source| source < window) {
+                let mut control = selected.clone();
+                control.effective_window = control.effective_window.max(window.saturating_add(1));
+                self.pending_control = Some(control);
+            }
+            if let Some(trim) = &current.roster.trim
+                && trim.epoch > self.last_trim_epoch
+                && trim.effective_window > window
+                && self.born_ms / Timing::new(&self.config).width <= trim.source_window
+            {
+                self.pending_trim = Some(trim.clone());
+            }
+        }
+        if self.leader.as_ref().is_some_and(|leader| {
+            observed.as_ref().is_none_or(|current| {
+                current.version != leader.version
+                    || current.roster.holder != self.config.invocation_id
+            })
+        }) {
+            self.leader = None;
+        }
+        if self.leader.is_none()
+            && let Some(current) = &observed
+            && current.roster.holder == self.config.invocation_id
+            && !expired(current, &self.config, self.store.as_ref(), self.clock.now())
+        {
+            self.leader = Some(current.clone());
+        }
+        self.election_needed = observed
+            .as_ref()
+            .is_none_or(|o| expired(o, &self.config, self.store.as_ref(), self.clock.now()));
+        self.observed = observed;
+    }
     async fn read_roster(&self) -> Result<Option<Observed>, StoreError> {
-        self.store
-            .get(format!("{}roster.json", self.config.pool_prefix()))
-            .await?
-            .map(|object| decode(object, &self.config))
-            .transpose()
+        bounded(
+            Timing::new(&self.config).operation,
+            self.store
+                .get(format!("{}roster.json", self.config.pool_prefix())),
+        )
+        .await?
+        .map(|o| decode(o, &self.config))
+        .transpose()
+    }
+    async fn poll(&mut self) -> Result<(), StoreError> {
+        self.election_needed = false;
+        match self.read_roster().await {
+            Ok(observed) => {
+                self.compatible = true;
+                self.learn(observed, self.now()?);
+                Ok(())
+            }
+            Err(error) => {
+                if matches!(error.kind(), StoreErrorKind::Unsupported {}) {
+                    self.compatible = false;
+                    self.leader = None;
+                }
+                Err(error)
+            }
+        }
     }
     async fn replace(
         &self,
         roster: &Roster,
         previous: Option<&VersionToken>,
     ) -> Result<Option<Observed>, StoreError> {
-        let condition = match previous {
-            Some(version) => WriteCondition::matching(version.clone()),
-            None => WriteCondition::absent(),
-        };
-        match self
-            .store
-            .put(
-                PutRequest::builder()
-                    .key(format!("{}roster.json", self.config.pool_prefix()))
-                    .body(serialize(roster))
-                    .condition(condition)
-                    .build(),
-            )
-            .await?
-        {
-            PutOutcome::Stored { version } => Ok(Some(Observed {
-                roster: roster.clone(),
-                version,
-                modified_at: self.clock.now(),
-            })),
-            PutOutcome::PreconditionFailed {} => Ok(None),
-        }
+        replace(
+            &self.config,
+            self.store.as_ref(),
+            self.clock.as_ref(),
+            roster,
+            previous,
+        )
+        .await
     }
     async fn election(&mut self) -> Result<(), StoreError> {
-        if self.observed.as_ref().is_some_and(|observed| {
-            !expired(
-                observed,
-                &self.config,
-                self.store.as_ref(),
-                self.clock.now(),
-            )
-        }) {
+        if !self.election_needed || !self.compatible {
             return Ok(());
         }
-        let delay_span_ms = (self.config.settings.poll_interval.as_millis() / 2).min(2000);
-        let delay_ms = u128::from(self.rank) * delay_span_ms / (1u128 << 64);
-        tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
-        // Most contenders see the winner during this one background re-read.
-        // Close races can still cause losing CAS writes; there is no probe loop.
-        self.observed = self.read_roster().await?;
-        if self.observed.as_ref().is_some_and(|observed| {
-            !expired(
-                observed,
-                &self.config,
-                self.store.as_ref(),
-                self.clock.now(),
-            )
-        }) {
+        self.election_needed = false;
+        let span = (self.config.settings.poll_interval.as_millis() / 2).min(2000);
+        let delay = u128::from(self.config.rank()) * span / SPACE;
+        tokio::time::sleep(Duration::from_millis(delay as u64)).await;
+        // One authoritative re-read after backoff, then one CAS. No immediate retry loop.
+        let observed = self.read_roster().await?;
+        if observed
+            .as_ref()
+            .is_some_and(|o| !expired(o, &self.config, self.store.as_ref(), self.clock.now()))
+        {
+            self.learn(observed, self.now()?);
             return Ok(());
         }
-        let mut roster = match &self.observed {
-            Some(observed) => observed.roster.clone(),
-            None => Roster::initial(&self.config, &self.invocation_id),
-        };
-        // Acquisition must not freshen an old cohort's thinning round.
-        // Preserve the settled startup cutoff, and recompute thinning after LIST.
-        roster.trim = None;
-        roster.settled = false;
-        roster.mutate(&self.invocation_id)?;
+        let mut roster = observed.as_ref().map_or_else(
+            || Roster::initial(&self.config, &self.config.invocation_id),
+            |o| o.roster.clone(),
+        );
+        roster.mutate(&self.config.invocation_id)?;
         let claimed = self
-            .replace(
-                &roster,
-                self.observed.as_ref().map(|observed| &observed.version),
-            )
+            .replace(&roster, observed.as_ref().map(|o| &o.version))
             .await?;
         self.leader = claimed.clone();
         if let Some(claimed) = claimed {
-            self.observed = Some(claimed);
-            self.history.clear();
-            self.pending_history.clear();
-            self.pending_history_epoch = None;
+            self.learn(Some(claimed), self.now()?);
+            self.next_pass_ms = self.now()?;
         }
         Ok(())
     }
-    fn guard_ms(&self) -> u128 {
-        self.config
-            .settings
-            .max_clock_skew
-            .saturating_mul(2)
-            .saturating_add(self.store.modification_time_uncertainty())
-            .as_nanos()
-            .div_ceil(1_000_000)
-    }
-    fn census_window(&self, now: u64) -> bool {
-        let width = self.config.settings.bucket_width.as_millis();
-        let phase = u128::from(now) % width;
-        let guard = self.guard_ms();
-        phase >= guard && phase.saturating_add(guard) < width
-    }
-    fn pass_cadence(&self) -> Duration {
-        if let Ok(now) = millis(self.clock.now()) {
-            let width = self.config.settings.bucket_width.as_millis();
-            let phase = u128::from(now) % width;
-            let guard = self.guard_ms();
-            if guard.saturating_mul(2) >= width {
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::error!("sampling timestamp uncertainty leaves no safe census window");
-                });
-                return self.config.settings.poll_interval;
-            }
-            if !self.census_window(now) {
-                let wait = if phase < guard {
-                    guard - phase
-                } else {
-                    width - phase + guard
-                };
-                return Duration::from_millis(wait as u64).min(self.config.settings.poll_interval);
-            }
+    fn apply_trim(&mut self, window: u64, now: u64) -> Result<(), StoreError> {
+        let Some(trim) = self.pending_trim.clone() else {
+            return Ok(());
+        };
+        if window < trim.effective_window {
+            return Ok(());
         }
-        if self.leader.as_ref().is_some_and(|o| {
-            o.roster
-                .pending
+        self.pending_trim = None;
+        self.last_trim_epoch = self.last_trim_epoch.max(trim.epoch);
+        // A suspended process skips a missed activation; control never acts retroactively.
+        if window != trim.effective_window || !*self.signal.borrow() {
+            return Ok(());
+        }
+        let timing = Timing::new(&self.config);
+        if now > window * timing.width + timing.dispatch
+            || self
+                .observed
                 .as_ref()
-                .map_or(o.roster.settled, |pending| {
-                    millis(self.clock.now()).is_ok_and(|now| now < pending.collect_after_ms)
-                })
-        }) {
-            self.config.settings.poll_interval
-        } else {
-            Duration::from_secs(1).min(self.config.settings.poll_interval)
-        }
-    }
-    async fn leader_pass(&mut self) -> Result<(), StoreError> {
-        let Some(previous) = self.leader.take() else {
-            return Ok(());
-        };
-        let started = millis(self.clock.now())?;
-        let width = self.config.settings.bucket_width.as_millis() as u64;
-        let bucket = started / width;
-        let mut roster = previous.roster.clone();
-        roster.mutate(&self.invocation_id)?;
-        let members = if self.census_window(started) {
-            Some(census(self.store.as_ref(), &self.config, &roster.reporting, bucket).await?)
-        } else {
-            None
-        };
-        let pending_members = match &roster.pending {
-            Some(pending)
-                if members.is_some()
-                    && started
-                        >= pending.collect_after_ms.saturating_add(
-                            self.config.settings.max_clock_skew.as_millis() as u64 * 2,
-                        ) =>
-            {
-                Some((
-                    pending.reporting.clone(),
-                    census(
-                        self.store.as_ref(),
-                        &self.config,
-                        &pending.reporting,
-                        bucket,
-                    )
-                    .await?,
-                ))
-            }
-            _ => None,
-        };
-        let now = millis(self.clock.now())?;
-        if let Some(members) = members
-            && now >= started
-            && now / width == bucket
-            && self.census_window(now)
-        {
-            let collection_delay_ms = self.config.settings.poll_interval.as_millis() as u64 * 5
-                + self.config.settings.max_clock_skew.as_millis() as u64 * 2
-                + u64::try_from(
-                    self.store
-                        .modification_time_uncertainty()
-                        .as_nanos()
-                        .div_ceil(1_000_000),
-                )
-                .map_err(invalid)?;
-            compute(
-                &mut roster,
-                &self.config,
-                &members,
-                &mut self.history,
-                now,
-                collection_delay_ms,
-            );
-            if let Some((reporting, pending_members)) = pending_members
-                && roster
-                    .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.reporting.id == reporting.id)
-            {
-                if self.pending_history_epoch.as_ref() != Some(&reporting.id) {
-                    self.pending_history.clear();
-                    self.pending_history_epoch = Some(reporting.id.clone());
-                }
-                let counts = count_members(&pending_members, &reporting);
-                if settle(&mut self.pending_history, counts.tracked) && counts.tracked > 0 {
-                    roster.population = Some(Population {
-                        reporting: reporting.clone(),
-                        reporters: counts.tracked,
-                        computed_ms: now,
-                    });
-                    roster.reporting = reporting;
-                    roster.pending = None;
-                    roster.outside_budget = 0;
-                    roster.counts = counts;
-                    roster.settled = true;
-                    // Only one epoch's profilers may drive a trim. Start the
-                    // next assessment from the promoted membership namespace.
-                    roster.trim = None;
-                    self.history = std::mem::take(&mut self.pending_history);
-                    self.pending_history_epoch = None;
-                }
-            }
-        } else {
-            // Opposite-skew clients can temporarily fall outside the two listed
-            // buckets. Skip edge LISTs, renew the lease, and retain the arm cutoff.
-            // A census crossing the boundary also cannot supply a new cutoff.
-            roster.settled = false;
-            roster.trim = None;
-            self.history.clear();
-            self.pending_history.clear();
-            self.pending_history_epoch = None;
-        }
-        let published = self.replace(&roster, Some(&previous.version)).await?;
-        if let Some(observed) = &published {
-            tracing::debug!(tracked = observed.roster.counts.tracked, active = observed.roster.counts.active,
-                population = ?observed.roster.population.as_ref().map(Population::estimate),
-                settled = observed.roster.settled,
-                slice_too_small = ?observed.roster.census_computed_at_ms.map(|_| {
-                    observed.roster.counts.tracked < u64::from(self.config.target()) * 4
-                }),
-                "sampling census published");
-            self.observed = Some(observed.clone());
-        }
-        self.leader = published;
-        self.apply_trim().await
-    }
-    async fn apply_trim(&mut self) -> Result<(), StoreError> {
-        let Some(observed) = &self.observed else {
-            return Ok(());
-        };
-        if expired(
-            observed,
-            &self.config,
-            self.store.as_ref(),
-            self.clock.now(),
-        ) {
-            return Ok(());
-        }
-        // A delayed server commit gets a fresh LastModified even when its
-        // census is old. Require the embedded census age independently.
-        let now = u128::from(millis(self.clock.now())?);
-        let skew = self.config.settings.max_clock_skew.as_millis() * 2;
-        let Some(computed) = observed.roster.census_computed_at_ms.map(u128::from) else {
-            return Ok(());
-        };
-        if computed > now + skew
-            || now > computed + self.config.settings.poll_interval.as_millis() * 3 + skew
+                .is_none_or(|o| expired(o, &self.config, self.store.as_ref(), self.clock.now()))
+            || timing
+                .end(trim.source_window)
+                .is_none_or(|end| now > end.saturating_add(timing.age))
         {
             return Ok(());
         }
-        let Some(trim) = &observed.roster.trim else {
-            return Ok(());
-        };
-        if self.state != MemberState::Active || trim.epoch <= self.last_trim_epoch {
-            return Ok(());
-        }
-        self.last_trim_epoch = trim.epoch;
         if trim.survival.includes(self.config.draw("trim", &trim.salt)) {
             if let Some(weights) = &self.weights {
                 weights.multiply(1.0 / trim.survival.probability())?;
@@ -1184,152 +732,375 @@ impl Worker {
             if let Some(weights) = &self.weights {
                 weights.stop();
             }
-            self.state = MemberState::Carrier;
-            self.written_buckets.clear();
             self.signal.send_replace(false);
-            tracing::info!(
-                rank = self.rank,
-                "sampling active process excluded by thinning"
-            );
-            let bucket = self.bucket()?;
-            self.terminal_until_bucket = Some(bucket.saturating_add(1));
-            self.refresh_member(true).await?;
-            // Carrier wins dedup even when removal fails. Never delete peers.
-            let old_keys: Vec<_> = self
-                .keys
-                .iter()
-                .flat_map(|((epoch, bucket), keys)| {
-                    keys.iter()
-                        .filter(|key| key.contains(".a."))
-                        .map(|key| (epoch.clone(), *bucket, key.clone()))
-                })
-                .collect();
-            for (epoch, old, key) in old_keys {
-                if let Err(error) = self.store.delete(&key).await {
-                    rate_limited!(Duration::from_secs(60), {
-                        tracing::warn!(%error, "sampling active member cleanup failed");
-                    });
-                } else if let Some(keys) = self.keys.get_mut(&(epoch, old)) {
-                    keys.remove(&key);
-                }
-            }
+            tracing::info!("sampling active process excluded by thinning");
         }
         Ok(())
     }
-    async fn poll(&mut self) -> Result<(), StoreError> {
-        // A failed/malformed/incompatible GET cannot be treated as missing. In
-        // particular, it never permits overwriting an incompatible namespace.
-        self.observed = match self.read_roster().await {
-            Ok(observed) => {
-                self.membership_allowed = true;
-                observed
+    async fn write_report(
+        &self,
+        channel: &str,
+        window: u64,
+        rank: u64,
+        cutoff: &Cutoff,
+    ) -> Result<(), StoreError> {
+        let timing = Timing::new(&self.config);
+        let deadline = timing
+            .end(window)
+            .and_then(|end| end.checked_add(timing.submission))
+            .ok_or_else(|| invalid("report deadline overflow"))?;
+        let key = census::report_key(&self.config, channel, window, rank, cutoff);
+        for attempt in 0..2 {
+            if !self.compatible || self.now()? >= deadline {
+                return Err(invalid("report submission deadline expired"));
             }
-            Err(error) => {
-                if matches!(error.kind(), StoreErrorKind::Unsupported {}) {
-                    self.membership_allowed = false;
-                    self.cleanup().await;
+            let remaining = Duration::from_millis(deadline - self.now()?);
+            let result = bounded(
+                timing.operation.min(remaining),
+                self.store.put(
+                    PutRequest::builder()
+                        .key(&key)
+                        .body(Bytes::new())
+                        .condition(WriteCondition::absent())
+                        .build(),
+                ),
+            )
+            .await;
+            match result {
+                Ok(PutOutcome::Stored { .. } | PutOutcome::PreconditionFailed {}) => return Ok(()),
+                Err(error) if attempt == 0 => {
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::debug!(%error, "retrying immutable sampling report");
+                    });
                 }
-                return Err(error);
+                Err(error) => return Err(error),
             }
+        }
+        unreachable!("two report attempts return")
+    }
+    async fn reports(&mut self, now: u64) -> Result<(), StoreError> {
+        let timing = Timing::new(&self.config);
+        let Some(plan) = &mut self.plan else {
+            return Ok(());
         };
-        // New epoch eligibility is handled immediately, rather than waiting for
-        // this process's next bucket heartbeat offset.
-        self.refresh_member(false).await?;
-        if self.leader.as_ref().is_some_and(|leader| {
-            self.observed.as_ref().is_none_or(|current| {
-                current.version != leader.version || current.roster.holder != self.invocation_id
-            })
-        }) {
-            self.leader = None;
+        let census = if !plan.census_done && now >= plan.census_at {
+            plan.census_done = true;
+            (now <= plan.census_at.saturating_add(timing.dispatch)
+                && plan.cutoff.includes(plan.census_rank))
+            .then(|| (plan.window, plan.census_rank, plan.cutoff.clone()))
+        } else {
+            None
+        };
+        let profiler = if !plan.profiler_done && now >= plan.profiler_at {
+            plan.profiler_done = true;
+            (now <= plan.profiler_at.saturating_add(timing.dispatch) && *self.signal.borrow())
+                .then_some((plan.window, plan.profiler_rank))
+        } else {
+            None
+        };
+        if census.is_some() || profiler.is_some() {
+            // This GET only caches future control. Transport failure cannot suppress an eligible report.
+            if let Err(error) = self.poll().await {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(%error, "sampling report control read failed");
+                });
+            }
         }
-        if self.leader.is_none()
-            && let Some(current) = &self.observed
-            && current.roster.holder == self.invocation_id
-            && !expired(current, &self.config, self.store.as_ref(), self.clock.now())
+        let mut failure = None;
+        if self.compatible {
+            if let Some((window, rank, cutoff)) = census
+                && let Err(error) = self.write_report("census", window, rank, &cutoff).await
+            {
+                failure = Some(error);
+            }
+            if let Some((window, rank)) = profiler
+                && let Err(error) = self
+                    .write_report("profilers", window, rank, &Cutoff(None))
+                    .await
+            {
+                failure = Some(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+    async fn leader_pass(&mut self) -> Result<(), StoreError> {
+        let Some(previous) = self.leader.take() else {
+            return Ok(());
+        };
+        // A GET reconciles uncertain CAS and fences every publication on this same object.
+        let Some(current) = self.read_roster().await? else {
+            return Ok(());
+        };
+        if current.version != previous.version || current.roster.holder != self.config.invocation_id
         {
-            // A GET reconciles an acknowledged-lost CAS on the same object.
-            self.leader = Some(current.clone());
-            self.history.clear();
-            self.pending_history.clear();
-            self.pending_history_epoch = None;
+            self.learn(Some(current), self.now()?);
+            return Ok(());
         }
-        self.apply_trim().await?;
-        if self.leader.is_none() {
-            self.election().await?;
+        let now = self.now()?;
+        let timing = Timing::new(&self.config);
+        let window = timing.completed(now);
+        let mut roster = current.roster.clone();
+        roster.promote(now / timing.width);
+        roster.mutate(&self.config.invocation_id)?;
+        let assess = window.filter(|window| roster.last_window.is_none_or(|last| *window > last));
+        if let Some(window) = assess {
+            roster.last_window = Some(window);
+        }
+        let Some(reserved) = self.replace(&roster, Some(&current.version)).await? else {
+            return Ok(());
+        };
+        self.leader = Some(reserved.clone());
+        self.observed = Some(reserved.clone());
+        let Some(window) = assess else {
+            return Ok(());
+        };
+        // Each channel owns its own finite page budget, including when its peer fails.
+        let census = census::observe(
+            self.store.as_ref(),
+            &self.config,
+            "census",
+            window,
+            self.config.target() as usize * 32,
+            timing.operation,
+        )
+        .await;
+        let profilers = census::observe(
+            self.store.as_ref(),
+            &self.config,
+            "profilers",
+            window,
+            (self.config.target() as usize * 4).max(64),
+            timing.operation,
+        )
+        .await;
+        let finished = self.now()?;
+        let mut result = reserved.roster.clone();
+        result.promote(finished / timing.width);
+        result.mutate(&self.config.invocation_id)?;
+        update(
+            &mut result,
+            &self.config,
+            window,
+            finished,
+            census,
+            profilers,
+        );
+        let published = self.replace(&result, Some(&reserved.version)).await?;
+        self.leader = published.clone();
+        if let Some(published) = published {
+            self.learn(Some(published), finished);
         }
         Ok(())
     }
     async fn run(&mut self) {
-        let mut next_poll = Instant::now();
-        let mut next_pass = Instant::now();
         loop {
-            let operation_budget = self.config.settings.poll_interval;
-            if let Err(error) = bounded(operation_budget, self.refresh_member(false)).await {
+            let now = match self.now() {
+                Ok(now) => now,
+                Err(error) => {
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::error!(%error, "invalid sampling clock");
+                    });
+                    return;
+                }
+            };
+            if let Err(error) = self.ensure_plan(now) {
                 rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(%error, "sampling membership refresh failed");
+                    tracing::warn!(%error, "sampling boundary control failed");
                 });
             }
-            if Instant::now() >= next_poll {
-                if let Err(error) = bounded(operation_budget, self.poll()).await {
-                    self.leader = None;
+            if now >= self.next_poll_ms {
+                // Advance the original fixed-phase schedule before doing work. GETs never reset it.
+                let period = Timing::new(&self.config).poll;
+                self.next_poll_ms += ((now - self.next_poll_ms) / period + 1) * period;
+                if let Err(error) = self.poll().await {
                     rate_limited!(Duration::from_secs(60), {
-                        tracing::warn!(%error, "sampling roster poll/election failed");
+                        tracing::warn!(%error, "sampling scheduled control read failed");
                     });
                 }
-                next_poll = Instant::now() + Duration::from_millis(self.poll_ms);
             }
-            if self.leader.is_some() && Instant::now() >= next_pass {
-                if let Err(error) = bounded(operation_budget, self.leader_pass()).await {
+            if let Err(error) = self.reports(self.now().unwrap_or(now)).await {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(%error, "sampling report failed");
+                });
+            }
+            if let Err(error) = self.election().await {
+                self.leader = None;
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(%error, "sampling election failed");
+                });
+            }
+            if self.leader.is_some() && self.now().is_ok_and(|now| now >= self.next_pass_ms) {
+                if let Err(error) = self.leader_pass().await {
                     self.leader = None;
                     rate_limited!(Duration::from_secs(60), {
-                        tracing::warn!(%error, "sampling leader census failed");
+                        tracing::warn!(%error, "sampling leader round failed");
                     });
                 }
-                let cadence = self.pass_cadence();
-                next_pass = Instant::now() + cadence;
-            }
-            let mut next = next_poll;
-            if self.leader.is_some() {
-                next = next.min(next_pass);
-            }
-            // Wake at the per-host heartbeat offset, even when polls are spread.
-            if let Ok(now) = millis(self.clock.now()) {
-                let width = self.config.settings.bucket_width.as_millis() as u64;
-                let bucket = now / width;
-                let due = bucket * width + self.offset_ms;
-                let due = if due <= now {
-                    due.saturating_add(width)
+                let timing = Timing::new(&self.config);
+                let now = self.now().unwrap_or(now);
+                let close = now / timing.width * timing.width + timing.closure;
+                self.next_pass_ms = if close > now {
+                    close
                 } else {
-                    due
+                    close.saturating_add(timing.width)
                 };
-                next = next.min(Instant::now() + Duration::from_millis(due - now));
+                // Short private leader cadences can renew the lease between closures.
+                self.next_pass_ms = self
+                    .next_pass_ms
+                    .min(now.saturating_add(self.config.settings.poll_interval.as_millis() as u64));
             }
-            tokio::time::sleep_until(next).await;
+            let now = self.now().unwrap_or(now);
+            let timing = Timing::new(&self.config);
+            let mut next = self
+                .next_poll_ms
+                .min((now / timing.width + 1) * timing.width);
+            if let Some(plan) = &self.plan {
+                if !plan.census_done {
+                    next = next.min(plan.census_at);
+                }
+                if !plan.profiler_done {
+                    next = next.min(plan.profiler_at);
+                }
+            }
+            if self.leader.is_some() {
+                next = next.min(self.next_pass_ms);
+            }
+            tokio::time::sleep(Duration::from_millis(next.saturating_sub(now).max(1))).await;
         }
     }
-    async fn cleanup(&mut self) {
-        // Include a key whose PUT may be in flight when cancellation wins. The
-        // backend contract requires cancellation-safe operations; a late server
-        // commit is still bounded by bucket visibility and lifecycle expiration.
-        for key in self.keys.values().flat_map(|keys| keys.iter()) {
-            if let Err(error) = self.store.delete(key).await {
-                tracing::debug!(%error, "sampling member shutdown cleanup failed");
+}
+
+async fn replace(
+    config: &Config,
+    store: &dyn SamplingStore,
+    clock: &dyn Clock,
+    roster: &Roster,
+    previous: Option<&VersionToken>,
+) -> Result<Option<Observed>, StoreError> {
+    let key = format!("{}roster.json", config.pool_prefix());
+    let condition = previous.map_or_else(WriteCondition::absent, |v| {
+        WriteCondition::matching(v.clone())
+    });
+    let timeout = Timing::new(config).operation;
+    match bounded(
+        timeout,
+        store.put(
+            PutRequest::builder()
+                .key(&key)
+                .body(serialize(roster))
+                .condition(condition)
+                .build(),
+        ),
+    )
+    .await
+    {
+        Ok(PutOutcome::Stored { version }) => Ok(Some(Observed {
+            roster: roster.clone(),
+            version,
+            modified_at: clock.now(),
+        })),
+        Ok(PutOutcome::PreconditionFailed {}) => Ok(None),
+        Err(error) => {
+            // Cancelled writes may still commit. One readback reconciles the exact fresh revision.
+            match bounded(timeout, store.get(key)).await {
+                Ok(Some(object)) => {
+                    let observed = decode(object, config)?;
+                    if observed.roster.revision == roster.revision
+                        && observed.roster.holder == config.invocation_id
+                    {
+                        Ok(Some(observed))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                Ok(None) => Err(error),
+                Err(read_error) => Err(read_error),
             }
         }
     }
 }
-async fn bounded<T>(
+fn update(
+    roster: &mut Roster,
+    config: &Config,
+    window: u64,
+    now: u64,
+    census: Result<census::Sample, StoreError>,
+    profilers: Result<census::Sample, StoreError>,
+) {
+    let timing = Timing::new(config);
+    if let Ok(sample) = census {
+        let budget = config.target() as usize * 32;
+        let nominal = (sample.estimate > 0.0)
+            .then(|| Cutoff::from_probability(budget as f64 / sample.estimate));
+        let next = if sample.retained < budget / 2 {
+            Cutoff::threshold(
+                (roster.control.reporting.value() * 2)
+                    .min(SPACE)
+                    .max(nominal.as_ref().map_or(1, Cutoff::value)),
+            )
+        } else {
+            nominal.unwrap_or_else(|| roster.control.reporting.clone())
+        };
+        roster.next_control = Some(Control {
+            source_window: Some(window),
+            effective_window: now / timing.width + 1,
+            reporting: Cutoff::threshold(next.value().max(1)),
+        });
+        if sample.estimate > 0.0 {
+            roster.population = Some(Population {
+                window,
+                estimate: sample.estimate,
+                computed_ms: now,
+            });
+        }
+    } else if let Err(error) = census {
+        rate_limited!(Duration::from_secs(60), {
+            tracing::warn!(%error, window, "unusable completed population census");
+        });
+    }
+    match profilers {
+        Ok(sample)
+            if sample.estimate > f64::from(config.target().saturating_add(config.overshoot()))
+                && roster
+                    .trim
+                    .as_ref()
+                    .is_none_or(|t| window >= t.effective_window.saturating_add(6)) =>
+        {
+            let lead = timing.poll
+                + 2 * config.settings.max_clock_skew.as_millis() as u64
+                + timing.operation.as_millis() as u64;
+            roster.trim = Some(Trim {
+                epoch: roster.epoch,
+                salt: nonce(),
+                source_window: window,
+                effective_window: now.saturating_add(lead) / timing.width + 1,
+                created_ms: now,
+                survival: Cutoff::threshold(
+                    Cutoff::from_probability(f64::from(config.target()) / sample.estimate)
+                        .value()
+                        .max(1),
+                ),
+            });
+        }
+        Ok(_) => {}
+        Err(error) => {
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!(%error, window, "unusable completed profiler census");
+            });
+        }
+    }
+}
+pub(super) async fn bounded<T>(
     timeout: Duration,
     future: impl std::future::Future<Output = Result<T, StoreError>>,
 ) -> Result<T, StoreError> {
     tokio::time::timeout(timeout, future).await.map_err(|_| {
         StoreError::new(
             StoreErrorKind::unavailable(),
-            "sampling maintenance deadline expired",
+            "sampling operation deadline expired",
         )
     })?
 }
-
 #[cfg(all(test, not(shuttle)))]
 #[path = "tests.rs"]
 mod tests;

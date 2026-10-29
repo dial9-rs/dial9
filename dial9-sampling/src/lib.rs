@@ -70,8 +70,8 @@ struct InternalSettings {
     max_overshoot: Option<u32>,
     /// Polling interval for the leader to check the profiler roster
     poll_interval: Duration,
-    /// Membership bucket width; defaults to five minutes.
-    /// Must cover two polls plus twice the clock skew, and be at most one day.
+    /// Completed census window width; defaults to one minute.
+    /// Reporting, observation margins, and fixed roster polls derive from this width.
     bucket_width: Duration,
     /// Assumed maximum wall-clock skew; defaults to five seconds.
     ///
@@ -84,7 +84,7 @@ impl Default for InternalSettings {
         Self {
             max_overshoot: None,
             poll_interval: Duration::from_secs(60),
-            bucket_width: Duration::from_secs(300),
+            bucket_width: Duration::from_secs(60),
             max_clock_skew: Duration::from_secs(5),
         }
     }

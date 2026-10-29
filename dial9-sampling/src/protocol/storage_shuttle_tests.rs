@@ -145,22 +145,21 @@ dial9_core::shuttle_test! {
 
 dial9_core::shuttle_test! {
     default;
-    fn shuttle_restarted_process_membership_survives_old_cleanup() {
+    fn shuttle_immutable_window_reports_survive_process_exit() {
         let store = Arc::new(MemoryStore::new());
-        let old = "v3/members/pool/bootstrap/000001/0123456789abcdef.a.old-run";
-        let replacement = "v3/members/pool/bootstrap/000001/0123456789abcdef.a.new-run";
-        put(&store, old, "", WriteCondition::unconditional());
-        let cleanup_store = store.clone();
-        let cleanup = thread::spawn(move || {
-            block_on(cleanup_store.delete(old)).unwrap();
+        let first_key = "v3/census/pool/window=0000000000000001/0123456789abcdef.old-run.10000000000000000";
+        let second_key = "v3/census/pool/window=0000000000000001/0123456789abcdef.new-run.10000000000000000";
+        let first = store.clone();
+        let old_run = thread::spawn(move || {
+            put(&first, first_key, "", WriteCondition::absent());
         });
-        let replacement_store = store.clone();
-        let restart = thread::spawn(move || {
-            put(&replacement_store, replacement, "", WriteCondition::unconditional());
+        let second = store.clone();
+        let new_run = thread::spawn(move || {
+            put(&second, second_key, "", WriteCondition::absent());
         });
-        cleanup.join().unwrap();
-        restart.join().unwrap();
-        assert!(block_on(store.get(old.into())).unwrap().is_none());
-        assert!(block_on(store.get(replacement.into())).unwrap().is_some());
+        old_run.join().unwrap(); new_run.join().unwrap();
+        assert!(block_on(store.get(first_key.into())).unwrap().is_some());
+        assert!(block_on(store.get(second_key.into())).unwrap().is_some());
+        assert_eq!(store.objects().len(), 2);
     }
 }

@@ -1,4 +1,5 @@
 //! Sticky startup selection from one roster, maintained by an elected census leader.
+mod census;
 mod engine;
 mod rate_limit;
 pub(crate) use rate_limit::rate_limited;
@@ -7,6 +8,8 @@ mod storage_shuttle_tests;
 
 use crate::backend::SamplingStore;
 use crate::object_key::hive_escape;
+#[cfg(test)]
+pub(crate) use engine::{Clock, prepare_using};
 pub(crate) use engine::{DecisionReason, PreparedSampling, SamplingSession};
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
@@ -65,17 +68,6 @@ impl Config {
                 .expect("digest length"),
         )
     }
-    // The leader seals a fraction before choosing the next epoch's fresh ID.
-    // Rehashing avoids selecting a threshold from the same census ranks it measures.
-    fn reporting_rank(&self, epoch: &str) -> u64 {
-        let canonical =
-            serde_json::to_vec(&(self.rank(), "census", epoch)).expect("rank tuple serializes");
-        u64::from_be_bytes(
-            Sha256::digest(canonical)[..8]
-                .try_into()
-                .expect("digest length"),
-        )
-    }
     pub(crate) fn failure_decision(&self) -> bool {
         self.validate().is_ok() && self.selects(self.failure_cutoff())
     }
@@ -114,36 +106,22 @@ impl Config {
         if let StartupFailure::AssumePopulation { population: 0 } = self.if_failed {
             return Err("assumed population must be positive".into());
         }
-        // Whole milliseconds are the wire format. Bound all time arithmetic and
-        // leave a previous bucket visible while a delayed heartbeat is retried.
+        // Keep all wire times integral and all bounded work finite.
         if self.num_target_profilers > 10000
             || self.settings.poll_interval < Duration::from_millis(100)
-            || self.settings.poll_interval > Duration::from_secs(86400 / 3)
+            || self.settings.poll_interval > self.settings.bucket_width
+            || self.settings.bucket_width < Duration::from_secs(1)
             || self.settings.bucket_width > Duration::from_secs(86400)
-            || self.settings.bucket_width <= self.settings.max_clock_skew.saturating_mul(4)
-            || self.settings.bucket_width
-                < self
-                    .settings
-                    .poll_interval
-                    .saturating_mul(2)
-                    .saturating_add(self.settings.max_clock_skew.saturating_mul(2))
-            || !self
-                .settings
-                .poll_interval
-                .subsec_nanos()
-                .is_multiple_of(1_000_000)
-            || !self
-                .settings
-                .bucket_width
-                .subsec_nanos()
-                .is_multiple_of(1_000_000)
-            || !self
-                .settings
-                .max_clock_skew
-                .subsec_nanos()
-                .is_multiple_of(1_000_000)
+            || self.settings.max_clock_skew.saturating_mul(4) >= self.settings.bucket_width
+            || [
+                self.settings.poll_interval,
+                self.settings.bucket_width,
+                self.settings.max_clock_skew,
+            ]
+            .iter()
+            .any(|d| !d.subsec_nanos().is_multiple_of(1_000_000))
         {
-            return Err("num_target_profilers must be at most 10000; poll must be 100ms..8h; bucket must be <=1d and cover two polls plus clock margins; durations need whole milliseconds".into());
+            return Err("target must be at most 10000; leader cadence must be 100ms..window; window must be 1s..1d and exceed four clock skews; durations need whole milliseconds".into());
         }
         Ok(())
     }
@@ -158,8 +136,8 @@ impl Config {
     pub(crate) fn pool_prefix(&self) -> String {
         format!("v3/pools/{}", self.pool_path())
     }
-    fn members_prefix(&self) -> String {
-        format!("v3/members/{}", self.pool_path())
+    fn report_prefix(&self, channel: &str, window: u64) -> String {
+        format!("v3/{channel}/{}window={window:016x}/", self.pool_path())
     }
     fn overshoot(&self) -> u32 {
         self.settings
