@@ -44,7 +44,7 @@ use dial9::{AttachedRuntime, Dial9HandleTokioExt, Dial9TokioHandle, DiskBuffer, 
 
 fn my_config() -> io::Result<AttachedRuntime> {
     let writer = DiskBuffer::builder()
-        .base_path("/tmp/my_traces")
+        .base_path("/var/tmp/my_traces")
         .max_total_size(5 * 1024 * 1024)   // keep at most 5 MiB on disk
         .max_file_size(1024 * 1024)     // optional: defaults to min(100 MiB, max_total_size / 4)
         .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
@@ -127,7 +127,7 @@ async fn main() {
 | Name | Default | Meaning |
 | --- | --- | --- |
 | `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
-| `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. Each process writes into its own `{boot_id}/` subdirectory, where `boot_id` is `{4-alpha}-{pid}`. |
+| `DIAL9_TRACE_DIR` | `/var/tmp/dial9-traces` | Directory for rotated trace segments. Each process writes into its own `{boot_id}/` subdirectory, where `boot_id` is `{4-alpha}-{pid}`. |
 | `DIAL9_ROTATION_SECS` | `60` | Rotation period in seconds, measured monotonically from writer start. |
 | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
 | `DIAL9_MAX_FILE_SIZE_MB` | `min(100, total / 4)` | Per-file trace segment size in MiB. |
@@ -572,7 +572,7 @@ use dial9::{TaskDumpConfig, TokioAttachOptions};
 
 fn my_config() -> io::Result<AttachedRuntime> {
     let writer = DiskBuffer::builder()
-        .base_path("/tmp/dial9")
+        .base_path("/var/tmp/dial9")
         .max_total_size(64 * 1024 * 1024)
         .build()
         .expect("build trace writer");
@@ -740,7 +740,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .build();
 
     let writer = DiskBuffer::builder()
-        .base_path("/tmp/dial9")
+        .base_path("/var/tmp/dial9")
         .max_total_size(1 << 30)
         .build()
         .expect("build trace writer");
@@ -777,7 +777,7 @@ use std::time::Duration;
 
 # fn main() -> std::io::Result<()> {
 let writer = DiskBuffer::builder()
-    .base_path("/tmp/dial9")
+    .base_path("/var/tmp/dial9")
     .max_total_size(1 << 30)
     .build()?;
 let s3_config = S3Config::builder()
@@ -905,7 +905,7 @@ dial9 writes the trace in segments: every `rotation_period`, or once a file hits
 use dial9::{DiskBuffer, recorder_or_disabled};
 
 let writer = DiskBuffer::builder()
-    .base_path("/tmp/my_traces")
+    .base_path("/var/tmp/my_traces")
     .max_total_size(64 * 1024 * 1024)
     .build();
 
