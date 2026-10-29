@@ -1419,3 +1419,76 @@ async fn a_window_dimension_cannot_contaminate_another_pools_observation(#[case]
         assert_eq!(observed.estimate, 1.0);
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_previous_wire_schema_is_refused_before_deserializing_its_different_body() {
+    let store = store_at(600_000);
+    let policy = config_for(15, "schema-upgrade");
+    let body = serde_json::json!({
+        "policy": {"schema":4,"pool":policy.pool_path(),"target":15,
+            "max_overshoot":12,"poll_ms":60000,"bucket_ms":60000,"skew_ms":5000},
+        "holder":nonce(),"revision":nonce(),"epoch":1,"settled":false,
+        "reporting":{"id":"bootstrap","cutoff":null},"pending":null,"outside_budget":0,
+        "population":null,"trim":null,
+        "counts":{"observed":0,"tracked":0,"active":0,"carriers":0,"unarmed":0},
+        "census_computed_at_ms":null
+    });
+    store
+        .put(
+            PutRequest::builder()
+                .key(format!("{}roster.json", policy.pool_prefix()))
+                .body(serde_json::to_vec(&body).unwrap().into())
+                .build(),
+        )
+        .await
+        .unwrap();
+    let prepared = prepare_using(policy, store.clone(), Duration::from_secs(1), store).await;
+    assert_eq!(
+        prepared.reason,
+        DecisionReason::IncompatiblePolicy,
+        "known previous schema should not run uncoordinated report maintenance"
+    );
+    assert!(prepared.session.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unknown_wire_schema_is_refused_without_understanding_its_body() {
+    let store = store_at(600_000);
+    let policy = config_for(15, "future-schema");
+    let body = serde_json::json!({
+        "policy": {"schema":6},
+        "future-format": ["intentionally not a schema5 roster"]
+    });
+    store
+        .put(
+            PutRequest::builder()
+                .key(format!("{}roster.json", policy.pool_prefix()))
+                .body(serde_json::to_vec(&body).unwrap().into())
+                .build(),
+        )
+        .await
+        .unwrap();
+    let prepared = prepare_using(policy, store.clone(), Duration::from_secs(1), store).await;
+    assert_eq!(prepared.reason, DecisionReason::IncompatiblePolicy);
+    assert!(prepared.session.is_none());
+}
+
+#[rstest::rstest]
+#[case(serde_json::json!({"policy": {}}))]
+#[case(serde_json::json!({"policy": {"schema": "5"}}))]
+#[case(serde_json::json!({"policy": {"schema": null}}))]
+#[case(serde_json::json!({"policy": {"schema": 5.5}}))]
+#[test]
+fn a_malformed_schema_discriminator_is_invalid_instead_of_unsupported(
+    #[case] body: serde_json::Value,
+) {
+    let object = StoredObject::builder()
+        .body(serde_json::to_vec(&body).unwrap().into())
+        .version(VersionToken::new("malformed"))
+        .modified_at(UNIX_EPOCH)
+        .build();
+    let error = decode(object, &config_for(15, "malformed-schema"))
+        .err()
+        .unwrap();
+    assert!(matches!(error.kind(), StoreErrorKind::InvalidResponse {}));
+}

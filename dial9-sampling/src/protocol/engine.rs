@@ -139,6 +139,8 @@ fn serialize(value: &impl Serialize) -> Bytes {
     Bytes::from(serde_json::to_vec(value).expect("sampling record serializes"))
 }
 
+const SCHEMA: u32 = 5;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Policy {
     schema: u32,
@@ -152,7 +154,7 @@ struct Policy {
 impl Policy {
     fn new(config: &Config) -> Self {
         Self {
-            schema: 5,
+            schema: SCHEMA,
             pool: config.pool_path(),
             target: config.target(),
             max_overshoot: config.overshoot(),
@@ -346,6 +348,22 @@ struct Observed {
     modified_at: SystemTime,
 }
 fn decode(object: StoredObject, config: &Config) -> Result<Observed, StoreError> {
+    #[derive(Deserialize)]
+    struct PolicySchema {
+        schema: u32,
+    }
+    #[derive(Deserialize)]
+    struct Header {
+        policy: PolicySchema,
+    }
+    // Another schema may have an entirely different body and policy layout.
+    let header: Header = serde_json::from_slice(object.body()).map_err(invalid)?;
+    if header.policy.schema != SCHEMA {
+        return Err(StoreError::new(
+            StoreErrorKind::unsupported(),
+            "incompatible sampling roster schema",
+        ));
+    }
     let roster: Roster = serde_json::from_slice(object.body()).map_err(invalid)?;
     roster.validate(config)?;
     Ok(Observed {
