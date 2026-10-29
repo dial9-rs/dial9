@@ -9,7 +9,7 @@ use crate::{
 use shuttle::{future::block_on, sync::mpsc, thread};
 use std::sync::Arc;
 
-const ROSTER: &str = "v2/pools/pool/roster.json";
+const ROSTER: &str = "v3/pools/pool/roster.json";
 
 fn put(store: &MemoryStore, key: &str, body: &str, condition: WriteCondition) -> VersionToken {
     match block_on(
@@ -147,8 +147,8 @@ dial9_core::shuttle_test! {
     default;
     fn shuttle_restarted_process_membership_survives_old_cleanup() {
         let store = Arc::new(MemoryStore::new());
-        let old = "v2/members/pool/000001/0123456789abcdef.a.old-run";
-        let replacement = "v2/members/pool/000001/0123456789abcdef.a.new-run";
+        let old = "v3/members/pool/bootstrap/000001/0123456789abcdef.a.old-run";
+        let replacement = "v3/members/pool/bootstrap/000001/0123456789abcdef.a.new-run";
         put(&store, old, "", WriteCondition::unconditional());
         let cleanup_store = store.clone();
         let cleanup = thread::spawn(move || {

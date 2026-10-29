@@ -8,7 +8,7 @@ use bytes::Bytes;
 
 fn sampling() -> Sampling {
     Sampling::builder()
-        .scope("historical/processes")
+        .add_dimension("environment", "historical")
         .target(15)
         .if_failed(StartupFailure::disabled())
         .build()
@@ -21,7 +21,7 @@ fn observation(
     slice_bits: u32,
 ) -> CensusObservation {
     CensusObservation {
-        schema: 1,
+        schema: 2,
         pool: sampling.pool_hash(),
         started_ms: completed_ms - 1,
         completed_ms,
@@ -29,7 +29,9 @@ fn observation(
         bucket_ms: 300_000,
         skew_ms: 0,
         timestamp_uncertainty_ms: 0,
-        slice_bits,
+        reporting_epoch: "bootstrap".into(),
+        reporting_cutoff: (slice_bits > 0).then(|| 1u64 << (64 - slice_bits)),
+        observed: tracked,
         tracked,
         admitted: tracked / 2,
         carriers: 0,
@@ -155,4 +157,37 @@ async fn malformed_history_and_storage_failure_are_errors_not_partial_estimates(
     assert!(query().await.is_err());
     store.set_unavailable(true);
     assert!(query().await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn historical_population_uses_the_fraction_and_epoch_at_the_observation() {
+    let store = MemoryStore::new();
+    let sampling = sampling();
+    let mut old = observation(&sampling, 1000, 50, 1);
+    old.reporting_epoch = ulid::Ulid::new().to_string();
+    // Include ten profiling processes outside the census; these must not
+    // inflate the denominator used to estimate the total population.
+    old.observed = 60;
+    old.admitted += 10;
+    put(&store, &old).await;
+    let mut new = observation(&sampling, 2000, 25, 2);
+    new.reporting_epoch = ulid::Ulid::new().to_string();
+    put(&store, &new).await;
+    for (time, expected_epoch, fraction) in [
+        (1500, &old.reporting_epoch, 0.5),
+        (2500, &new.reporting_epoch, 0.25),
+    ] {
+        let estimate = sampling
+            .population_at()
+            .store(&store)
+            .at(UNIX_EPOCH + Duration::from_millis(time))
+            .max_age(Duration::from_secs(1))
+            .call()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&estimate.reporting_epoch, expected_epoch);
+        assert_eq!(estimate.tracking_probability, fraction);
+        assert_eq!(estimate.population, 100.0);
+    }
 }

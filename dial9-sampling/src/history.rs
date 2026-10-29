@@ -23,7 +23,9 @@ const DAY_MS: u64 = 86_400_000;
 ///
 /// This is evidence for a population estimate, rather than an exact live count
 /// or a profiling inclusion probability. Gaussian uncertainty covers only
-/// independent hash sampling of visible membership.
+/// independent hash sampling of visible membership at a fixed epoch fraction.
+/// The fraction is chosen before that epoch's fresh hash salt. Membership
+/// delivery, departures, and selecting an epoch's promotion time add error.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct PopulationEstimate {
@@ -39,6 +41,8 @@ pub struct PopulationEstimate {
     pub max_clock_skew: Duration,
     /// Backend timestamp uncertainty used by the census guards.
     pub timestamp_uncertainty: Duration,
+    /// Reporting policy whose membership was enumerated.
+    pub reporting_epoch: String,
     /// Number of distinct tracked process/container runs observed.
     pub tracked: u64,
     /// Fraction of independent identities eligible for census tracking.
@@ -57,7 +61,7 @@ pub struct PopulationEstimate {
     pub carriers: u64,
     /// Members whose frozen startup choice was profiling off.
     pub unarmed: u64,
-    /// Tracked members with zero startup profiling probability.
+    /// Visible members with zero startup profiling probability.
     ///
     /// A positive count exposes a cohort that traces cannot reconstruct.
     pub no_support: u64,
@@ -75,7 +79,9 @@ pub(crate) struct CensusObservation {
     pub(crate) bucket_ms: u64,
     pub(crate) skew_ms: u64,
     pub(crate) timestamp_uncertainty_ms: u64,
-    pub(crate) slice_bits: u32,
+    pub(crate) reporting_epoch: String,
+    pub(crate) reporting_cutoff: Option<u64>,
+    pub(crate) observed: u64,
     pub(crate) tracked: u64,
     pub(crate) admitted: u64,
     pub(crate) carriers: u64,
@@ -84,7 +90,7 @@ pub(crate) struct CensusObservation {
 }
 
 pub(crate) fn prefix(pool: &str, day: u64) -> String {
-    format!("v2/census/{pool}/{day:016}/")
+    format!("v3/census/{pool}/{day:016}/")
 }
 
 impl CensusObservation {
@@ -100,9 +106,11 @@ impl CensusObservation {
     fn validate(&self, pool: &str, day: u64) -> Result<(), StoreError> {
         let guard = u128::from(self.skew_ms) * 2 + u128::from(self.timestamp_uncertainty_ms);
         let width = u128::from(self.bucket_ms);
-        if self.schema != 1
+        if self.schema != 2
             || self.pool != pool
-            || self.slice_bits > 58
+            || self.reporting_cutoff == Some(0)
+            || (self.reporting_epoch != "bootstrap"
+                && self.reporting_epoch.parse::<ulid::Ulid>().is_err())
             || self.bucket_ms == 0
             || self.started_ms > self.completed_ms
             || self.completed_ms / DAY_MS != day
@@ -120,7 +128,8 @@ impl CensusObservation {
                 .admitted
                 .checked_add(self.carriers)
                 .and_then(|n| n.checked_add(self.unarmed))
-                != Some(self.tracked)
+                != Some(self.observed)
+            || self.tracked > self.observed
         {
             return Err(invalid("invalid retained census observation"));
         }
@@ -128,8 +137,10 @@ impl CensusObservation {
     }
 
     fn estimate(&self, requested_ms: u64) -> PopulationEstimate {
-        let probability = 2.0_f64.powi(-(self.slice_bits as i32));
-        let standard_error = (self.slice_bits == 0 || self.tracked >= 30)
+        let probability = self
+            .reporting_cutoff
+            .map_or(1.0, |cutoff| cutoff as f64 / (1u128 << 64) as f64);
+        let standard_error = (probability == 1.0 || self.tracked >= 30)
             .then(|| (self.tracked as f64 * (1.0 - probability)).sqrt() / probability);
         PopulationEstimate {
             observation_started_at: UNIX_EPOCH + Duration::from_millis(self.started_ms),
@@ -138,6 +149,7 @@ impl CensusObservation {
             bucket_width: Duration::from_millis(self.bucket_ms),
             max_clock_skew: Duration::from_millis(self.skew_ms),
             timestamp_uncertainty: Duration::from_millis(self.timestamp_uncertainty_ms),
+            reporting_epoch: self.reporting_epoch.clone(),
             tracked: self.tracked,
             tracking_probability: probability,
             population: self.tracked as f64 / probability,
@@ -159,7 +171,7 @@ impl Sampling {
     /// Reads the latest complete census ending at or before a requested time.
     ///
     /// Call as `sampling.population_at().store(&store).at(time).max_age(age).call().await`.
-    /// Scope and dimensions identify the pool; the historical record supplies
+    /// Storage namespace and dimensions identify the pool; the historical record supplies
     /// its tracking fraction. `max_age` explicitly limits extrapolation and
     /// storage work. No history or no sufficiently recent census returns `None`.
     ///

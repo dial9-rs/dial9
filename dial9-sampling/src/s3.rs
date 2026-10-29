@@ -3,26 +3,127 @@ use crate::backend::{
     ContinuationToken, ListPage, ListRequest, ListedObject, PutOutcome, PutRequest, SamplingStore,
     StoreError, StoreErrorKind, StoreFuture, StoredObject, VersionToken, WriteCondition,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use dial9_destinations_s3::S3Config;
+use sha2::{Digest, Sha256};
+use std::{
+    io,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 /// Native S3 implementation of the sampler's conditional storage primitives.
 ///
-/// Supply an SDK client and bucket. The prefix defaults to `_dial9_sampling/`
-/// and can be overridden; an explicit prefix is used verbatim and should end
-/// in `/`. Its lifecycle and IAM rules must preserve the shared roster while
-/// permitting GET, conditional PUT, LIST and membership DELETE. Unordered
-/// directory-bucket listings are supported.
-#[derive(Clone, Debug, bon::Builder)]
+/// Reuses the recorder's [`S3Config`], including its bucket, prefix and service.
+/// Coordination keys live below `{prefix}/_dial9_sampling/service={hash}/`;
+/// configured services are isolated without a caller-supplied sampling scope.
+/// Initialize inside [`crate::Sampling::with_storage`] so SDK resources belong
+/// to the sampler's long-lived runtime.
+///
+/// Lifecycle and IAM rules must preserve shared rosters while permitting GET,
+/// conditional PUT, LIST and membership DELETE. Unordered directory-bucket
+/// listings are supported.
+#[derive(Clone, Debug)]
 pub struct S3SamplingStore {
     client: aws_sdk_s3::Client,
-    #[builder(into)]
     bucket: String,
-    #[builder(default = "_dial9_sampling/".to_string(), into)]
     prefix: String,
 }
+
+#[bon::bon]
 impl S3SamplingStore {
+    /// Initializes storage using the trace uploader's configuration.
+    ///
+    /// An optional SDK client preserves custom credential and endpoint setup.
+    /// Construct it inside the storage future. Otherwise initialization uses
+    /// the default AWS configuration chain and the config's attempt timeout.
+    /// An explicit config region is used directly; otherwise `HeadBucket`
+    /// discovers the region, including redirect response headers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for blank bucket/service configuration or when bucket
+    /// region discovery fails or omits the region. The surrounding sampling
+    /// startup budget bounds this asynchronous initialization.
+    #[builder(finish_fn = build)]
+    pub async fn builder(config: S3Config, client: Option<aws_sdk_s3::Client>) -> io::Result<Self> {
+        if config.bucket().trim().is_empty() || config.service_name().trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "S3 bucket and service_name must be nonblank",
+            ));
+        }
+        if config
+            .region()
+            .is_some_and(|region| region.trim().is_empty())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "S3 region must be nonblank when configured",
+            ));
+        }
+        let bootstrap = match client {
+            Some(client) => client,
+            None => {
+                let timeout = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                    .operation_attempt_timeout(config.operation_attempt_timeout())
+                    .build();
+                let region = aws_config::meta::region::RegionProviderChain::first_try(
+                    config
+                        .region()
+                        .map(|region| aws_sdk_s3::config::Region::new(region.to_owned())),
+                )
+                .or_default_provider()
+                // The bootstrap endpoint is only used for region discovery.
+                .or_else("us-east-1");
+                let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .region(region)
+                    .timeout_config(timeout)
+                    .load()
+                    .await;
+                aws_sdk_s3::Client::new(&sdk)
+            }
+        };
+        let region = match config.region() {
+            Some(region) => region.to_owned(),
+            None => bucket_region(&bootstrap, config.bucket()).await?,
+        };
+        let client = aws_sdk_s3::Client::from_conf(
+            bootstrap
+                .config()
+                .to_builder()
+                .region(aws_sdk_s3::config::Region::new(region))
+                .build(),
+        );
+        let sampling_prefix = match config.prefix() {
+            Some(prefix) => format!("{prefix}/_dial9_sampling/"),
+            None => "_dial9_sampling/".to_owned(),
+        };
+        let service = format!("{:x}", Sha256::digest(config.service_name().as_bytes()));
+        Ok(Self {
+            client,
+            bucket: config.bucket().to_owned(),
+            prefix: format!("{sampling_prefix}service={service}/"),
+        })
+    }
+
     fn key(&self, key: &str) -> String {
         format!("{}{key}", self.prefix)
+    }
+}
+
+async fn bucket_region(client: &aws_sdk_s3::Client, bucket: &str) -> io::Result<String> {
+    let response = client.head_bucket().bucket(bucket).send().await;
+    let region = match &response {
+        Ok(response) => response.bucket_region(),
+        Err(error) => error
+            .raw_response()
+            .and_then(|response| response.headers().get("x-amz-bucket-region")),
+    };
+    match region.filter(|region| !region.trim().is_empty()) {
+        Some(region) => Ok(region.to_owned()),
+        None => Err(io::Error::other(match response {
+            Ok(_) => "S3 HeadBucket omitted the bucket region".to_owned(),
+            Err(error) => error.to_string(),
+        })),
     }
 }
 fn invalid(message: &str) -> StoreError {

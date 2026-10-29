@@ -2,6 +2,7 @@ use super::*;
 use crate::backend::{ListPage, StoreFuture};
 use crate::protocol::StartupFailure;
 use crate::test_store::MemoryStore;
+use sha2::Digest;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 impl Clock for MemoryStore {
@@ -19,17 +20,21 @@ async fn prepare(policy: &Config, store: Arc<MemoryStore>) -> PreparedSampling {
     .await
 }
 
-fn config(target: u32, host: &str) -> Config {
-    crate::Sampling::builder()
-        .scope("fleet/prod")
-        .host_id(host)
+fn config(target: u32, run: &str) -> Config {
+    let mut policy = crate::Sampling::builder()
+        .add_dimension("environment", "prod")
         .target(target)
         .poll_interval(Duration::from_secs(1))
         .bucket_width(Duration::from_secs(10))
         .max_clock_skew(Duration::ZERO)
         .if_failed(StartupFailure::assume_population(u64::from(target.max(1))))
         .build()
-        .policy()
+        .policy();
+    let entropy: [u8; 16] = sha2::Sha256::digest(run.as_bytes())[..16]
+        .try_into()
+        .unwrap();
+    policy.invocation_id = ulid::Ulid::from(u128::from_be_bytes(entropy)).to_string();
+    policy
 }
 async fn settle_time(seconds: u64) {
     for _ in 0..seconds {
@@ -64,15 +69,15 @@ async fn publish(
 async fn seed(store: &MemoryStore, config: &Config, population: u64) -> Roster {
     let now = millis(store.now()).unwrap();
     let mut roster = Roster::initial(config, &nonce());
-    roster.cutoff_settled = true;
     roster.settled = true;
-    roster.arm_cutoff = Cutoff::threshold(if population == 0 {
-        config.tracked_limit()
-    } else {
-        (u128::from(config.target()) << 64) / u128::from(population)
+    roster.population = (population > 0).then(|| Population {
+        reporting: roster.reporting.clone(),
+        reporters: population,
+        computed_ms: now,
     });
     roster.census_computed_at_ms = Some(now);
     roster.counts = Counts {
+        observed: population,
         tracked: population,
         active: 0,
         carriers: 0,
@@ -283,8 +288,6 @@ async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
         .collect();
     let mut roster = Roster::initial(&policies[0], &nonce());
     roster.epoch = 1;
-    roster.cutoff_settled = true;
-    roster.arm_cutoff = Cutoff(None);
     roster.census_computed_at_ms = Some(millis(store.now()).unwrap());
     roster.trim = Some(Trim {
         epoch: 1,
@@ -319,7 +322,6 @@ async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
         .unwrap();
     let mut roster: Roster = serde_json::from_slice(object.body()).unwrap();
     roster.trim = None;
-    roster.arm_cutoff = Cutoff(None);
     roster.revision = nonce();
     store
         .put(
@@ -356,13 +358,15 @@ async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn old_settled_cutoff_remains_usable_without_claiming_a_current_bound() {
+async fn expired_population_observation_uses_the_startup_failure_policy() {
     let store = Arc::new(MemoryStore::new());
-    let policy = config(1, "node");
+    let mut policy = config(1, "node");
+    policy.if_failed = StartupFailure::disabled();
     seed(&store, &policy, 1).await;
     tokio::time::advance(Duration::from_secs(86400 * 30)).await;
     let node = prepare(&policy, store.clone()).await;
-    assert!(node.enabled);
+    assert!(!node.enabled);
+    assert_eq!(node.reason, DecisionReason::UnsettledRoster);
     node.into_session()
         .unwrap()
         .shutdown(Duration::from_secs(1))
@@ -389,9 +393,9 @@ async fn configuration_mismatch_never_overwrites_the_existing_roster() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn restart_invocation_ids_are_distinct_even_with_sticky_rank_and_delayed_cleanup() {
+async fn restart_runs_have_distinct_ranks_and_membership_despite_delayed_cleanup() {
     let store = Arc::new(MemoryStore::new());
-    let policy = config(15, "stable-host");
+    let policy = config(15, "first-run");
     let old = prepare(&policy, store.clone()).await;
     settle_time(1).await;
     let old_keys: Vec<_> = store
@@ -406,6 +410,7 @@ async fn restart_invocation_ids_are_distinct_even_with_sticky_rank_and_delayed_c
     let before = census(
         store.as_ref(),
         &policy,
+        &ReportingEpoch::bootstrap(),
         millis(store.now()).unwrap() / 10000,
     )
     .await
@@ -415,7 +420,7 @@ async fn restart_invocation_ids_are_distinct_even_with_sticky_rank_and_delayed_c
         2,
         "overlapping processes are counted separately"
     );
-    assert_eq!(before[0].rank, before[1].rank);
+    assert_ne!(before[0].rank, before[1].rank);
     old.into_session()
         .unwrap()
         .shutdown(Duration::from_secs(1))
@@ -426,6 +431,7 @@ async fn restart_invocation_ids_are_distinct_even_with_sticky_rank_and_delayed_c
     let after = census(
         store.as_ref(),
         &policy,
+        &ReportingEpoch::bootstrap(),
         millis(store.now()).unwrap() / 10000,
     )
     .await
@@ -452,10 +458,15 @@ async fn failed_cleanup_members_age_out_but_roster_is_never_deleted() {
     tokio::time::advance(Duration::from_secs(21)).await;
     let current = millis(store.now()).unwrap() / 10000;
     assert!(
-        census(store.as_ref(), &policy, current)
-            .await
-            .unwrap()
-            .is_empty()
+        census(
+            store.as_ref(),
+            &policy,
+            &ReportingEpoch::bootstrap(),
+            current
+        )
+        .await
+        .unwrap()
+        .is_empty()
     );
     assert!(
         store
@@ -583,7 +594,14 @@ async fn put_member(
     store
         .put(
             PutRequest::builder()
-                .key(member_key(policy, bucket, rank, &state, invocation_id))
+                .key(member_key(
+                    policy,
+                    "bootstrap",
+                    bucket,
+                    rank,
+                    &state,
+                    invocation_id,
+                ))
                 .body(Bytes::new())
                 .condition(WriteCondition::unconditional())
                 .build(),
@@ -618,7 +636,9 @@ async fn unordered_paginated_census_deduplicates_and_carrier_wins_same_bucket() 
         repeated_token: false,
         lists: AtomicU64::new(0),
     };
-    let result = census(&store, &policy, bucket).await.unwrap();
+    let result = census(&store, &policy, &ReportingEpoch::bootstrap(), bucket)
+        .await
+        .unwrap();
     assert_eq!(result.len(), 7);
     assert_eq!(
         result
@@ -656,7 +676,11 @@ async fn incomplete_or_looping_pagination_cannot_become_a_population(#[case] rep
         repeated_token: repeated,
         lists: AtomicU64::new(0),
     };
-    assert!(census(&store, &policy, bucket).await.is_err());
+    assert!(
+        census(&store, &policy, &ReportingEpoch::bootstrap(), bucket)
+            .await
+            .is_err()
+    );
     assert!(store.lists.load(Ordering::SeqCst) <= 4);
 }
 
@@ -675,20 +699,34 @@ fn count_cutoff_and_trim_survival_use_independent_probability_spaces() {
         })
         .collect();
     let mut history = VecDeque::from([8, 8, 8]);
-    compute(&mut roster, &policy, &members, &mut history, 1000);
-    assert_eq!(roster.arm_cutoff, Cutoff::threshold(3 * (1u128 << 64) / 8));
+    compute(&mut roster, &policy, &members, &mut history, 1000, 5000);
+    assert_eq!(
+        roster
+            .population
+            .as_ref()
+            .unwrap()
+            .admission(policy.target()),
+        Cutoff::threshold(3 * (1u128 << 64) / 8)
+    );
     assert_eq!(
         roster.trim.as_ref().unwrap().survival,
         Cutoff::threshold(3 * (1u128 << 64) / 8)
     );
     let salt = roster.trim.as_ref().unwrap().salt.clone();
-    compute(&mut roster, &policy, &members, &mut history, 2000);
+    compute(&mut roster, &policy, &members, &mut history, 2000, 5000);
     assert_eq!(
         roster.trim.as_ref().unwrap().salt,
         salt,
         "round held during follower grace"
     );
-    compute(&mut roster, &policy, &members[..3], &mut history, 2500);
+    compute(
+        &mut roster,
+        &policy,
+        &members[..3],
+        &mut history,
+        2500,
+        5000,
+    );
     assert!(
         roster.trim.is_none(),
         "healthy census clears ancestral thinning"
@@ -710,17 +748,17 @@ fn policy_namespace_and_rank_use_unambiguous_sorted_dimensions() {
 }
 
 #[test]
-fn sparse_census_uses_a_lower_population_assumption_and_default_tracks_all() {
-    assert_eq!(config(15, "node").slice_bits(), 0);
-    let mut policy = config(15, "node");
-    policy.minimum_population = 100000;
-    assert_eq!(policy.slice_bits(), 7);
-    for index in 0..100 {
-        policy.host_id = Some(format!("node-{index}"));
-        if !policy.tracked() {
-            assert!(!policy.failure_decision());
-        }
-    }
+fn fallback_admission_is_independent_of_reporting_eligibility() {
+    let policy = config(15, "node");
+    let reporting = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1)),
+    };
+    assert!(!reporting.cutoff.includes(policy.rank()));
+    assert!(
+        policy.failure_decision(),
+        "fallback probability one includes quiet processes"
+    );
 }
 
 fn worker(policy: &Config, store: Arc<dyn SamplingStore>, clock: Arc<dyn Clock>) -> Worker {
@@ -861,7 +899,7 @@ async fn a_failed_second_page_cannot_publish_a_leader_count_or_cutoff() {
     assert!(leader.leader.is_none());
     let after = inner.get(key).await.unwrap().unwrap();
     assert_eq!(before.version(), after.version());
-    assert!(!decode(after, &policy).unwrap().roster.cutoff_settled);
+    assert!(decode(after, &policy).unwrap().roster.population.is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -953,8 +991,8 @@ fn empty_or_unstable_census_never_creates_a_usable_full_range_cutoff() {
     let policy = config(15, "node");
     let mut roster = Roster::initial(&policy, &nonce());
     let mut history = VecDeque::from([0, 0, 0]);
-    compute(&mut roster, &policy, &[], &mut history, 1000);
-    assert!(!roster.cutoff_settled);
+    compute(&mut roster, &policy, &[], &mut history, 1000, 5000);
+    assert!(roster.population.is_none());
     assert!(!roster.settled);
     assert!(roster.census_computed_at_ms.is_some());
     assert_eq!(
@@ -987,7 +1025,7 @@ async fn bucket_edge_renews_lease_without_listing_or_replacing_admission() {
         "lease-only CAS; no guarded LIST pages"
     );
     let roster = &leader.leader.as_ref().unwrap().roster;
-    assert!(!roster.cutoff_settled);
+    assert!(roster.population.is_none());
     assert!(roster.trim.is_none());
     assert_eq!(
         leader.pass_cadence(),
@@ -997,20 +1035,12 @@ async fn bucket_edge_renews_lease_without_listing_or_replacing_admission() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn known_policy_mismatch_does_not_register_wrong_slice_membership() {
+async fn known_policy_mismatch_does_not_register_membership() {
     let store = Arc::new(MemoryStore::new());
     let incumbent = config(15, "first");
     seed(&store, &incumbent, 100).await;
     let mut wrong = config(15, "other");
-    wrong.minimum_population = 100000;
-    // Pick a rank inside the new small slice so it reaches the startup GET.
-    for index in 0..10000 {
-        wrong.host_id = Some(format!("node-{index}"));
-        if wrong.tracked() {
-            break;
-        }
-    }
-    assert!(wrong.tracked());
+    wrong.max_overshoot = Some(99);
     let node = prepare(&wrong, store.clone()).await;
     assert_eq!(&node.reason, &DecisionReason::IncompatiblePolicy);
     assert!(node.into_session().is_none());
@@ -1065,7 +1095,496 @@ async fn a_newer_bucket_active_write_cannot_override_a_terminal_carrier_invocati
     // bucket after active was already written in the newer one.
     put_member(&store, &policy, bucket, 5, MemberState::Active, &id).await;
     put_member(&store, &policy, bucket - 1, 5, MemberState::Carrier, &id).await;
-    let members = census(store.as_ref(), &policy, bucket).await.unwrap();
+    let members = census(
+        store.as_ref(),
+        &policy,
+        &ReportingEpoch::bootstrap(),
+        bucket,
+    )
+    .await
+    .unwrap();
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].state, MemberState::Carrier);
+}
+
+#[test]
+fn census_excludes_extra_profilers_but_thinning_counts_them() {
+    let mut policy = config(3, "counter");
+    policy.max_overshoot = Some(0);
+    let mut roster = Roster::initial(&policy, &nonce());
+    roster.reporting = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1 << 63)),
+    };
+    roster.epoch = 1;
+    let members: Vec<_> = (0..10)
+        .map(|i| Member {
+            rank: if i < 2 { i } else { (1 << 63) + i },
+            invocation_id: nonce(),
+            bucket: 1,
+            state: MemberState::Active,
+        })
+        .collect();
+    let mut history = VecDeque::from([2, 2, 2]);
+    compute(&mut roster, &policy, &members, &mut history, 1000, 5000);
+    assert_eq!(roster.counts.tracked, 2);
+    assert_eq!(roster.counts.observed, 10);
+    assert_eq!(roster.counts.active, 10);
+    assert_eq!(roster.population.as_ref().unwrap().estimate(), 4.0);
+    assert_eq!(
+        roster
+            .population
+            .as_ref()
+            .unwrap()
+            .admission(3)
+            .probability(),
+        0.75,
+    );
+    assert_eq!(
+        roster.trim.as_ref().unwrap().survival,
+        Cutoff::threshold(3 * (1u128 << 64) / 10),
+    );
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test(start_paused = true)]
+async fn pending_epochs_change_reporting_without_rerolling_profiling(#[case] profiling: bool) {
+    let store = Arc::new(MemoryStore::new());
+    let policy = config(15, "new-reporter");
+    let mut roster = Roster::initial(&policy, &nonce());
+    // This run is outside the active census and inside the expanded pending census.
+    roster.reporting = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1)),
+    };
+    let (signal, _) = watch::channel(profiling);
+    let mut process = Worker::new(
+        policy.clone(),
+        store.clone(),
+        store.clone(),
+        None,
+        signal,
+        true,
+    );
+    #[cfg(feature = "dial9")]
+    if profiling {
+        process.weights = Some(crate::trace_weights::TraceWeights::new(
+            policy.pool_hash(),
+            10.0,
+        ));
+    }
+    publish(&store, &policy, &roster, WriteCondition::absent()).await;
+    process.observed = process.read_roster().await.unwrap();
+    let before = store.operation_count();
+    process.refresh_member(false).await.unwrap();
+    assert_eq!(store.operation_count() - before, u64::from(profiling));
+
+    let next = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(None),
+    };
+    let now = millis(store.now()).unwrap();
+    roster.pending = Some(Handoff {
+        reporting: next.clone(),
+        created_ms: now,
+        collect_after_ms: now + 5000,
+    });
+    publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
+    process.poll().await.unwrap();
+    assert_eq!(*process.signal.borrow(), profiling);
+    #[cfg(feature = "dial9")]
+    if profiling {
+        assert_eq!(
+            process.weights.as_ref().unwrap().current_expansion_weight(),
+            Some(10.0)
+        );
+    }
+    let bucket = process.bucket().unwrap();
+    let current = census(store.as_ref(), &policy, &roster.reporting, bucket)
+        .await
+        .unwrap();
+    let pending = census(store.as_ref(), &policy, &next, bucket)
+        .await
+        .unwrap();
+    assert_eq!(current.len(), usize::from(profiling));
+    assert_eq!(
+        pending.len(),
+        1,
+        "new reporters write immediately in the pending namespace"
+    );
+    assert_eq!(
+        process.state,
+        if profiling {
+            MemberState::Active
+        } else {
+            MemberState::Unarmed
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn handoff_waits_for_collection_and_never_divides_old_members_by_the_new_fraction() {
+    let store = Arc::new(MemoryStore::new());
+    let policy = config(15, "leader");
+    let now = millis(store.now()).unwrap();
+    let mut roster = seed(&store, &policy, 100).await;
+    let next = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1 << 63)),
+    };
+    roster.pending = Some(Handoff {
+        reporting: next.clone(),
+        created_ms: now,
+        collect_after_ms: now + 5000,
+    });
+    publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
+    let mut leader = worker(&policy, store.clone(), store.clone());
+    leader.observed = leader.read_roster().await.unwrap();
+    leader.leader = leader.observed.clone();
+    let bucket = leader.bucket().unwrap();
+    for i in 0..100 {
+        let rank = (i * (1u128 << 64) / 100) as u64;
+        put_member(
+            &store,
+            &policy,
+            bucket,
+            rank,
+            MemberState::Unarmed,
+            &nonce(),
+        )
+        .await;
+    }
+    for _ in 0..4 {
+        leader.leader_pass().await.unwrap();
+    }
+    assert_eq!(
+        leader.leader.as_ref().unwrap().roster.reporting.id,
+        "bootstrap"
+    );
+    assert_eq!(
+        leader
+            .leader
+            .as_ref()
+            .unwrap()
+            .roster
+            .population
+            .as_ref()
+            .unwrap()
+            .estimate(),
+        100.0
+    );
+
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let bucket = leader.bucket().unwrap();
+    for i in 0..50 {
+        let key = member_key(
+            &policy,
+            &next.id,
+            bucket,
+            (i * (1u128 << 64) / 100) as u64,
+            &MemberState::Unarmed,
+            &nonce(),
+        );
+        store
+            .put(
+                PutRequest::builder()
+                    .key(key)
+                    .body(Bytes::new())
+                    .condition(WriteCondition::unconditional())
+                    .build(),
+            )
+            .await
+            .unwrap();
+    }
+    for _ in 0..3 {
+        leader.leader_pass().await.unwrap();
+        assert!(leader.leader.as_ref().unwrap().roster.pending.is_some());
+    }
+    leader.leader_pass().await.unwrap();
+    let promoted = &leader.leader.as_ref().unwrap().roster;
+    assert_eq!(promoted.reporting.id, next.id);
+    assert!(promoted.pending.is_none());
+    assert_eq!(promoted.counts.tracked, 50);
+    assert_eq!(promoted.population.as_ref().unwrap().estimate(), 100.0);
+    assert!(promoted.trim.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiet_process_recovers_a_pool_after_every_previous_reporter_is_lost() {
+    let store = Arc::new(MemoryStore::new());
+    let policy = config(15, "quiet-survivor");
+    let mut roster = seed(&store, &policy, 100_000).await;
+    roster.reporting = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1)),
+    };
+    let old_population = roster.population.as_ref().unwrap().estimate();
+    publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    let (signal, _) = watch::channel(false);
+    let mut process = Worker::new(
+        policy.clone(),
+        store.clone(),
+        store.clone(),
+        None,
+        signal,
+        true,
+    );
+    process.observed = process.read_roster().await.unwrap();
+    let before = store.operation_count();
+    process.refresh_member(false).await.unwrap();
+    assert_eq!(
+        store.operation_count(),
+        before,
+        "quiet survivor has no active-epoch heartbeat"
+    );
+    process.election().await.unwrap();
+    assert!(
+        process.leader.is_some(),
+        "census eligibility must not gate election"
+    );
+    process.leader_pass().await.unwrap();
+    let recovering = &process.leader.as_ref().unwrap().roster;
+    assert_eq!(recovering.counts.tracked, 0);
+    assert_eq!(
+        recovering.population.as_ref().unwrap().estimate(),
+        old_population
+    );
+    assert_eq!(
+        recovering.pending.as_ref().unwrap().reporting.cutoff,
+        Cutoff(None)
+    );
+    assert_eq!(
+        recovering
+            .admission(&policy, millis(store.now()).unwrap())
+            .unwrap(),
+        Cutoff::threshold((u128::from(policy.target()) << 64) / 100_000),
+    );
+    process.refresh_member(false).await.unwrap();
+    let next = process
+        .observed
+        .as_ref()
+        .unwrap()
+        .roster
+        .pending
+        .as_ref()
+        .unwrap()
+        .reporting
+        .clone();
+    assert_eq!(
+        census(store.as_ref(), &policy, &next, process.bucket().unwrap())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        !*process.signal.borrow(),
+        "recovery never turns a previously off process on"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_thinned_profiler_outside_the_census_stops_writing_after_active_ghosts_expire() {
+    let store = Arc::new(MemoryStore::new());
+    let policy = config(1, "terminal-profiler");
+    let mut roster = Roster::initial(&policy, &nonce());
+    roster.reporting = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1)),
+    };
+    roster.epoch = 1;
+    let now = millis(store.now()).unwrap();
+    roster.census_computed_at_ms = Some(now);
+    roster.trim = Some(Trim {
+        epoch: 1,
+        salt: nonce(),
+        created_ms: now,
+        survival: Cutoff(Some(1)),
+    });
+    publish(&store, &policy, &roster, WriteCondition::absent()).await;
+    let mut process = worker(&policy, store.clone(), store.clone());
+    process.observed = process.read_roster().await.unwrap();
+    process.refresh_member(false).await.unwrap();
+    process.apply_trim().await.unwrap();
+    assert_eq!(process.state, MemberState::Carrier);
+    tokio::time::advance(Duration::from_secs(21)).await;
+    let before = store.operation_count();
+    process.refresh_member(false).await.unwrap();
+    assert_eq!(store.operation_count(), before);
+    assert!(
+        census(
+            store.as_ref(),
+            &policy,
+            &roster.reporting,
+            process.bucket().unwrap()
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiet_takeover_preserves_an_in_progress_reporting_handoff() {
+    let store = Arc::new(MemoryStore::new());
+    let policy = config(15, "replacement");
+    let mut roster = seed(&store, &policy, 100_000).await;
+    roster.reporting = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1)),
+    };
+    let now = millis(store.now()).unwrap();
+    let next = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(None),
+    };
+    roster.pending = Some(Handoff {
+        reporting: next.clone(),
+        created_ms: now,
+        collect_after_ms: now + 5000,
+    });
+    publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    let (signal, _) = watch::channel(false);
+    let mut replacement = Worker::new(
+        policy.clone(),
+        store.clone(),
+        store.clone(),
+        None,
+        signal,
+        true,
+    );
+    replacement.observed = replacement.read_roster().await.unwrap();
+    replacement.election().await.unwrap();
+    let claimed = &replacement.leader.as_ref().unwrap().roster;
+    assert_eq!(claimed.reporting, roster.reporting);
+    assert_eq!(claimed.pending.as_ref().unwrap().reporting, next);
+    assert_eq!(
+        claimed.pending.as_ref().unwrap().collect_after_ms,
+        now + 5000
+    );
+    assert_eq!(claimed.population.as_ref().unwrap().estimate(), 100_000.0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_pending_census_cannot_publish_or_promote_partial_membership() {
+    struct RejectPending {
+        inner: Arc<MemoryStore>,
+        id: String,
+    }
+    impl SamplingStore for RejectPending {
+        fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
+            self.inner.get(key)
+        }
+        fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
+            self.inner.put(request)
+        }
+        fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+            Box::pin(async move {
+                if request.prefix().contains(&format!("/{}/", self.id)) {
+                    return Err(StoreError::new(
+                        StoreErrorKind::unavailable(),
+                        "pending LIST unavailable",
+                    ));
+                }
+                self.inner.list(request).await
+            })
+        }
+        fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+            self.inner.delete(key)
+        }
+    }
+    let inner = Arc::new(MemoryStore::new());
+    let policy = config(15, "leader");
+    let mut roster = seed(&inner, &policy, 100).await;
+    let now = millis(inner.now()).unwrap();
+    let next = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1 << 63)),
+    };
+    roster.pending = Some(Handoff {
+        reporting: next.clone(),
+        created_ms: now - 10000,
+        collect_after_ms: now - 5000,
+    });
+    publish(&inner, &policy, &roster, WriteCondition::unconditional()).await;
+    let store = Arc::new(RejectPending {
+        inner: inner.clone(),
+        id: next.id,
+    });
+    let mut leader = worker(&policy, store, inner.clone());
+    leader.observed = leader.read_roster().await.unwrap();
+    leader.leader = leader.observed.clone();
+    let version = leader.observed.as_ref().unwrap().version.clone();
+    assert!(leader.leader_pass().await.is_err());
+    let current = leader.read_roster().await.unwrap().unwrap();
+    assert_eq!(current.version, version);
+    assert_eq!(current.roster.reporting, roster.reporting);
+    assert!(current.roster.pending.is_some());
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test(start_paused = true)]
+async fn zero_reporters_replace_a_stalled_handoff_and_fence_its_old_census(
+    #[case] pending_reporter: bool,
+) {
+    let store = Arc::new(MemoryStore::new());
+    let policy = config(15, "recovering-leader");
+    let mut roster = seed(&store, &policy, 100_000).await;
+    let current = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1 << 63)),
+    };
+    let abandoned = ReportingEpoch {
+        id: nonce(),
+        cutoff: Cutoff(Some(1 << 62)),
+    };
+    roster.reporting = current.clone();
+    let now = millis(store.now()).unwrap();
+    roster.pending = Some(Handoff {
+        reporting: abandoned.clone(),
+        created_ms: now - 10_000,
+        collect_after_ms: now - 5000,
+    });
+    publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
+    let mut leader = worker(&policy, store.clone(), store.clone());
+    leader.observed = leader.read_roster().await.unwrap();
+    leader.leader = leader.observed.clone();
+    if pending_reporter {
+        let key = member_key(
+            &policy,
+            &abandoned.id,
+            leader.bucket().unwrap(),
+            0,
+            &MemberState::Unarmed,
+            &nonce(),
+        );
+        store
+            .put(
+                PutRequest::builder()
+                    .key(key)
+                    .body(Bytes::new())
+                    .condition(WriteCondition::unconditional())
+                    .build(),
+            )
+            .await
+            .unwrap();
+        leader.pending_history_epoch = Some(abandoned.id.clone());
+        leader.pending_history = VecDeque::from([1, 1, 1]);
+    }
+    leader.leader_pass().await.unwrap();
+    let recovering = &leader.leader.as_ref().unwrap().roster;
+    assert_eq!(recovering.reporting, current);
+    let recovery = &recovering.pending.as_ref().unwrap().reporting;
+    assert_ne!(recovery.id, abandoned.id);
+    assert_eq!(recovery.cutoff, Cutoff(None));
+    assert_eq!(
+        recovering.population.as_ref().unwrap().estimate(),
+        100_000.0
+    );
 }

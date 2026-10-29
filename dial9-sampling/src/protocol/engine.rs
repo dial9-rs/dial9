@@ -18,7 +18,6 @@ pub(crate) enum DecisionReason {
     Roster,
     OutsideCutoff,
     TargetZero,
-    Untracked,
     MissingRoster,
     IncompatiblePolicy,
     UnsettledRoster,
@@ -154,19 +153,12 @@ impl Cutoff {
     fn includes(&self, rank: u64) -> bool {
         self.0.is_none_or(|threshold| rank < threshold)
     }
-    fn within(&self, limit: u128) -> bool {
-        match self.0 {
-            Some(threshold) => u128::from(threshold) <= limit,
-            None => limit == (1u128 << 64),
-        }
-    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Policy {
     schema: u32,
     pool: String,
     target: u32,
-    slice_bits: u32,
     max_overshoot: u32,
     poll_ms: u64,
     bucket_ms: u64,
@@ -175,10 +167,9 @@ struct Policy {
 impl Policy {
     fn new(config: &Config) -> Self {
         Self {
-            schema: 3,
+            schema: 4,
             pool: config.pool_hash(),
             target: config.target(),
-            slice_bits: config.slice_bits(),
             max_overshoot: config.overshoot(),
             poll_ms: config.poll_interval.as_millis() as u64,
             bucket_ms: config.bucket_width.as_millis() as u64,
@@ -188,11 +179,65 @@ impl Policy {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Counts {
+    observed: u64,
     tracked: u64,
     active: u64,
     carriers: u64,
     unarmed: u64,
     no_support: u64,
+}
+/// Membership from different fractions must never share a counting namespace.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct ReportingEpoch {
+    id: String,
+    cutoff: Cutoff,
+}
+impl ReportingEpoch {
+    fn bootstrap() -> Self {
+        Self {
+            id: "bootstrap".into(),
+            cutoff: Cutoff(None),
+        }
+    }
+    fn valid(&self) -> bool {
+        ((self.id == "bootstrap" && self.cutoff.0.is_none())
+            || self.id.parse::<ulid::Ulid>().is_ok())
+            && self.cutoff.value() > 0
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Handoff {
+    reporting: ReportingEpoch,
+    created_ms: u64,
+    collect_after_ms: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Population {
+    reporting: ReportingEpoch,
+    reporters: u64,
+    computed_ms: u64,
+}
+impl Population {
+    fn estimate(&self) -> f64 {
+        self.reporters as f64 / self.reporting.cutoff.probability()
+    }
+    fn admission(&self, target: u32) -> Cutoff {
+        Cutoff::threshold(
+            u128::from(target) * self.reporting.cutoff.value() / u128::from(self.reporters),
+        )
+    }
+    fn fresh(&self, now: u64, config: &Config) -> bool {
+        let skew = config.max_clock_skew.as_millis() as u64 * 2;
+        self.computed_ms <= now.saturating_add(skew)
+            && now <= self.computed_ms.saturating_add(observation_age_ms(config))
+    }
+}
+// Keep the preceding observation usable through a healthy reporting handoff,
+// while rejecting arbitrarily stale startup probabilities during outages.
+fn observation_age_ms(config: &Config) -> u64 {
+    config.bucket_width.as_millis() as u64 * 2
+        + config.poll_interval.as_millis() as u64 * 6
+        + config.max_clock_skew.as_millis() as u64 * 2
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Trim {
@@ -208,9 +253,11 @@ struct Roster {
     // Fresh on every mutation: body-based ETags must never repeat (ABA).
     revision: String,
     epoch: u64,
-    cutoff_settled: bool,
     settled: bool,
-    arm_cutoff: Cutoff,
+    reporting: ReportingEpoch,
+    pending: Option<Handoff>,
+    outside_budget: u8,
+    population: Option<Population>,
     trim: Option<Trim>,
     counts: Counts,
     census_computed_at_ms: Option<u64>,
@@ -222,9 +269,11 @@ impl Roster {
             holder: invocation_id.into(),
             revision: nonce(),
             epoch: 0,
-            cutoff_settled: false,
             settled: false,
-            arm_cutoff: Cutoff::threshold(config.tracked_limit()),
+            reporting: ReportingEpoch::bootstrap(),
+            pending: None,
+            outside_budget: 0,
+            population: None,
             trim: None,
             counts: Counts::default(),
             census_computed_at_ms: None,
@@ -237,7 +286,7 @@ impl Roster {
                 "incompatible sampling roster policy",
             ));
         }
-        if !self.arm_cutoff.within(config.tracked_limit())
+        if !self.reporting.valid()
             || self.holder.parse::<ulid::Ulid>().is_err()
             || self.revision.parse::<ulid::Ulid>().is_err()
             || (self.trim.is_some() && self.census_computed_at_ms.is_none())
@@ -247,7 +296,21 @@ impl Roster {
                 .active
                 .checked_add(self.counts.carriers)
                 .and_then(|n| n.checked_add(self.counts.unarmed))
-                != Some(self.counts.tracked)
+                != Some(self.counts.observed)
+            || self.counts.tracked > self.counts.observed
+            || self.outside_budget > 3
+            || self.pending.as_ref().is_some_and(|pending| {
+                !pending.reporting.valid()
+                    || pending.reporting.id == self.reporting.id
+                    || pending.collect_after_ms
+                        < pending.created_ms.saturating_add(
+                            config.poll_interval.as_millis() as u64 * 5
+                                + config.max_clock_skew.as_millis() as u64 * 2,
+                        )
+            })
+            || self.population.as_ref().is_some_and(|population| {
+                !population.reporting.valid() || population.reporters == 0
+            })
             || self.trim.as_ref().is_some_and(|trim| {
                 trim.epoch > self.epoch
                     || trim.salt.parse::<ulid::Ulid>().is_err()
@@ -257,6 +320,12 @@ impl Roster {
             return Err(invalid("invalid sampling roster fields"));
         }
         Ok(())
+    }
+    fn admission(&self, config: &Config, now: u64) -> Option<Cutoff> {
+        self.population
+            .as_ref()
+            .filter(|population| population.fresh(now, config))
+            .map(|population| population.admission(config.target()))
     }
     fn mutate(&mut self, invocation_id: &str) -> Result<(), StoreError> {
         self.holder = invocation_id.into();
@@ -325,9 +394,6 @@ pub(crate) async fn prepare_using(
     if config.target() == 0 {
         return PreparedSampling::disabled(DecisionReason::TargetZero, false);
     }
-    if !config.tracked() {
-        return PreparedSampling::disabled(DecisionReason::Untracked, false);
-    }
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         return PreparedSampling::disabled(
             DecisionReason::invalid_configuration("startup timeout overflow"),
@@ -335,6 +401,7 @@ pub(crate) async fn prepare_using(
         );
     };
     let fallback = config.failure_decision();
+    let mut startup_probability = config.failure_cutoff() as f64 / (1u128 << 64) as f64;
     let key = format!("{}roster.json", config.pool_prefix());
     let result = if timeout.is_zero() {
         None
@@ -359,21 +426,29 @@ pub(crate) async fn prepare_using(
                 DecisionReason::store_failure(error.to_string()),
                 None,
             ),
-            Ok(observed) if !observed.roster.cutoff_settled => {
-                (fallback, DecisionReason::UnsettledRoster, Some(observed))
-            }
-            Ok(observed) => {
-                let active = config.selects(observed.roster.arm_cutoff.value());
-                (
-                    active,
-                    if active {
-                        DecisionReason::Roster
-                    } else {
-                        DecisionReason::OutsideCutoff
-                    },
+            Ok(observed) => match millis(clock.now()) {
+                Err(error) => (
+                    fallback,
+                    DecisionReason::store_failure(error.to_string()),
                     Some(observed),
-                )
-            }
+                ),
+                Ok(now) => match observed.roster.admission(&config, now) {
+                    None => (fallback, DecisionReason::UnsettledRoster, Some(observed)),
+                    Some(cutoff) => {
+                        startup_probability = cutoff.probability();
+                        let active = config.selects(cutoff.value());
+                        (
+                            active,
+                            if active {
+                                DecisionReason::Roster
+                            } else {
+                                DecisionReason::OutsideCutoff
+                            },
+                            Some(observed),
+                        )
+                    }
+                },
+            },
         },
     };
     if reason == DecisionReason::IncompatiblePolicy {
@@ -389,19 +464,9 @@ pub(crate) async fn prepare_using(
             | DecisionReason::UnsettledRoster
     );
     tracing::debug!(
-        population = ?observed.as_ref().and_then(|o| {
-            o.roster.census_computed_at_ms?;
-            o.roster.counts.tracked.checked_mul(1u64 << config.slice_bits())
-        }),
+        population = ?observed.as_ref().and_then(|o| o.roster.population.as_ref()).map(Population::estimate),
         "sampling startup roster"
     );
-    let startup_probability = observed
-        .as_ref()
-        .filter(|o| o.roster.cutoff_settled)
-        .map_or_else(
-            || config.failure_cutoff() as f64 / (1u128 << 64) as f64,
-            |o| o.roster.arm_cutoff.probability(),
-        );
     #[cfg(feature = "dial9")]
     let weights = recording.then(|| {
         crate::trace_weights::TraceWeights::new(config.pool_hash(), 1.0 / startup_probability)
@@ -484,19 +549,20 @@ struct Member {
 }
 fn member_key(
     config: &Config,
+    epoch: &str,
     bucket: u64,
     rank: u64,
     state: &MemberState,
     invocation_id: &str,
 ) -> String {
     format!(
-        "{}{:016}/{rank:016x}.{}.{invocation_id}",
+        "{}{epoch}/{:016}/{rank:016x}.{}.{invocation_id}",
         config.members_prefix(),
         bucket,
         state.code()
     )
 }
-fn parse_member(key: &str, prefix: &str, bucket: u64, limit: u128) -> Result<Member, StoreError> {
+fn parse_member(key: &str, prefix: &str, bucket: u64) -> Result<Member, StoreError> {
     let suffix = key
         .strip_prefix(prefix)
         .ok_or_else(|| invalid("member outside requested prefix"))?;
@@ -513,7 +579,6 @@ fn parse_member(key: &str, prefix: &str, bucket: u64, limit: u128) -> Result<Mem
         .ok_or_else(|| invalid("missing invocation identity"))?;
     if rank_hex.len() != 16
         || format!("{rank:016x}") != rank_hex
-        || u128::from(rank) >= limit
         || parts.next().is_some()
         || invocation_id.parse::<ulid::Ulid>().is_err()
     {
@@ -529,9 +594,10 @@ fn parse_member(key: &str, prefix: &str, bucket: u64, limit: u128) -> Result<Mem
 async fn list_bucket(
     store: &dyn SamplingStore,
     config: &Config,
+    epoch: &str,
     bucket: u64,
 ) -> Result<Vec<Member>, StoreError> {
-    let prefix = format!("{}{:016}/", config.members_prefix(), bucket);
+    let prefix = format!("{}{epoch}/{:016}/", config.members_prefix(), bucket);
     let mut continuation = None;
     let mut seen = HashSet::new();
     let mut members = Vec::new();
@@ -546,12 +612,7 @@ async fn list_bucket(
             )
             .await?;
         for object in page.objects() {
-            members.push(parse_member(
-                object.key(),
-                &prefix,
-                bucket,
-                config.tracked_limit(),
-            )?);
+            members.push(parse_member(object.key(), &prefix, bucket)?);
         }
         continuation = page.continuation().cloned();
         match &continuation {
@@ -566,14 +627,15 @@ async fn list_bucket(
 async fn census(
     store: &dyn SamplingStore,
     config: &Config,
+    reporting: &ReportingEpoch,
     bucket: u64,
 ) -> Result<Vec<Member>, StoreError> {
-    let current = list_bucket(store, config, bucket);
+    let current = list_bucket(store, config, &reporting.id, bucket);
     let previous = async {
         if bucket == 0 {
             Ok(Vec::new())
         } else {
-            list_bucket(store, config, bucket - 1).await
+            list_bucket(store, config, &reporting.id, bucket - 1).await
         }
     };
     let (current, previous) = tokio::try_join!(current, previous)?;
@@ -604,39 +666,58 @@ fn compute(
     members: &[Member],
     history: &mut VecDeque<u64>,
     now: u64,
+    collection_delay_ms: u64,
 ) {
-    let mut counts = Counts::default();
-    for member in members {
-        counts.tracked += 1;
-        match member.state {
-            MemberState::Unarmed => counts.unarmed += 1,
-            MemberState::NoSupport => {
-                counts.unarmed += 1;
-                counts.no_support += 1;
-            }
-            MemberState::Carrier => counts.carriers += 1,
-            MemberState::Active => {
-                counts.active += 1;
-            }
-        }
-    }
-    history.push_back(counts.tracked);
-    if history.len() > 4 {
-        history.pop_front();
-    }
-    // This only detects a plateau; it cannot certify LIST snapshot completeness
-    // or that a future cohort has the same population.
-    let settled = history.len() == 4
-        && history
-            .iter()
-            .zip(history.iter().skip(1))
-            .all(|(&a, &b)| u128::from(b) * 100 <= u128::from(a) * 102);
+    let counts = count_members(members, &roster.reporting);
+    let settled = settle(history, counts.tracked);
     if settled && counts.tracked > 0 {
-        let threshold = (u128::from(config.target()) * config.tracked_limit()
-            / u128::from(counts.tracked))
-        .min(config.tracked_limit());
-        roster.arm_cutoff = Cutoff::threshold(threshold);
-        roster.cutoff_settled = true;
+        roster.population = Some(Population {
+            reporting: roster.reporting.clone(),
+            reporters: counts.tracked,
+            computed_ms: now,
+        });
+    }
+    let budget = u64::from(config.target()) * 32;
+    let outside = counts.tracked < budget / 2 || counts.tracked > budget * 2;
+    roster.outside_budget = if outside {
+        (roster.outside_budget + 1).min(3)
+    } else {
+        0
+    };
+    if counts.tracked == 0
+        && roster
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.reporting.cutoff.0.is_some())
+    {
+        // A smaller pending subset can also have lost every reporter. Recovery
+        // must not wait forever for that abandoned census to become nonempty.
+        roster.pending = None;
+    }
+    if roster.pending.is_none() {
+        let next = if counts.tracked == 0 {
+            // Zero sampled reporters is loss of visibility, not an empty fleet.
+            Some(Cutoff(None))
+        } else if settled && roster.outside_budget == 3 {
+            Some(Cutoff::threshold(
+                (u128::from(budget) * roster.reporting.cutoff.value() / u128::from(counts.tracked))
+                    .max(1),
+            ))
+        } else {
+            None
+        };
+        if let Some(cutoff) = next
+            && cutoff != roster.reporting.cutoff
+        {
+            roster.pending = Some(Handoff {
+                reporting: ReportingEpoch {
+                    id: nonce(),
+                    cutoff,
+                },
+                created_ms: now,
+                collect_after_ms: now.saturating_add(collection_delay_ms),
+            });
+        }
     }
     let cap = u64::from(config.target()) + u64::from(config.overshoot());
     if counts.active <= cap {
@@ -659,6 +740,40 @@ fn compute(
     roster.counts = counts;
     roster.census_computed_at_ms = Some(now);
 }
+fn count_members(members: &[Member], reporting: &ReportingEpoch) -> Counts {
+    let mut counts = Counts::default();
+    for member in members {
+        counts.observed += 1;
+        if reporting.cutoff.includes(member.rank) {
+            counts.tracked += 1;
+        }
+        match member.state {
+            MemberState::Unarmed => counts.unarmed += 1,
+            MemberState::NoSupport => {
+                counts.unarmed += 1;
+                counts.no_support += 1;
+            }
+            MemberState::Carrier => counts.carriers += 1,
+            MemberState::Active => {
+                counts.active += 1;
+            }
+        }
+    }
+    counts
+}
+fn settle(history: &mut VecDeque<u64>, tracked: u64) -> bool {
+    history.push_back(tracked);
+    if history.len() > 4 {
+        history.pop_front();
+    }
+    // This only detects a plateau; it cannot certify LIST snapshot completeness
+    // or that a future cohort has the same population.
+    history.len() == 4
+        && history
+            .iter()
+            .zip(history.iter().skip(1))
+            .all(|(&a, &b)| u128::from(b) * 100 <= u128::from(a) * 102)
+}
 
 struct Worker {
     config: Config,
@@ -670,9 +785,12 @@ struct Worker {
     observed: Option<Observed>,
     leader: Option<Observed>,
     history: VecDeque<u64>,
+    pending_history: VecDeque<u64>,
+    pending_history_epoch: Option<String>,
     signal: watch::Sender<bool>,
-    keys: BTreeMap<u64, HashSet<String>>,
-    written_bucket: Option<u64>,
+    keys: BTreeMap<(String, u64), HashSet<String>>,
+    written_buckets: BTreeMap<String, u64>,
+    terminal_until_bucket: Option<u64>,
     offset_ms: u64,
     poll_ms: u64,
     membership_allowed: bool,
@@ -714,9 +832,12 @@ impl Worker {
             observed,
             leader: None,
             history: VecDeque::new(),
+            pending_history: VecDeque::new(),
+            pending_history_epoch: None,
             signal,
             keys: BTreeMap::new(),
-            written_bucket: None,
+            written_buckets: BTreeMap::new(),
+            terminal_until_bucket: None,
             offset_ms,
             poll_ms,
             membership_allowed,
@@ -728,18 +849,44 @@ impl Worker {
     fn bucket(&self) -> Result<u64, StoreError> {
         Ok(millis(self.clock.now())? / self.config.bucket_width.as_millis() as u64)
     }
-    async fn write_member(&mut self, bucket: u64) -> Result<(), StoreError> {
+    fn reporting_epochs(&self) -> Vec<ReportingEpoch> {
+        let Some(observed) = &self.observed else {
+            return vec![ReportingEpoch::bootstrap()];
+        };
+        std::iter::once(observed.roster.reporting.clone())
+            .chain(
+                observed
+                    .roster
+                    .pending
+                    .as_ref()
+                    .map(|p| p.reporting.clone()),
+            )
+            .collect()
+    }
+    fn should_report(&self, epoch: &ReportingEpoch, bucket: u64) -> bool {
+        epoch.cutoff.includes(self.config.reporting_rank(&epoch.id))
+            || self.state == MemberState::Active
+            || (self.state == MemberState::Carrier
+                && self
+                    .terminal_until_bucket
+                    .is_some_and(|until| bucket <= until))
+    }
+    async fn write_member(&mut self, epoch: &str, bucket: u64) -> Result<(), StoreError> {
         let key = member_key(
             &self.config,
+            epoch,
             bucket,
-            self.rank,
+            self.config.reporting_rank(epoch),
             &self.state,
             &self.invocation_id,
         );
         // Track even an unacknowledged PUT: cleanup is safe because every key
         // belongs to this run, and never to a replacement process.
-        self.keys.retain(|b, _| *b >= bucket.saturating_sub(1));
-        self.keys.entry(bucket).or_default().insert(key.clone());
+        self.keys.retain(|(_, b), _| *b >= bucket.saturating_sub(1));
+        self.keys
+            .entry((epoch.into(), bucket))
+            .or_default()
+            .insert(key.clone());
         match self
             .store
             .put(
@@ -752,7 +899,7 @@ impl Worker {
             .await?
         {
             PutOutcome::Stored { .. } => {
-                self.written_bucket = Some(bucket);
+                self.written_buckets.insert(epoch.into(), bucket);
                 Ok(())
             }
             other => Err(invalid(format!(
@@ -767,11 +914,18 @@ impl Worker {
         let now = millis(self.clock.now())?;
         let width = self.config.bucket_width.as_millis() as u64;
         let bucket = now / width;
-        if immediate
-            || self.written_bucket.is_none()
-            || (self.written_bucket != Some(bucket) && now % width >= self.offset_ms)
-        {
-            self.write_member(bucket).await?;
+        let epochs = self.reporting_epochs();
+        self.written_buckets
+            .retain(|id, _| epochs.iter().any(|epoch| &epoch.id == id));
+        for epoch in epochs {
+            if self.should_report(&epoch, bucket)
+                && (immediate
+                    || !self.written_buckets.contains_key(&epoch.id)
+                    || (self.written_buckets.get(&epoch.id) != Some(&bucket)
+                        && now % width >= self.offset_ms))
+            {
+                self.write_member(&epoch.id, bucket).await?;
+            }
         }
         Ok(())
     }
@@ -822,7 +976,7 @@ impl Worker {
             return Ok(());
         }
         let delay_span_ms = (self.config.poll_interval.as_millis() / 2).min(2000);
-        let delay_ms = u128::from(self.rank) * delay_span_ms / self.config.tracked_limit();
+        let delay_ms = u128::from(self.rank) * delay_span_ms / (1u128 << 64);
         tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
         // Most contenders see the winner during this one background re-read.
         // Close races can still cause losing CAS writes; there is no probe loop.
@@ -856,6 +1010,8 @@ impl Worker {
         if let Some(claimed) = claimed {
             self.observed = Some(claimed);
             self.history.clear();
+            self.pending_history.clear();
+            self.pending_history_epoch = None;
         }
         Ok(())
     }
@@ -893,7 +1049,14 @@ impl Worker {
                 return Duration::from_millis(wait as u64).min(self.config.poll_interval);
             }
         }
-        if self.leader.as_ref().is_some_and(|o| o.roster.settled) {
+        if self.leader.as_ref().is_some_and(|o| {
+            o.roster
+                .pending
+                .as_ref()
+                .map_or(o.roster.settled, |pending| {
+                    millis(self.clock.now()).is_ok_and(|now| now < pending.collect_after_ms)
+                })
+        }) {
             self.config.poll_interval
         } else {
             Duration::from_secs(1).min(self.config.poll_interval)
@@ -909,9 +1072,30 @@ impl Worker {
         let mut roster = previous.roster.clone();
         roster.mutate(&self.invocation_id)?;
         let members = if self.census_window(started) {
-            Some(census(self.store.as_ref(), &self.config, bucket).await?)
+            Some(census(self.store.as_ref(), &self.config, &roster.reporting, bucket).await?)
         } else {
             None
+        };
+        let pending_members = match &roster.pending {
+            Some(pending)
+                if members.is_some()
+                    && started
+                        >= pending
+                            .collect_after_ms
+                            .saturating_add(self.config.max_clock_skew.as_millis() as u64 * 2) =>
+            {
+                Some((
+                    pending.reporting.clone(),
+                    census(
+                        self.store.as_ref(),
+                        &self.config,
+                        &pending.reporting,
+                        bucket,
+                    )
+                    .await?,
+                ))
+            }
+            _ => None,
         };
         let now = millis(self.clock.now())?;
         if let Some(members) = members
@@ -919,9 +1103,54 @@ impl Worker {
             && now / width == bucket
             && self.census_window(now)
         {
-            compute(&mut roster, &self.config, &members, &mut self.history, now);
+            let collection_delay_ms = self.config.poll_interval.as_millis() as u64 * 5
+                + self.config.max_clock_skew.as_millis() as u64 * 2
+                + u64::try_from(
+                    self.store
+                        .modification_time_uncertainty()
+                        .as_nanos()
+                        .div_ceil(1_000_000),
+                )
+                .map_err(invalid)?;
+            compute(
+                &mut roster,
+                &self.config,
+                &members,
+                &mut self.history,
+                now,
+                collection_delay_ms,
+            );
+            if let Some((reporting, pending_members)) = pending_members
+                && roster
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.reporting.id == reporting.id)
+            {
+                if self.pending_history_epoch.as_ref() != Some(&reporting.id) {
+                    self.pending_history.clear();
+                    self.pending_history_epoch = Some(reporting.id.clone());
+                }
+                let counts = count_members(&pending_members, &reporting);
+                if settle(&mut self.pending_history, counts.tracked) && counts.tracked > 0 {
+                    roster.population = Some(Population {
+                        reporting: reporting.clone(),
+                        reporters: counts.tracked,
+                        computed_ms: now,
+                    });
+                    roster.reporting = reporting;
+                    roster.pending = None;
+                    roster.outside_budget = 0;
+                    roster.counts = counts;
+                    roster.settled = true;
+                    // Only one epoch's profilers may drive a trim. Start the
+                    // next assessment from the promoted membership namespace.
+                    roster.trim = None;
+                    self.history = std::mem::take(&mut self.pending_history);
+                    self.pending_history_epoch = None;
+                }
+            }
             let observation = crate::history::CensusObservation {
-                schema: 1,
+                schema: 2,
                 pool: self.config.pool_hash(),
                 started_ms: started,
                 completed_ms: now,
@@ -935,7 +1164,9 @@ impl Worker {
                         .div_ceil(1_000_000),
                 )
                 .map_err(invalid)?,
-                slice_bits: self.config.slice_bits(),
+                reporting_epoch: roster.reporting.id.clone(),
+                reporting_cutoff: roster.reporting.cutoff.0,
+                observed: roster.counts.observed,
                 tracked: roster.counts.tracked,
                 admitted: roster.counts.active,
                 carriers: roster.counts.carriers,
@@ -967,13 +1198,13 @@ impl Worker {
             roster.settled = false;
             roster.trim = None;
             self.history.clear();
+            self.pending_history.clear();
+            self.pending_history_epoch = None;
         }
         let published = self.replace(&roster, Some(&previous.version)).await?;
         if let Some(observed) = &published {
             tracing::debug!(tracked = observed.roster.counts.tracked, active = observed.roster.counts.active,
-                population = ?observed.roster.census_computed_at_ms.and_then(|_| {
-                    observed.roster.counts.tracked.checked_mul(1u64 << self.config.slice_bits())
-                }),
+                population = ?observed.roster.population.as_ref().map(Population::estimate),
                 settled = observed.roster.settled,
                 slice_too_small = ?observed.roster.census_computed_at_ms.map(|_| {
                     observed.roster.counts.tracked < u64::from(self.config.target()) * 4
@@ -1026,28 +1257,31 @@ impl Worker {
                 weights.stop();
             }
             self.state = MemberState::Carrier;
-            self.written_bucket = None;
+            self.written_buckets.clear();
             self.signal.send_replace(false);
             tracing::info!(
                 rank = self.rank,
                 "sampling active process excluded by thinning"
             );
             let bucket = self.bucket()?;
-            self.write_member(bucket).await?;
+            self.terminal_until_bucket = Some(bucket.saturating_add(1));
+            self.refresh_member(true).await?;
             // Carrier wins dedup even when removal fails. Never delete peers.
-            for old in [Some(bucket), bucket.checked_sub(1)].into_iter().flatten() {
-                let key = member_key(
-                    &self.config,
-                    old,
-                    self.rank,
-                    &MemberState::Active,
-                    &self.invocation_id,
-                );
+            let old_keys: Vec<_> = self
+                .keys
+                .iter()
+                .flat_map(|((epoch, bucket), keys)| {
+                    keys.iter()
+                        .filter(|key| key.contains(".a."))
+                        .map(|key| (epoch.clone(), *bucket, key.clone()))
+                })
+                .collect();
+            for (epoch, old, key) in old_keys {
                 if let Err(error) = self.store.delete(key.clone()).await {
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!(%error, "sampling active member cleanup failed");
                     });
-                } else if let Some(keys) = self.keys.get_mut(&old) {
+                } else if let Some(keys) = self.keys.get_mut(&(epoch, old)) {
                     keys.remove(&key);
                 }
             }
@@ -1057,7 +1291,6 @@ impl Worker {
     async fn poll(&mut self) -> Result<(), StoreError> {
         // A failed/malformed/incompatible GET cannot be treated as missing. In
         // particular, it never permits overwriting an incompatible namespace.
-        let was_allowed = self.membership_allowed;
         self.observed = match self.read_roster().await {
             Ok(observed) => {
                 self.membership_allowed = true;
@@ -1071,9 +1304,9 @@ impl Worker {
                 return Err(error);
             }
         };
-        if !was_allowed && self.membership_allowed {
-            self.refresh_member(false).await?;
-        }
+        // New epoch eligibility is handled immediately, rather than waiting for
+        // this process's next bucket heartbeat offset.
+        self.refresh_member(false).await?;
         if self.leader.as_ref().is_some_and(|leader| {
             self.observed.as_ref().is_none_or(|current| {
                 current.version != leader.version || current.roster.holder != self.invocation_id
@@ -1089,6 +1322,8 @@ impl Worker {
             // A GET reconciles an acknowledged-lost CAS on the same object.
             self.leader = Some(current.clone());
             self.history.clear();
+            self.pending_history.clear();
+            self.pending_history_epoch = None;
         }
         self.apply_trim().await?;
         if self.leader.is_none() {

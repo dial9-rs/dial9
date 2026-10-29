@@ -11,20 +11,20 @@
 //! use dial9_sampling::{Sampling, SamplingStatus, StartupFailure, s3::S3SamplingStore};
 //! use std::time::Duration;
 //!
+//! let s3 = dial9_destinations_s3::S3Config::builder()
+//!     .bucket("trace-bucket")
+//!     .service_name("checkout")
+//!     .build();
 //! let sampling = Sampling::builder()
-//!     .scope("checkout/production")
+//!     .add_dimension("environment", "production")
 //!     .add_dimension("instance-type", "m7i.large")
 //!     .add_dimension("az", "us-east-1a")
 //!     .target(15)
 //!     .startup_timeout(Duration::from_secs(5))
 //!     .if_failed(StartupFailure::disabled())
 //!     .build();
-//! sampling.with_backend(async {
-//!     let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-//!     Ok(S3SamplingStore::builder()
-//!         .client(aws_sdk_s3::Client::new(&config))
-//!         .bucket("trace-bucket")
-//!         .build())
+//! sampling.with_storage(async {
+//!     S3SamplingStore::builder().config(s3.clone()).build().await
 //! }).start_application(|status| {
 //!     let SamplingStatus { enabled, .. } = status;
 //!     let recorder = if enabled {
@@ -83,21 +83,21 @@ use tokio::runtime::Runtime;
 
 /// Startup admission for one complete caller-provided dimension tuple.
 ///
+/// Dimensions group processes within the chosen storage namespace. Native S3
+/// storage uses the configured uploader service to isolate unrelated services;
+/// no separate scope or service dimension is required.
 /// The target is an expected count, not a reservation of exactly that many
 /// profilers. The failure policy is required. Defaults are a 1000ms startup
-/// budget and tracking every process. There is no periodic rotation.
+/// budget and automatic population discovery. There is no periodic rotation.
 ///
 /// ```compile_fail
 /// use dial9_sampling::Sampling;
-/// Sampling::builder().scope("checkout").target(15).build();
+/// Sampling::builder().target(15).build();
 /// ```
 #[derive(Clone, Debug, bon::Builder)]
 pub struct Sampling {
     #[builder(field)]
     dimensions: Vec<(String, String)>,
-    /// Service/environment namespace separating unrelated fleets.
-    #[builder(into)]
-    scope: String,
     /// Expected profilers for each complete combination of dimension values.
     target: u32,
     /// Required behavior on storage failure or timeout.
@@ -105,19 +105,8 @@ pub struct Sampling {
     /// Cooperative budget covering runtime setup, backend construction and admission; defaults to 1000ms.
     #[builder(default = Duration::from_millis(1000))]
     startup_timeout: Duration,
-    /// Stable census identity across restarts; defaults to a fresh identity per invocation.
-    /// Simultaneously live processes must have independent identities. Admission
-    /// and thinning use separate, fresh invocation randomness.
-    /// Must be nonblank and must not contain `/`.
-    #[builder(into)]
-    host_id: Option<String>,
     #[builder(skip)]
     invocation_id: String,
-    /// Conservative lower bound on the population; zero tracks every process.
-    /// A positive bound reduces membership traffic. Exceeding the real population
-    /// weakens coverage, especially for small pools.
-    #[builder(default)]
-    minimum_population: u64,
     /// Additional admitted profilers tolerated before randomized thinning.
     /// Defaults to the ceiling of three times the square root of the target.
     max_overshoot: Option<u32>,
@@ -145,15 +134,15 @@ impl<S: sampling_builder::State> SamplingBuilder<S> {
 }
 
 impl Sampling {
-    /// Supplies backend initialization for a synchronous application invocation.
+    /// Supplies storage initialization for a synchronous application invocation.
     ///
     /// Nothing runs until [`SamplingStartup::start_application`] is called.
-    /// Backend initialization and maintenance use the same private, uninstrumented
+    /// Storage initialization and maintenance use the same private, uninstrumented
     /// Tokio runtime, which stays alive until the application returns.
     /// Construct executor-dependent resources inside the supplied future.
-    /// Backend initialization should be asynchronous and cancellation-safe. The
+    /// Storage initialization should be asynchronous and cancellation-safe. The
     /// timeout is cooperative and cannot interrupt blocking code.
-    pub fn with_backend<S: SamplingStore, F: Future<Output = io::Result<S>>>(
+    pub fn with_storage<S: SamplingStore, F: Future<Output = io::Result<S>>>(
         &self,
         backend: F,
     ) -> SamplingStartup<F> {
@@ -165,10 +154,7 @@ impl Sampling {
 
     fn policy(&self) -> protocol::Config {
         let mut policy = self.clone();
-        // Each invocation gets a fresh rank unless the caller supplies an identity.
-        policy
-            .host_id
-            .get_or_insert_with(|| ulid::Ulid::new().to_string());
+        // Independent process runs never share caller-provided census entropy.
         policy.invocation_id = ulid::Ulid::new().to_string();
         policy
     }
@@ -181,10 +167,6 @@ impl Sampling {
             )),
             Ok(()) if self.target == 0 => Some(protocol::PreparedSampling::disabled(
                 protocol::DecisionReason::TargetZero,
-                false,
-            )),
-            Ok(()) if !policy.tracked() => Some(protocol::PreparedSampling::disabled(
-                protocol::DecisionReason::Untracked,
                 false,
             )),
             Ok(())
@@ -265,9 +247,9 @@ impl Sampling {
     }
 }
 
-/// Lazy backend initialization and admission for one application invocation.
+/// Lazy storage initialization and admission for one application invocation.
 ///
-/// The backend future and application callback may borrow local values and need
+/// The storage future and application callback may borrow local values and need
 /// not be `Send` or `'static`. Dropping an unused startup performs no I/O.
 #[must_use = "call start_application to prepare sampling and run the application"]
 pub struct SamplingStartup<F> {

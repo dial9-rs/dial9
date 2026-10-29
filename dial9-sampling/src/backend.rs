@@ -8,6 +8,10 @@ pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>>
 
 /// Strong per-key reads and atomic conditional writes are required.
 ///
+/// Keys are relative to this store's coordination namespace. Implementations
+/// sharing a physical backend must isolate unrelated services themselves.
+/// Sampling dimensions further group processes within that namespace.
+///
 /// Lists include completed writes, but neither page order nor an atomic fleet
 /// snapshot is required. Continuation cursors must permit complete enumeration.
 /// Versions identify the observed body and may repeat if the body is repeated;

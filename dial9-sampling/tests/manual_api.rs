@@ -21,7 +21,6 @@ use tokio::sync::oneshot;
 
 fn policy() -> Sampling {
     Sampling::builder()
-        .scope("application/prod")
         .target(1)
         .if_failed(StartupFailure::assume_population(1))
         .build()
@@ -51,7 +50,7 @@ fn assert_task_stopped(ended: oneshot::Receiver<()>) {
 #[test]
 fn unused_startup_never_polls_factory() {
     let polled = Cell::new(false);
-    let startup: SamplingStartup<_> = policy().with_backend(async {
+    let startup: SamplingStartup<_> = policy().with_storage(async {
         polled.set(true);
         Ok(MemoryStore::new())
     });
@@ -69,7 +68,7 @@ fn application_owns_its_runtime_while_sampler_survives_status_drop() {
     let policy = policy();
     let value = String::from("borrowed result");
     let result = policy
-        .with_backend(async {
+        .with_storage(async {
             factory_polled.set(true);
             assert_eq!(
                 tokio::runtime::Handle::current().runtime_flavor(),
@@ -139,7 +138,7 @@ fn cleanup_follows_application_teardown_on_return_error_and_unwind(#[case] exit:
     let (dropped, ended) = oneshot::channel();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         policy
-            .with_backend(async {
+            .with_storage(async {
                 let notice = SignalDrop(Some(dropped));
                 let lifetime = BackendTaskLifetime(backend_alive.clone());
                 tokio::spawn(async move {
@@ -187,7 +186,7 @@ fn returned_status_retains_no_runtime() {
     let store = Arc::new(MemoryStore::new());
     let (dropped, ended) = oneshot::channel();
     let status = policy()
-        .with_backend(async {
+        .with_storage(async {
             let notice = SignalDrop(Some(dropped));
             tokio::spawn(async move {
                 let _notice = notice;
@@ -205,7 +204,7 @@ fn returned_status_retains_no_runtime() {
 fn registration_disables_returned_recorder_before_runtime_cleanup() {
     let store = Arc::new(MemoryStore::new());
     let recorder = policy()
-        .with_backend(async { Ok(store.clone()) })
+        .with_storage(async { Ok(store.clone()) })
         .start_application(|status| {
             assert!(status.enabled);
             let recorder = dial9_core::recorder::recorder(
@@ -232,17 +231,16 @@ fn registration_rejects_disabled_or_ended_invocation(#[case] ended: bool) {
     let sampling = policy();
     if ended {
         let status = sampling
-            .with_backend(async { Ok(MemoryStore::new()) })
+            .with_storage(async { Ok(MemoryStore::new()) })
             .start_application(|status| status);
         assert!(status.enabled);
         status.register_recorder(&recorder);
     } else {
         Sampling::builder()
-            .scope("disabled-registration")
             .target(0)
             .if_failed(StartupFailure::disabled())
             .build()
-            .with_backend(async { Ok(MemoryStore::new()) })
+            .with_storage(async { Ok(MemoryStore::new()) })
             .start_application(|status| {
                 assert!(!status.enabled);
                 status.register_recorder(&recorder);
@@ -258,7 +256,7 @@ fn panicking_factory_shuts_down_its_spawned_tasks_without_starting_application()
     let application_called = Cell::new(false);
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         policy()
-            .with_backend(async {
+            .with_storage(async {
                 let signal = SignalDrop(Some(dropped));
                 tokio::spawn(async move {
                     let _signal = signal;
@@ -281,7 +279,7 @@ async fn entered_runtime_is_rejected_before_polling_or_application() {
     let application_called = Cell::new(false);
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         policy()
-            .with_backend(async {
+            .with_storage(async {
                 factory_called.set(true);
                 Ok(MemoryStore::new())
             })
@@ -300,11 +298,10 @@ fn backend_error_still_starts_application_with_fallback(
     #[case] expected: bool,
 ) {
     let enabled = Sampling::builder()
-        .scope("failure")
         .target(1)
         .if_failed(fallback)
         .build()
-        .with_backend(async { Err::<MemoryStore, _>(std::io::Error::other("backend failed")) })
+        .with_storage(async { Err::<MemoryStore, _>(std::io::Error::other("backend failed")) })
         .start_application(|SamplingStatus { enabled, .. }| {
             assert!(tokio::runtime::Handle::try_current().is_err());
             enabled

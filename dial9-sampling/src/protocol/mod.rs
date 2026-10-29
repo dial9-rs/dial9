@@ -23,7 +23,6 @@ pub enum StartupFailure {
     #[non_exhaustive]
     Disabled {},
     /// Uses an independent invocation draw with probability `min(1, target / population)`,
-    /// capped by the census tracking fraction.
     /// The population assumption is the caller's; it does not bound actual volume.
     #[non_exhaustive]
     AssumePopulation {
@@ -47,40 +46,29 @@ impl Default for StartupFailure {
     }
 }
 
-// The invocation resolves host_id on the caller's configuration; there is no
-// second builder or configuration copy with independent defaults.
+// Each invocation resolves a fresh run identity on the caller's configuration.
+// There is no second builder with independent defaults.
 pub(crate) type Config = crate::Sampling;
 impl Config {
     pub(crate) fn target(&self) -> u32 {
         self.target
     }
-    /// An explicit lower population assumption supports reducing census traffic.
-    fn slice_bits(&self) -> u32 {
-        if self.target == 0 {
-            return 0;
-        }
-        let required = 32 * u64::from(self.target);
-        let mut bits = 0;
-        while bits < 58 && (self.minimum_population >> (bits + 1)) >= required {
-            bits += 1;
-        }
-        bits
-    }
-    fn tracked_limit(&self) -> u128 {
-        1u128 << (64 - self.slice_bits())
-    }
-    pub(crate) fn tracked(&self) -> bool {
-        u128::from(self.rank()) < self.tracked_limit()
-    }
     pub(crate) fn rank(&self) -> u64 {
         let mut dimensions = self.dimensions.clone();
         dimensions.sort();
-        let host_id = self
-            .host_id
-            .as_deref()
-            .expect("invocation identity resolved");
-        let canonical = serde_json::to_vec(&(&self.scope, dimensions, host_id))
+        let canonical = serde_json::to_vec(&(dimensions, &self.invocation_id, "census"))
             .expect("string tuple serializes");
+        u64::from_be_bytes(
+            Sha256::digest(canonical)[..8]
+                .try_into()
+                .expect("digest length"),
+        )
+    }
+    // The leader seals a fraction before choosing the next epoch's fresh ID.
+    // Rehashing avoids selecting a threshold from the same census ranks it measures.
+    fn reporting_rank(&self, epoch: &str) -> u64 {
+        let canonical =
+            serde_json::to_vec(&(self.rank(), "census", epoch)).expect("rank tuple serializes");
         u64::from_be_bytes(
             Sha256::digest(canonical)[..8]
                 .try_into()
@@ -95,7 +83,7 @@ impl Config {
             StartupFailure::Disabled {} => 0,
             StartupFailure::AssumePopulation { population: 0 } => 0,
             StartupFailure::AssumePopulation { population } => {
-                ((u128::from(self.target) << 64) / u128::from(population)).min(self.tracked_limit())
+                ((u128::from(self.target) << 64) / u128::from(population)).min(1u128 << 64)
             }
         }
     }
@@ -109,14 +97,11 @@ impl Config {
         )
     }
     fn selects(&self, cutoff: u128) -> bool {
-        self.tracked() && u128::from(self.draw("admission", "")) < (cutoff << self.slice_bits())
+        u128::from(self.draw("admission", "")) < cutoff
     }
     pub(crate) fn validate(&self) -> Result<(), String> {
-        let Some(host_id) = &self.host_id else {
-            return Err("invocation identity must be resolved".into());
-        };
-        if self.scope.trim().is_empty() || host_id.trim().is_empty() || host_id.contains('/') {
-            return Err("scope and host_id must be nonblank; host_id must not contain '/'".into());
+        if self.invocation_id.parse::<ulid::Ulid>().is_err() {
+            return Err("process run identity must be a valid ULID".into());
         }
         let mut names = std::collections::HashSet::new();
         for (name, value) in &self.dimensions {
@@ -150,15 +135,14 @@ impl Config {
     pub(crate) fn pool_hash(&self) -> String {
         let mut dimensions = self.dimensions.clone();
         dimensions.sort();
-        let canonical =
-            serde_json::to_vec(&(&self.scope, dimensions)).expect("string tuple serializes");
+        let canonical = serde_json::to_vec(&dimensions).expect("string tuple serializes");
         format!("{:x}", Sha256::digest(canonical))
     }
     pub(crate) fn pool_prefix(&self) -> String {
-        format!("v2/pools/{}/", self.pool_hash())
+        format!("v3/pools/{}/", self.pool_hash())
     }
     fn members_prefix(&self) -> String {
-        format!("v2/members/{}/", self.pool_hash())
+        format!("v3/members/{}/", self.pool_hash())
     }
     fn overshoot(&self) -> u32 {
         self.max_overshoot

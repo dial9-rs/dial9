@@ -2,7 +2,8 @@ use dial9::{Dial9HandleTokioExt, MemoryBuffer, RecorderS3ClientExt, TokioAttachO
 use dial9_sampling::{
     Sampling, SamplingStatus, StartupFailure,
     backend::{
-        ListPage, ListRequest, PutOutcome, PutRequest, SamplingStore, StoreFuture, StoredObject,
+        self, ListPage, ListRequest, PutOutcome, PutRequest, SamplingStore, StoreFuture,
+        StoredObject,
     },
     s3::S3SamplingStore,
 };
@@ -15,6 +16,11 @@ use std::{
     time::Duration,
 };
 use tokio::sync::oneshot;
+
+#[allow(dead_code, unexpected_cfgs)]
+#[path = "../../dial9-sampling/src/test_store.rs"]
+mod test_store;
+use test_store::MemoryStore;
 
 #[derive(serde::Deserialize, dial9_trace_format::TraceEvent)]
 struct SamplingMarker {
@@ -55,7 +61,7 @@ fn fake_client(service: s3s::service::S3Service) -> aws_sdk_s3::Client {
 
 #[derive(Debug)]
 struct ObservedWrites {
-    store: S3SamplingStore,
+    store: Arc<MemoryStore>,
     member_written: Mutex<Option<oneshot::Sender<String>>>,
     roster_written: Mutex<Option<oneshot::Sender<String>>>,
 }
@@ -74,7 +80,7 @@ impl SamplingStore for ObservedWrites {
             let key = request.key().to_owned();
             let outcome = self.store.put(request).await?;
             if matches!(outcome, PutOutcome::Stored { .. }) {
-                let notice = if key.starts_with("v2/members/") {
+                let notice = if key.starts_with("v3/members/") {
                     &self.member_written
                 } else if key.ends_with("/roster.json") {
                     &self.roster_written
@@ -114,41 +120,41 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
     let coordination_clients = AtomicUsize::new(0);
     let upload_clients = Arc::new(AtomicUsize::new(0));
     let writers = AtomicUsize::new(0);
+    let config = dial9::s3::S3Config::builder()
+        .bucket("traces")
+        .service_name("manual-test")
+        .prefix("data")
+        .region("us-east-1")
+        .build();
     let make_store = || async {
         coordination_clients.fetch_add(1, Ordering::SeqCst);
-        Ok(S3SamplingStore::builder()
+        S3SamplingStore::builder()
             .client(fake_client(service.clone()))
-            .bucket("traces")
-            .prefix("coord/")
-            .build())
+            .config(config.clone())
+            .build()
+            .await
     };
-    for (scope, fallback, expected) in [
+    for (environment, fallback, expected) in [
         ("customer/prod", StartupFailure::assume_population(1), true),
         ("customer/prod-unarmed", StartupFailure::disabled(), false),
     ] {
         Sampling::builder()
-            .scope(scope)
+            .add_dimension("environment", environment)
             .add_dimension("az", "a")
             .target(1)
             .startup_timeout(Duration::from_secs(5))
             .if_failed(fallback)
             .build()
-            .with_backend(make_store())
+            .with_storage(make_store())
             .start_application(|status| {
                 let SamplingStatus { enabled, .. } = status;
                 assert_eq!(enabled, expected);
                 let recorder = if enabled {
                     writers.fetch_add(1, Ordering::SeqCst);
-                    let config = dial9::s3::S3Config::builder()
-                        .bucket("traces")
-                        .service_name("manual-test")
-                        .prefix("data")
-                        .region("us-east-1")
-                        .build();
                     let uploader_service = service.clone();
                     let count = upload_clients.clone();
                     dial9::recorder(MemoryBuffer::new(1 << 20).unwrap())
-                        .with_s3_uploader_client_future(config, async move {
+                        .with_s3_uploader_client_future(config.clone(), async move {
                             count.fetch_add(1, Ordering::SeqCst);
                             fake_client(uploader_service)
                         })
@@ -217,36 +223,37 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
         .unwrap();
     let mut decoder = dial9_trace_format::decoder::Decoder::new(&bytes).unwrap();
     let mut found = false;
+    let mut metadata = std::collections::HashMap::new();
     decoder
         .for_each_event(|event| {
             if event.name == "SamplingMarker" {
                 found |= event.deserialize::<SamplingMarker>().unwrap().value == 42;
+            } else if event.name == "SegmentMetadataEvent"
+                && let Some(dial9_trace_format::types::FieldValueRef::StringMap(entries)) =
+                    event.fields.first()
+            {
+                metadata.extend(
+                    entries
+                        .iter()
+                        .map(|(key, value)| (key.to_owned(), value.to_owned())),
+                );
             }
         })
         .unwrap();
     assert!(found);
+    assert_eq!(metadata["dial9.sampling.weight"], "1");
+    assert!(metadata.contains_key("dial9.sampling.pool"));
+    assert_eq!(metadata["service_name"], config.service_name());
+    assert_eq!(metadata["bucket"], config.bucket());
 }
 
 #[test]
 fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
-    let root = tempfile::tempdir().unwrap();
-    let service = fake_service(root.path());
+    // s3s-fs sidecar filenames exceed NAME_MAX for epoch-qualified membership keys.
+    // MemoryStore checks callback-error cleanup; native requests and uploads are covered separately.
+    let store = Arc::new(MemoryStore::new());
     let rt = runtime();
-    rt.block_on(
-        fake_client(service.clone())
-            .create_bucket()
-            .bucket("traces")
-            .send(),
-    )
-    .unwrap();
-    let make_store = || async {
-        Ok(S3SamplingStore::builder()
-            .client(fake_client(service.clone()))
-            .bucket("traces")
-            .build())
-    };
     let policy = Sampling::builder()
-        .scope("writer-error")
         .target(1)
         .startup_timeout(Duration::from_secs(5))
         .if_failed(StartupFailure::assume_population(1))
@@ -258,16 +265,16 @@ fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
     let (roster_written, roster) = oneshot::channel();
     let mut written_keys = None;
     let result = policy
-        .with_backend(async {
+        .with_storage(async {
             Ok(ObservedWrites {
-                store: make_store().await?,
+                store: store.clone(),
                 member_written: Mutex::new(Some(member_written)),
                 roster_written: Mutex::new(Some(roster_written)),
             })
         })
         .start_application(|SamplingStatus { enabled, .. }| {
             assert!(enabled);
-            // Await actual completed S3 writes, so cleanup is checked against
+            // Await actual completed writes, so cleanup is checked against
             // established membership and a persistent roster, without sleeps.
             written_keys = Some(rt.block_on(async {
                 let member = tokio::time::timeout(Duration::from_secs(5), member)
@@ -285,12 +292,11 @@ fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
     assert!(result.is_err());
     let (member, roster) = written_keys.unwrap();
     rt.block_on(async {
-        let store = make_store().await.unwrap();
         assert!(store.get(member).await.unwrap().is_none());
         assert!(store.get(roster).await.unwrap().is_some());
         assert!(
             store
-                .list(ListRequest::builder().prefix("v2/members/").build())
+                .list(ListRequest::builder().prefix("v3/members/").build())
                 .await
                 .unwrap()
                 .objects()
@@ -298,20 +304,20 @@ fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
         );
     });
     policy
-        .with_backend(make_store())
+        .with_storage(async { Ok(store.clone()) })
         .start_application(|SamplingStatus { enabled, .. }| assert!(enabled));
 }
 
 #[rstest::rstest]
-#[case(None, "_dial9_sampling/")]
-#[case(Some("sampling/"), "sampling/")]
-#[case(Some(""), "")]
+#[case(None, "_dial9_sampling/service=")]
+#[case(Some("sampling"), "sampling/_dial9_sampling/service=")]
 #[test]
 fn s3_adapter_enforces_etag_conditions_and_complete_pagination(
     #[case] prefix: Option<&str>,
     #[case] expected_prefix: &str,
 ) {
     use dial9_sampling::backend::WriteCondition;
+    // s3s-fs normalizes separators; empty/trailing prefixes are checked at the SDK boundary.
     let root = tempfile::tempdir().unwrap();
     let client = fake_client(fake_service(root.path()));
     let rt = runtime();
@@ -322,13 +328,18 @@ fn s3_adapter_enforces_etag_conditions_and_complete_pagination(
             .send()
             .await
             .unwrap();
-        let builder = S3SamplingStore::builder()
+        let config = dial9::s3::S3Config::builder()
+            .bucket("traces")
+            .service_name("manual-test")
+            .maybe_prefix(prefix.map(str::to_owned))
+            .region("us-east-1")
+            .build();
+        let store = S3SamplingStore::builder()
             .client(client.clone())
-            .bucket("traces");
-        let store = match prefix {
-            Some(prefix) => builder.prefix(prefix).build(),
-            None => builder.build(),
-        };
+            .config(config)
+            .build()
+            .await
+            .unwrap();
         let outcome = store
             .put(PutRequest::builder().key("a").body("one".into()).build())
             .await
@@ -412,9 +423,8 @@ fn s3_adapter_enforces_etag_conditions_and_complete_pagination(
             .map(|object| object.key().unwrap().to_string())
             .collect::<Vec<_>>();
         keys.sort();
-        assert_eq!(
-            keys,
-            [format!("{expected_prefix}a"), format!("{expected_prefix}b")],
-        );
+        let namespace = keys[0].strip_suffix('a').unwrap();
+        assert!(namespace.starts_with(expected_prefix));
+        assert_eq!(keys, [format!("{namespace}a"), format!("{namespace}b")],);
     });
 }

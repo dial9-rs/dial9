@@ -23,6 +23,7 @@ struct ResponseFixture {
     body: String,
     etag: Option<&'static str>,
     modified: Option<&'static str>,
+    bucket_region: Option<&'static str>,
     broken_body: bool,
 }
 impl HttpConnector for ResponseFixture {
@@ -39,16 +40,37 @@ impl HttpConnector for ResponseFixture {
         if let Some(modified) = self.modified {
             response.headers_mut().insert("last-modified", modified);
         }
+        if let Some(region) = self.bucket_region {
+            response.headers_mut().insert("x-amz-bucket-region", region);
+        }
         HttpConnectorFuture::new(async move { Ok(response) })
     }
 }
-fn store(fixture: ResponseFixture) -> S3SamplingStore {
-    store_with_connector(fixture, 1)
+async fn store(fixture: ResponseFixture) -> S3SamplingStore {
+    store_with_connector(fixture, 1).await
 }
-fn store_with_connector(connector: impl HttpConnector + 'static, attempts: u32) -> S3SamplingStore {
+async fn store_with_connector(
+    connector: impl HttpConnector + 'static,
+    attempts: u32,
+) -> S3SamplingStore {
+    S3SamplingStore::builder()
+        .client(sdk_client(connector, attempts))
+        .config(
+            dial9_destinations_s3::S3Config::builder()
+                .bucket("traces")
+                .service_name("sampled")
+                .prefix("coord")
+                .region("us-east-1")
+                .build(),
+        )
+        .build()
+        .await
+        .unwrap()
+}
+fn sdk_client(connector: impl HttpConnector + 'static, attempts: u32) -> aws_sdk_s3::Client {
     let connector = SharedHttpConnector::new(connector);
     let http = http_client_fn(move |_, _| connector.clone());
-    let client = aws_sdk_s3::Client::from_conf(
+    aws_sdk_s3::Client::from_conf(
         aws_sdk_s3::Config::builder()
             .behavior_version_latest()
             .credentials_provider(aws_sdk_s3::config::Credentials::new(
@@ -61,16 +83,13 @@ fn store_with_connector(connector: impl HttpConnector + 'static, attempts: u32) 
             .http_client(http)
             .force_path_style(true)
             .build(),
-    );
-    S3SamplingStore::builder()
-        .client(client)
-        .bucket("traces")
-        .prefix("coord/")
-        .build()
+    )
 }
 #[derive(Debug)]
 struct ObservedRequest {
     method: String,
+    uri: String,
+    authorization: Option<String>,
     if_match: Option<String>,
     if_none_match: Option<String>,
 }
@@ -91,6 +110,8 @@ impl HttpConnector for RecordingFixture {
     fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
         self.requests.lock().unwrap().push(ObservedRequest {
             method: request.method().into(),
+            uri: request.uri().to_string(),
+            authorization: request.headers().get("authorization").map(String::from),
             if_match: request.headers().get("if-match").map(String::from),
             if_none_match: request.headers().get("if-none-match").map(String::from),
         });
@@ -109,6 +130,7 @@ fn response(status: u16) -> ResponseFixture {
         body: String::new(),
         etag: Some("\"fixture\""),
         modified: Some("Sun, 01 Jan 2023 00:00:00 GMT"),
+        bucket_region: None,
         broken_body: false,
     }
 }
@@ -138,7 +160,7 @@ async fn backend_errors_preserve_meaning(
     #[case] status: u16,
     #[case] expected: &str,
 ) {
-    let store = store(response(status));
+    let store = store(response(status)).await;
     let error = match operation {
         "get" => store.get("a".into()).await.unwrap_err(),
         "list" => store
@@ -161,6 +183,7 @@ async fn backend_errors_preserve_meaning(
 #[tokio::test(start_paused = true)]
 async fn conditional_conflicts_are_classified(#[case] status: u16, #[case] uncertain: bool) {
     let result = store(response(status))
+        .await
         .put(PutRequest::builder().key("a").body("data".into()).build())
         .await;
     if uncertain {
@@ -190,7 +213,7 @@ async fn malformed_get_is_not_a_missing_object(#[case] field: &str, #[case] expe
         _ => panic!("unknown field"),
     }
     assert_eq!(
-        kind(&store(fixture).get("a".into()).await.unwrap_err()),
+        kind(&store(fixture).await.get("a".into()).await.unwrap_err()),
         expected
     );
 }
@@ -198,6 +221,7 @@ async fn malformed_get_is_not_a_missing_object(#[case] field: &str, #[case] expe
 async fn missing_object_and_missing_put_ack_are_distinct() {
     assert!(
         store(response(404))
+            .await
             .get("a".into())
             .await
             .unwrap()
@@ -206,6 +230,7 @@ async fn missing_object_and_missing_put_ack_are_distinct() {
     let mut fixture = response(200);
     fixture.etag = None;
     let error = store(fixture)
+        .await
         .put(PutRequest::builder().key("a").body("data".into()).build())
         .await
         .unwrap_err();
@@ -226,6 +251,7 @@ async fn malformed_list_cannot_become_a_fleet_count(#[case] contents: &str) {
     let mut fixture = response(200);
     fixture.body = format!("<ListBucketResult>{contents}</ListBucketResult>");
     let error = store(fixture)
+        .await
         .list(ListRequest::builder().prefix("a").build())
         .await
         .unwrap_err();
@@ -240,14 +266,20 @@ async fn unordered_and_duplicate_list_entries_reach_the_census(
     #[case] first: &str,
     #[case] second: &str,
 ) {
+    use sha2::{Digest, Sha256};
+    let prefix = format!(
+        "coord/_dial9_sampling/service={:x}/",
+        Sha256::digest(b"sampled")
+    );
     let mut fixture = response(200);
     fixture.body = format!(
         "<ListBucketResult><IsTruncated>false</IsTruncated>\
-         <Contents><Key>coord/{first}</Key></Contents>\
-         <Contents><Key>coord/{second}</Key></Contents>\
+         <Contents><Key>{prefix}{first}</Key></Contents>\
+         <Contents><Key>{prefix}{second}</Key></Contents>\
          </ListBucketResult>"
     );
     let page = store(fixture)
+        .await
         .list(ListRequest::builder().prefix("a").build())
         .await
         .unwrap();
@@ -267,6 +299,7 @@ async fn uncertain_put_is_not_hidden_by_a_retry_precondition_failure() {
     // would observe the changed version and return 412, hiding that commit.
     let fixture = RecordingFixture::new([response(500), response(412)]);
     let error = store_with_connector(fixture.clone(), 5)
+        .await
         .put(
             PutRequest::builder()
                 .key("v2/pools/pool/roster.json")
@@ -301,6 +334,7 @@ async fn requested_write_condition_is_preserved_on_the_wire(
         _ => "v2/pools/pool/roster.json",
     };
     let result = store_with_connector(fixture.clone(), 5)
+        .await
         .put(
             PutRequest::builder()
                 .key(key)
@@ -316,4 +350,194 @@ async fn requested_write_condition_is_preserved_on_the_wire(
     assert_eq!(requests[0].method, "PUT");
     assert_eq!(requests[0].if_match.as_deref(), if_match);
     assert_eq!(requests[0].if_none_match.as_deref(), if_none_match);
+}
+
+#[tokio::test(start_paused = true)]
+async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_client() {
+    use sha2::{Digest, Sha256};
+    let fixture = RecordingFixture::new(std::iter::repeat_n(response(200), 6));
+    let bootstrap = sdk_client(fixture.clone(), 1);
+    let client = aws_sdk_s3::Client::from_conf(
+        bootstrap
+            .config()
+            .to_builder()
+            .endpoint_url("https://custom.test")
+            .build(),
+    );
+    let namespaces = [
+        ("checkout", None),
+        ("checkout", Some("")),
+        ("checkout", Some("traces")),
+        ("checkout", Some("traces/")),
+        ("billing", Some("traces")),
+    ];
+    for (service, prefix) in namespaces {
+        let config = dial9_destinations_s3::S3Config::builder()
+            .bucket("shared-traces")
+            .service_name(service)
+            .maybe_prefix(prefix.map(str::to_owned))
+            .region("eu-west-1")
+            // Individual trace layout does not change coordination keys.
+            .key_fn(|_: &dial9_destinations_s3::KeyContext| "custom-trace-key".to_owned())
+            .build();
+        let store = S3SamplingStore::builder()
+            .config(config)
+            .client(client.clone())
+            .build()
+            .await
+            .unwrap();
+        store
+            .put(
+                PutRequest::builder()
+                    .key("v3/pools/pool/roster.json")
+                    .body("roster".into())
+                    .build(),
+            )
+            .await
+            .unwrap();
+    }
+    let membership_key = format!(
+        "v3/members/{}/01M623S6ZY8ND5FEG3ACCRG99H/0000000005977399/575c86b7dbf19363.a.01M623S6ZY8ND5FEG3ACCRG99J",
+        "0".repeat(64)
+    );
+    let store = S3SamplingStore::builder()
+        .config(
+            dial9_destinations_s3::S3Config::builder()
+                .bucket("shared-traces")
+                .service_name("checkout")
+                .region("eu-west-1")
+                .build(),
+        )
+        .client(client)
+        .build()
+        .await
+        .unwrap();
+    store
+        .put(
+            PutRequest::builder()
+                .key(&membership_key)
+                .body(bytes::Bytes::new())
+                .condition(WriteCondition::unconditional())
+                .build(),
+        )
+        .await
+        .unwrap();
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        6,
+        "explicit regions need no discovery request"
+    );
+    for (request, (service, prefix)) in requests.iter().zip(namespaces) {
+        let service_hash = format!("{:x}", Sha256::digest(service.as_bytes()));
+        let prefix = prefix.map_or_else(String::new, |prefix| format!("{prefix}/"));
+        assert_eq!(
+            request.uri.split('?').next().unwrap(),
+            format!(
+                "https://custom.test/shared-traces/{prefix}_dial9_sampling/service%3D{service_hash}/v3/pools/pool/roster.json"
+            )
+        );
+        assert!(
+            request
+                .authorization
+                .as_ref()
+                .unwrap()
+                .contains("/eu-west-1/s3/aws4_request"),
+            "configured region overrides the bootstrap client's region"
+        );
+    }
+    assert_ne!(requests[0].uri, requests[1].uri);
+    assert_ne!(requests[2].uri, requests[3].uri);
+    assert_ne!(requests[2].uri, requests[4].uri);
+    assert_eq!(
+        requests[5].uri.split('?').next().unwrap(),
+        format!(
+            "https://custom.test/shared-traces/_dial9_sampling/service%3D{:x}/{membership_key}",
+            Sha256::digest(b"checkout")
+        )
+    );
+    assert!(requests[5].if_match.is_none());
+    assert!(requests[5].if_none_match.is_none());
+}
+
+#[rstest::rstest]
+#[case(200)]
+#[case(301)]
+#[tokio::test(start_paused = true)]
+async fn initialization_discovers_region_from_success_or_redirect(#[case] status: u16) {
+    let mut discovery = response(status);
+    discovery.bucket_region = Some("eu-west-1");
+    let fixture = RecordingFixture::new([discovery, response(200)]);
+    let config = dial9_destinations_s3::S3Config::builder()
+        .bucket("traces")
+        .service_name("checkout")
+        .build();
+    let store = S3SamplingStore::builder()
+        .config(config)
+        .client(sdk_client(fixture.clone(), 1))
+        .build()
+        .await
+        .unwrap();
+    store
+        .put(PutRequest::builder().key("a").body("data".into()).build())
+        .await
+        .unwrap();
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "HEAD");
+    assert!(
+        requests[1]
+            .authorization
+            .as_ref()
+            .unwrap()
+            .contains("/eu-west-1/s3/aws4_request")
+    );
+}
+
+#[rstest::rstest]
+#[case(200)]
+#[case(403)]
+#[tokio::test(start_paused = true)]
+async fn missing_region_is_an_initialization_error(#[case] status: u16) {
+    let fixture = RecordingFixture::new([response(status)]);
+    let error = S3SamplingStore::builder()
+        .config(
+            dial9_destinations_s3::S3Config::builder()
+                .bucket("traces")
+                .service_name("checkout")
+                .build(),
+        )
+        .client(sdk_client(fixture.clone(), 1))
+        .build()
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+}
+
+#[rstest::rstest]
+#[case("", "checkout", "us-east-1")]
+#[case("traces", " ", "us-east-1")]
+#[case("traces", "checkout", "")]
+#[tokio::test(start_paused = true)]
+async fn invalid_configuration_does_not_issue_requests(
+    #[case] bucket: &str,
+    #[case] service: &str,
+    #[case] region: &str,
+) {
+    let fixture = RecordingFixture::new([]);
+    let error = S3SamplingStore::builder()
+        .config(
+            dial9_destinations_s3::S3Config::builder()
+                .bucket(bucket)
+                .service_name(service)
+                .region(region)
+                .build(),
+        )
+        .client(sdk_client(fixture.clone(), 1))
+        .build()
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(fixture.requests.lock().unwrap().is_empty());
 }

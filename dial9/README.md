@@ -196,17 +196,20 @@ Missing variables use defaults. Blank, invalid, or non-Unicode values emit a war
 ## Startup sampling
 
 Use `dial9-sampling` to choose which processes profile at startup:
-`sampling.with_backend(backend).start_application(|SamplingStatus { enabled, .. }| { ... })`.
-The runner owns preparation, lease maintenance and cleanup. Its callback runs
+`sampling.with_storage(async { ... }).start_application(|status| { ... })`.
+The runner owns storage initialization, census maintenance and cleanup. Its callback runs
 outside Tokio's entered context, so it can branch before allocating a writer,
 construct the instrumented application runtime and run the application normally.
 With the sampler's `dial9` feature, call `status.register_recorder(&recorder)` for
 automatic stop handling on the sampler runtime.
-Drop that runtime and drain the recorder before returning from the callback.
+Drop the application runtime and drain the recorder before returning from the callback.
 
 See the [standalone guide](../dial9-sampling/README.md) and the
 [application entry-point example](examples/manual_sampling.rs). Selected processes
-use separate S3 clients for coordination and trace upload.
+reuse one `S3Config` for coordination and trace upload, with separate clients
+initialized on their respective worker runtimes. Service isolation comes from
+that config; callers add grouping dimensions without a separate sampling scope
+or minimum-population assumption.
 
 ## Why dial9?
 

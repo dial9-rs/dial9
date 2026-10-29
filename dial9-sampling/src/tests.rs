@@ -68,7 +68,7 @@ use std::{io, sync::Arc, time::Duration};
 async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_interval: Duration) {
     let store = Arc::new(MemoryStore::new());
     let sampling = Sampling::builder()
-        .scope("cold")
+        .add_dimension("test", "cold")
         .target(1)
         .poll_interval(poll_interval)
         .bucket_width(Duration::from_secs(30))
@@ -119,13 +119,13 @@ async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_i
 #[case(StartupFailure::disabled(), false)]
 fn fallback_recorder_controls_and_cleanup(#[case] failure: StartupFailure, #[case] enabled: bool) {
     let sampling = Sampling::builder()
-        .scope("fallback-weight")
+        .add_dimension("test", "fallback-weight")
         .target(1)
         .startup_timeout(Duration::ZERO)
         .if_failed(failure)
         .build();
     let (status, recorder) = sampling
-        .with_backend(async {
+        .with_storage(async {
             panic!("zero budget must not poll the backend");
             #[allow(unreachable_code)]
             Ok(MemoryStore::new())
@@ -175,7 +175,7 @@ async fn startup_budget_covers_initialization_and_get_without_revisiting_fallbac
     let store = Arc::new(MemoryStore::new());
     store.set_latency(Duration::from_millis(storage_ms));
     let mut sampling = Sampling::builder()
-        .scope("timeout")
+        .add_dimension("test", "timeout")
         .target(1)
         .if_failed(fallback)
         .build();
@@ -211,7 +211,7 @@ async fn startup_budget_covers_initialization_and_get_without_revisiting_fallbac
 async fn storage_outage_preserves_active_state() {
     let store = Arc::new(MemoryStore::new());
     let session = Sampling::builder()
-        .scope("outage")
+        .add_dimension("test", "outage")
         .target(1)
         .if_failed(StartupFailure::assume_population(1))
         .build()
@@ -245,7 +245,7 @@ async fn registered_recorder_survives_outage_then_stops_at_cleanup_after_status_
         maintenance,
         registration,
     } = Sampling::builder()
-        .scope("registered-outage")
+        .add_dimension("test", "registered-outage")
         .target(1)
         .if_failed(StartupFailure::assume_population(1))
         .build()
@@ -321,7 +321,7 @@ async fn storage_failure_fallback_participates_without_enabling_again() {
     let store = Arc::new(MemoryStore::new());
     store.set_unavailable(true);
     let session = Sampling::builder()
-        .scope("fallback-stop")
+        .add_dimension("test", "fallback-stop")
         .target(1)
         .if_failed(StartupFailure::assume_population(1))
         .build()
@@ -347,11 +347,11 @@ fn runtime_creation_failure_uses_required_failure_policy(
     #[case] expected: bool,
 ) {
     let enabled = Sampling::builder()
-        .scope("runtime-error")
+        .add_dimension("test", "runtime-error")
         .target(1)
         .if_failed(fallback)
         .build()
-        .with_backend(async {
+        .with_storage(async {
             panic!("factory must not run if runtime creation fails");
             #[allow(unreachable_code)]
             Ok(MemoryStore::new())
@@ -366,12 +366,12 @@ fn runtime_creation_failure_uses_required_failure_policy(
 #[test]
 fn exhausted_startup_budget_never_polls_backend() {
     let enabled = Sampling::builder()
-        .scope("runtime-budget")
+        .add_dimension("test", "runtime-budget")
         .target(1)
         .startup_timeout(Duration::ZERO)
         .if_failed(StartupFailure::disabled())
         .build()
-        .with_backend(async {
+        .with_storage(async {
             panic!("an exhausted budget must not poll the factory");
             #[allow(unreachable_code)]
             Ok(MemoryStore::new())
@@ -381,27 +381,23 @@ fn exhausted_startup_budget_never_polls_backend() {
 }
 
 #[rstest::rstest]
-#[case("valid", 0, 0, Duration::from_millis(1000))]
-#[case("valid", 1, u64::MAX, Duration::from_millis(1000))]
-#[case("", 1, 0, Duration::from_millis(1000))]
-#[case("valid", 1, 0, Duration::MAX)]
+#[case("valid", 0, Duration::from_millis(1000))]
+#[case("", 1, Duration::from_millis(1000))]
+#[case("valid", 1, Duration::MAX)]
 #[test]
-fn zero_untracked_or_invalid_startup_builds_no_runtime_and_polls_no_backend(
-    #[case] scope: &str,
+fn zero_or_invalid_startup_builds_no_runtime_and_polls_no_backend(
+    #[case] dimension: &str,
     #[case] target: u32,
-    #[case] minimum_population: u64,
     #[case] timeout: Duration,
 ) {
     let sampling = Sampling::builder()
-        .scope(scope)
-        .host_id("untracked-process")
+        .add_dimension("test", dimension)
         .target(target)
-        .minimum_population(minimum_population)
         .startup_timeout(timeout)
         .if_failed(StartupFailure::assume_population(1))
         .build();
     let enabled = sampling
-        .with_backend(async {
+        .with_storage(async {
             panic!("preflight must not initialize the backend");
             #[allow(unreachable_code)]
             Ok(MemoryStore::new())

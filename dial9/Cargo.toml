@@ -143,6 +143,7 @@ linux-socket = [
 
 [dev-dependencies]
 dial9-sampling = { workspace = true, features = ["s3", "dial9"] }
+sha2 = "0.10"
 s3s = "0.14.1"
 s3s-fs = "0.14.1"
 s3s-aws = "0.14.1"
