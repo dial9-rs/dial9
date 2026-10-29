@@ -220,7 +220,11 @@ impl Population {
         })
     }
     fn admission(&self, target: u32) -> Cutoff {
-        Cutoff::from_probability(f64::from(target) / self.estimate)
+        Cutoff::threshold(
+            Cutoff::from_probability(f64::from(target) / self.estimate)
+                .value()
+                .max(u128::from(target > 0)),
+        )
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -295,11 +299,11 @@ impl Roster {
             .filter(|p| p.fresh(now, config))
             .map(|p| p.admission(config.target()))
     }
-    fn applicable(&self, window: u64) -> &Control {
+    fn applicable(&self, window: u64) -> Option<&Control> {
         self.next_control
             .as_ref()
             .filter(|c| c.effective_window <= window)
-            .unwrap_or(&self.control)
+            .or_else(|| (self.control.effective_window <= window).then_some(&self.control))
     }
     fn promote(&mut self, window: u64) {
         if self
@@ -438,7 +442,15 @@ pub(crate) async fn prepare_using(
     });
     let (signal, recording_changes) = watch::channel(recording);
     let stop = CancellationToken::new();
-    let mut worker = Worker::new(config, store, clock, observed, signal, authoritative);
+    let mut worker = match Worker::new(config, store, clock, observed, signal, authoritative) {
+        Ok(worker) => worker,
+        Err(error) => {
+            return PreparedSampling::disabled(
+                DecisionReason::store_failure(error.to_string()),
+                fallback,
+            );
+        }
+    };
     worker.weights = weights.clone();
     let cancellation = stop.clone();
     let task = tokio::spawn(async move {
@@ -489,6 +501,7 @@ struct Worker {
     last_trim_epoch: u64,
     compatible: bool,
     election_needed: bool,
+    read_in_turn: bool,
     weights: Option<crate::trace_weights::TraceWeights>,
 }
 impl Worker {
@@ -499,9 +512,9 @@ impl Worker {
         observed: Option<Observed>,
         signal: watch::Sender<bool>,
         authoritative: bool,
-    ) -> Self {
+    ) -> Result<Self, StoreError> {
         let timing = Timing::new(&config);
-        let born_ms = millis(clock.now()).expect("validated clock after epoch");
+        let born_ms = millis(clock.now())?;
         let window = born_ms / timing.width;
         let phase = config.draw("roster-phase", "") % timing.poll;
         let next_poll_ms = born_ms / timing.poll * timing.poll + phase;
@@ -510,9 +523,10 @@ impl Worker {
         } else {
             next_poll_ms
         };
-        let cutoff = observed.as_ref().map_or(Cutoff(None), |o| {
-            o.roster.applicable(window).reporting.clone()
-        });
+        let cutoff = observed
+            .as_ref()
+            .and_then(|o| o.roster.applicable(window))
+            .map_or(Cutoff(None), |c| c.reporting.clone());
         let pending_control = observed
             .as_ref()
             .and_then(|o| o.roster.next_control.clone())
@@ -522,7 +536,7 @@ impl Worker {
             && observed
                 .as_ref()
                 .is_none_or(|o| expired(o, &config, store.as_ref(), clock.now()));
-        Self {
+        Ok(Self {
             config,
             store,
             clock,
@@ -539,8 +553,9 @@ impl Worker {
             last_trim_epoch,
             compatible: true,
             election_needed,
+            read_in_turn: false,
             weights: None,
-        }
+        })
     }
     fn now(&self) -> Result<u64, StoreError> {
         millis(self.clock.now())
@@ -637,6 +652,7 @@ impl Worker {
         .transpose()
     }
     async fn poll(&mut self) -> Result<(), StoreError> {
+        self.read_in_turn = true;
         self.election_needed = false;
         match self.read_roster().await {
             Ok(observed) => {
@@ -751,10 +767,11 @@ impl Worker {
             .ok_or_else(|| invalid("report deadline overflow"))?;
         let key = census::report_key(&self.config, channel, window, rank, cutoff);
         for attempt in 0..2 {
-            if !self.compatible || self.now()? >= deadline {
+            let now = self.now()?;
+            if !self.compatible || now >= deadline {
                 return Err(invalid("report submission deadline expired"));
             }
-            let remaining = Duration::from_millis(deadline - self.now()?);
+            let remaining = Duration::from_millis(deadline - now);
             let result = bounded(
                 timing.operation.min(remaining),
                 self.store.put(
@@ -798,7 +815,7 @@ impl Worker {
         } else {
             None
         };
-        if census.is_some() || profiler.is_some() {
+        if (census.is_some() || profiler.is_some()) && !self.read_in_turn {
             // This GET only caches future control. Transport failure cannot suppress an eligible report.
             if let Err(error) = self.poll().await {
                 rate_limited!(Duration::from_secs(60), {
@@ -855,24 +872,24 @@ impl Worker {
             return Ok(());
         };
         // Each channel owns its own finite page budget, including when its peer fails.
-        let census = census::observe(
-            self.store.as_ref(),
-            &self.config,
-            "census",
-            window,
-            self.config.target() as usize * 32,
-            timing.operation,
-        )
-        .await;
-        let profilers = census::observe(
-            self.store.as_ref(),
-            &self.config,
-            "profilers",
-            window,
-            (self.config.target() as usize * 4).max(64),
-            timing.operation,
-        )
-        .await;
+        let (census, profilers) = tokio::join!(
+            census::observe(
+                self.store.as_ref(),
+                &self.config,
+                "census",
+                window,
+                self.config.target() as usize * 32,
+                timing.operation
+            ),
+            census::observe(
+                self.store.as_ref(),
+                &self.config,
+                "profilers",
+                window,
+                (self.config.target() as usize * 4).max(64),
+                timing.operation
+            ),
+        );
         let finished = self.now()?;
         let mut result = reserved.roster.clone();
         result.promote(finished / timing.width);
@@ -893,34 +910,36 @@ impl Worker {
         Ok(())
     }
     async fn run(&mut self) {
+        if let Err(error) = self.run_checked().await {
+            tracing::error!(%error, "sampling maintenance stopped after invalid clock");
+        }
+    }
+    async fn run_checked(&mut self) -> Result<(), StoreError> {
         loop {
-            let now = match self.now() {
-                Ok(now) => now,
-                Err(error) => {
-                    rate_limited!(Duration::from_secs(60), {
-                        tracing::error!(%error, "invalid sampling clock");
-                    });
-                    return;
-                }
-            };
+            let now = self.now()?;
             if let Err(error) = self.ensure_plan(now) {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!(%error, "sampling boundary control failed");
                 });
             }
-            if now >= self.next_poll_ms {
-                // Advance the original fixed-phase schedule before doing work. GETs never reset it.
+            self.read_in_turn = false;
+            let poll_due = now >= self.next_poll_ms;
+            if poll_due {
+                // Advance the anchored schedule independently of selected-report work.
                 let period = Timing::new(&self.config).poll;
                 self.next_poll_ms += ((now - self.next_poll_ms) / period + 1) * period;
-                if let Err(error) = self.poll().await {
-                    rate_limited!(Duration::from_secs(60), {
-                        tracing::warn!(%error, "sampling scheduled control read failed");
-                    });
-                }
             }
-            if let Err(error) = self.reports(self.now().unwrap_or(now)).await {
+            if let Err(error) = self.reports(now).await {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!(%error, "sampling report failed");
+                });
+            }
+            if poll_due
+                && !self.read_in_turn
+                && let Err(error) = self.poll().await
+            {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(%error, "sampling scheduled control read failed");
                 });
             }
             if let Err(error) = self.election().await {
@@ -930,14 +949,16 @@ impl Worker {
                 });
             }
             if self.leader.is_some() && self.now().is_ok_and(|now| now >= self.next_pass_ms) {
-                if let Err(error) = self.leader_pass().await {
+                if let Err(error) =
+                    bounded(self.config.settings.poll_interval, self.leader_pass()).await
+                {
                     self.leader = None;
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!(%error, "sampling leader round failed");
                     });
                 }
                 let timing = Timing::new(&self.config);
-                let now = self.now().unwrap_or(now);
+                let now = self.now()?;
                 let close = now / timing.width * timing.width + timing.closure;
                 self.next_pass_ms = if close > now {
                     close
@@ -949,7 +970,7 @@ impl Worker {
                     .next_pass_ms
                     .min(now.saturating_add(self.config.settings.poll_interval.as_millis() as u64));
             }
-            let now = self.now().unwrap_or(now);
+            let now = self.now()?;
             let timing = Timing::new(&self.config);
             let mut next = self
                 .next_poll_ms
