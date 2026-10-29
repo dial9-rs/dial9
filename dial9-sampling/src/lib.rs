@@ -106,22 +106,18 @@ pub struct Sampling {
     num_target_profilers: u32,
     /// Behavior on storage failure or timeout.
     if_failed: StartupFailure,
-    /// TODO_REWRITE
+    /// Timeout for sampler startup.
     ///
-    /// Cooperative budget covering runtime setup, backend construction and admission; defaults to 1000ms.
+    /// If the timeout expires, the profiler will fall back to `if_failed` behavior
     #[builder(default = Duration::from_millis(1000))]
     startup_timeout: Duration,
+
     #[builder(skip)]
     invocation_id: String,
-    /// TODO_REWRITE
-    ///
     /// Additional admitted profilers tolerated before randomized thinning.
     /// Defaults to the ceiling of three times the square root of the target.
     max_overshoot: Option<u32>,
-    /// TODO_REWRITE
-    ///
-    /// Background roster polling interval; defaults to one minute.
-    /// Must be between 100ms and eight hours, using whole milliseconds.
+    /// Polling interval for the leader to check the profiler roster
     #[builder(default = Duration::from_secs(60))]
     poll_interval: Duration,
     /// TODO_REWRITE
