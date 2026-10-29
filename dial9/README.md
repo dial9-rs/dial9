@@ -196,8 +196,58 @@ Missing variables use defaults. Blank, invalid, or non-Unicode values emit a war
 ## Startup sampling
 
 Use `dial9-sampling` to sample at the host/process level:
-```rust
-TODO(agent): minimal code snippet
+
+```rust,no_run
+# #[cfg(feature = "worker-s3")]
+# fn example() -> std::io::Result<()> {
+use dial9::s3::S3Config;
+use dial9_sampling::{Sampling, StartupFailure, s3::S3SamplingStore};
+# use dial9::{Dial9HandleTokioExt, MemoryBuffer, RecorderS3ClientExt, TokioAttachOptions};
+# use std::time::Duration;
+# fn configure_application(
+#     enabled: bool,
+#     s3: &S3Config,
+# ) -> std::io::Result<(dial9::Recorder, tokio::runtime::Runtime)> {
+#     let recorder = if enabled {
+#         dial9::recorder(MemoryBuffer::new(16 * 1024 * 1024)?)
+#             .with_s3_uploader_client_future(s3.clone(), async {
+#                 let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+#                 aws_sdk_s3::Client::new(&config)
+#             })
+#             .build()
+#     } else {
+#         dial9::recorder_disabled()
+#     };
+#     let mut builder = tokio::runtime::Builder::new_multi_thread();
+#     builder.enable_all();
+#     let runtime = recorder.handle().attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+#     Ok((recorder, runtime))
+# }
+# fn run_application(recorder: dial9::Recorder, runtime: tokio::runtime::Runtime) -> std::io::Result<()> {
+#     dial9::block_on(&runtime, async { /* Your application main. */ });
+#     drop(runtime);
+#     recorder.graceful_shutdown(Duration::from_secs(5));
+#     Ok(())
+# }
+let s3 = S3Config::builder()
+    .bucket("dial9-traces-my-service")
+    .service_name("checkout")
+    .build();
+
+Sampling::builder()
+    .num_target_profilers(15)
+    .if_failed(StartupFailure::disabled())
+    .build()
+    .with_storage(async {
+        S3SamplingStore::builder().config(s3.clone()).build().await
+    })
+    .start_application(|sampler| {
+        let (recorder, runtime) = configure_application(sampler.enabled, &s3)?;
+        sampler.register_recorder(&recorder);
+        run_application(recorder, runtime)
+    })
+# }
+# fn main() {}
 ```
 
 `dial9-sampling` uses S3 or another similar object store to allow you to pick a target of number of hosts to enable profiling on. It will be fully managed by dial9 itself.
