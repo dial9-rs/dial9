@@ -9,7 +9,7 @@ use bytes::Bytes;
 fn sampling() -> Sampling {
     Sampling::builder()
         .add_dimension("environment", "historical")
-        .target(15)
+        .num_target_profilers(15)
         .if_failed(StartupFailure::disabled())
         .build()
 }

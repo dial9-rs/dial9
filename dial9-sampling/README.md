@@ -18,7 +18,7 @@ Sampling::builder()
     .add_dimension("environment", "production")
     .add_dimension("instance-type", "m7i.large")
     .add_dimension("az", "us-east-1a")
-    .target(15)
+    .num_target_profilers(15)
     .if_failed(StartupFailure::disabled())
     .build()
     .with_storage(async {

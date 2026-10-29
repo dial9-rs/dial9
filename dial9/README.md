@@ -197,6 +197,7 @@ Missing variables use defaults. Blank, invalid, or non-Unicode values emit a war
 
 Use `dial9-sampling` to choose which processes profile at startup:
 `sampling.with_storage(async { ... }).start_application(|status| { ... })`.
+Configure the expected number of profiling processes with `.num_target_profilers(15)`.
 The runner owns storage initialization, census maintenance and cleanup. Its callback runs
 outside Tokio's entered context, so it can branch before allocating a writer,
 construct the instrumented application runtime and run the application normally.

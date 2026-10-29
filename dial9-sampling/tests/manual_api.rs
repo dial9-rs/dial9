@@ -21,7 +21,7 @@ use tokio::sync::oneshot;
 
 fn policy() -> Sampling {
     Sampling::builder()
-        .target(1)
+        .num_target_profilers(1)
         .if_failed(StartupFailure::assume_population(1))
         .build()
 }
@@ -237,7 +237,7 @@ fn registration_rejects_disabled_or_ended_invocation(#[case] ended: bool) {
         status.register_recorder(&recorder);
     } else {
         Sampling::builder()
-            .target(0)
+            .num_target_profilers(0)
             .if_failed(StartupFailure::disabled())
             .build()
             .with_storage(async { Ok(MemoryStore::new()) })
@@ -298,7 +298,7 @@ fn backend_error_still_starts_application_with_fallback(
     #[case] expected: bool,
 ) {
     let enabled = Sampling::builder()
-        .target(1)
+        .num_target_profilers(1)
         .if_failed(fallback)
         .build()
         .with_storage(async { Err::<MemoryStore, _>(std::io::Error::other("backend failed")) })

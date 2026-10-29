@@ -76,7 +76,7 @@ fn main() -> io::Result<()> {
     };
     Sampling::builder()
         .add_dimension("architecture", std::env::consts::ARCH)
-        .target(target)
+        .num_target_profilers(target)
         .startup_timeout(Duration::from_secs(5))
         .if_failed(if_failed)
         .build()

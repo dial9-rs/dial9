@@ -141,7 +141,7 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
         Sampling::builder()
             .add_dimension("environment", environment)
             .add_dimension("az", "a")
-            .target(1)
+            .num_target_profilers(1)
             .startup_timeout(Duration::from_secs(5))
             .if_failed(fallback)
             .build()
@@ -254,7 +254,7 @@ fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
     let store = Arc::new(MemoryStore::new());
     let rt = runtime();
     let policy = Sampling::builder()
-        .target(1)
+        .num_target_profilers(1)
         .startup_timeout(Duration::from_secs(5))
         .if_failed(StartupFailure::assume_population(1))
         .build();

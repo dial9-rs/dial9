@@ -23,7 +23,7 @@ async fn prepare(policy: &Config, store: Arc<MemoryStore>) -> PreparedSampling {
 fn config(target: u32, run: &str) -> Config {
     let mut policy = crate::Sampling::builder()
         .add_dimension("environment", "prod")
-        .target(target)
+        .num_target_profilers(target)
         .poll_interval(Duration::from_secs(1))
         .bucket_width(Duration::from_secs(10))
         .max_clock_skew(Duration::ZERO)

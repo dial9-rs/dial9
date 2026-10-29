@@ -69,7 +69,7 @@ async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_i
     let store = Arc::new(MemoryStore::new());
     let sampling = Sampling::builder()
         .add_dimension("test", "cold")
-        .target(1)
+        .num_target_profilers(1)
         .poll_interval(poll_interval)
         .bucket_width(Duration::from_secs(30))
         .max_clock_skew(Duration::ZERO)
@@ -120,7 +120,7 @@ async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_i
 fn fallback_recorder_controls_and_cleanup(#[case] failure: StartupFailure, #[case] enabled: bool) {
     let sampling = Sampling::builder()
         .add_dimension("test", "fallback-weight")
-        .target(1)
+        .num_target_profilers(1)
         .startup_timeout(Duration::ZERO)
         .if_failed(failure)
         .build();
@@ -176,7 +176,7 @@ async fn startup_budget_covers_initialization_and_get_without_revisiting_fallbac
     store.set_latency(Duration::from_millis(storage_ms));
     let mut sampling = Sampling::builder()
         .add_dimension("test", "timeout")
-        .target(1)
+        .num_target_profilers(1)
         .if_failed(fallback)
         .build();
     if let Some(timeout) = timeout_ms {
@@ -212,7 +212,7 @@ async fn storage_outage_preserves_active_state() {
     let store = Arc::new(MemoryStore::new());
     let session = Sampling::builder()
         .add_dimension("test", "outage")
-        .target(1)
+        .num_target_profilers(1)
         .if_failed(StartupFailure::assume_population(1))
         .build()
         .prepare_on_executor(async { Ok(store.clone()) })
@@ -246,7 +246,7 @@ async fn registered_recorder_survives_outage_then_stops_at_cleanup_after_status_
         registration,
     } = Sampling::builder()
         .add_dimension("test", "registered-outage")
-        .target(1)
+        .num_target_profilers(1)
         .if_failed(StartupFailure::assume_population(1))
         .build()
         .prepare_on_executor(async { Ok(store.clone()) })
@@ -322,7 +322,7 @@ async fn storage_failure_fallback_participates_without_enabling_again() {
     store.set_unavailable(true);
     let session = Sampling::builder()
         .add_dimension("test", "fallback-stop")
-        .target(1)
+        .num_target_profilers(1)
         .if_failed(StartupFailure::assume_population(1))
         .build()
         .prepare_on_executor(async { Ok(store.clone()) })
@@ -348,7 +348,7 @@ fn runtime_creation_failure_uses_required_failure_policy(
 ) {
     let enabled = Sampling::builder()
         .add_dimension("test", "runtime-error")
-        .target(1)
+        .num_target_profilers(1)
         .if_failed(fallback)
         .build()
         .with_storage(async {
@@ -367,7 +367,7 @@ fn runtime_creation_failure_uses_required_failure_policy(
 fn exhausted_startup_budget_never_polls_backend() {
     let enabled = Sampling::builder()
         .add_dimension("test", "runtime-budget")
-        .target(1)
+        .num_target_profilers(1)
         .startup_timeout(Duration::ZERO)
         .if_failed(StartupFailure::disabled())
         .build()
@@ -392,7 +392,7 @@ fn zero_or_invalid_startup_builds_no_runtime_and_polls_no_backend(
 ) {
     let sampling = Sampling::builder()
         .add_dimension("test", dimension)
-        .target(target)
+        .num_target_profilers(target)
         .startup_timeout(timeout)
         .if_failed(StartupFailure::assume_population(1))
         .build();

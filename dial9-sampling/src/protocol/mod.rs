@@ -51,7 +51,7 @@ impl Default for StartupFailure {
 pub(crate) type Config = crate::Sampling;
 impl Config {
     pub(crate) fn target(&self) -> u32 {
-        self.target
+        self.num_target_profilers
     }
     pub(crate) fn rank(&self) -> u64 {
         let mut dimensions = self.dimensions.clone();
@@ -83,7 +83,8 @@ impl Config {
             StartupFailure::Disabled {} => 0,
             StartupFailure::AssumePopulation { population: 0 } => 0,
             StartupFailure::AssumePopulation { population } => {
-                ((u128::from(self.target) << 64) / u128::from(population)).min(1u128 << 64)
+                ((u128::from(self.num_target_profilers) << 64) / u128::from(population))
+                    .min(1u128 << 64)
             }
         }
     }
@@ -114,7 +115,7 @@ impl Config {
         }
         // Whole milliseconds are the wire format. Bound all time arithmetic and
         // leave a previous bucket visible while a delayed heartbeat is retried.
-        if self.target > 10000
+        if self.num_target_profilers > 10000
             || self.poll_interval < Duration::from_millis(100)
             || self.poll_interval > Duration::from_secs(86400 / 3)
             || self.bucket_width > Duration::from_secs(86400)
@@ -128,7 +129,7 @@ impl Config {
             || !self.bucket_width.subsec_nanos().is_multiple_of(1_000_000)
             || !self.max_clock_skew.subsec_nanos().is_multiple_of(1_000_000)
         {
-            return Err("target must be at most 10000; poll must be 100ms..8h; bucket must be <=1d and cover two polls plus clock margins; durations need whole milliseconds".into());
+            return Err("num_target_profilers must be at most 10000; poll must be 100ms..8h; bucket must be <=1d and cover two polls plus clock margins; durations need whole milliseconds".into());
         }
         Ok(())
     }
@@ -146,7 +147,7 @@ impl Config {
     }
     fn overshoot(&self) -> u32 {
         self.max_overshoot
-            .unwrap_or_else(|| (3.0 * f64::from(self.target).sqrt()).ceil() as u32)
+            .unwrap_or_else(|| (3.0 * f64::from(self.num_target_profilers).sqrt()).ceil() as u32)
     }
     pub(crate) async fn prepare_with_timeout(
         &self,

@@ -19,7 +19,7 @@
 //!     .add_dimension("environment", "production")
 //!     .add_dimension("instance-type", "m7i.large")
 //!     .add_dimension("az", "us-east-1a")
-//!     .target(15)
+//!     .num_target_profilers(15)
 //!     .startup_timeout(Duration::from_secs(5))
 //!     .if_failed(StartupFailure::disabled())
 //!     .build();
@@ -92,14 +92,14 @@ use tokio::runtime::Runtime;
 ///
 /// ```compile_fail
 /// use dial9_sampling::Sampling;
-/// Sampling::builder().target(15).build();
+/// Sampling::builder().num_target_profilers(15).build();
 /// ```
 #[derive(Clone, Debug, bon::Builder)]
 pub struct Sampling {
     #[builder(field)]
     dimensions: Vec<(String, String)>,
-    /// Expected profilers for each complete combination of dimension values.
-    target: u32,
+    /// Expected number of profiling processes/containers per complete dimension tuple.
+    num_target_profilers: u32,
     /// Required behavior on storage failure or timeout.
     if_failed: StartupFailure,
     /// Cooperative budget covering runtime setup, backend construction and admission; defaults to 1000ms.
@@ -165,7 +165,7 @@ impl Sampling {
                 protocol::DecisionReason::invalid_configuration(message),
                 false,
             )),
-            Ok(()) if self.target == 0 => Some(protocol::PreparedSampling::disabled(
+            Ok(()) if self.num_target_profilers == 0 => Some(protocol::PreparedSampling::disabled(
                 protocol::DecisionReason::TargetZero,
                 false,
             )),
