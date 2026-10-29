@@ -320,12 +320,12 @@ impl SamplingStore for S3SamplingStore {
             let mut objects = Vec::new();
             for object in result.contents() {
                 let full = object.key().ok_or_else(|| invalid("S3 list omitted key"))?;
-                if !full.starts_with(&self.key(request.prefix())) {
-                    return Err(invalid("S3 list key outside requested prefix"));
-                }
                 let key = full
                     .strip_prefix(&self.prefix)
                     .ok_or_else(|| invalid("S3 list key outside sampling namespace"))?;
+                if !key.starts_with(request.prefix()) {
+                    return Err(invalid("S3 list key outside requested prefix"));
+                }
                 objects.push(ListedObject::builder().key(key).build());
             }
             if objects.len() > page_size {

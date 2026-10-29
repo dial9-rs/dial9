@@ -242,6 +242,9 @@ async fn missing_object_and_missing_put_ack_are_distinct() {
     "<Contents><Key>outside/a</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>"
 )]
 #[case("<Contents><Key>coord/z</Key><LastModified>2023-01-01T00:00:00Z</LastModified></Contents>")]
+#[case(
+    "<IsTruncated>false</IsTruncated><Contents><Key>coord/_dial9_sampling/service=sampled/z</Key></Contents>"
+)]
 #[case("<IsTruncated>true</IsTruncated>")]
 #[case("<IsTruncated>true</IsTruncated><NextContinuationToken></NextContinuationToken>")]
 #[case("<IsTruncated>false</IsTruncated><NextContinuationToken>next</NextContinuationToken>")]
