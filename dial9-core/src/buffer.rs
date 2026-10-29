@@ -176,6 +176,30 @@ fn derive_max_file_size(max_total_size: u64) -> u64 {
     (max_total_size / 4).min(MAX_FILE_SIZE_CAP)
 }
 
+/// Whether `path` is on a tmpfs mount, where written segments are held in RAM.
+#[cfg(target_os = "linux")]
+fn is_tmpfs(path: &Path) -> std::io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+
+    // An empty base path means the current directory; `statfs("")` is ENOENT.
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `c_path` is NUL-terminated and `stat` is a valid out-pointer.
+    if unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `statfs` returned 0, so `stat` is initialized.
+    let stat = unsafe { stat.assume_init() };
+    // TMPFS_MAGIC from linux/magic.h. Untyped so it matches `f_type` on every target.
+    Ok(stat.f_type == 0x0102_1994)
+}
+
 /// Sets the rotation period from the observed byte rate, so segments land near
 /// a target size and stay under `max_file_size`. Opt in with
 /// `adaptive_rotation` on [`DiskBuffer::builder`] or [`MemoryBuffer::builder`].
@@ -336,6 +360,9 @@ impl SegmentWriter<Disk> {
     /// `min(100 MiB, max_total_size / 4)`.
     #[builder(builder_type = DiskBufferBuilder, finish_fn = build)]
     pub fn builder(
+        /// Directory for trace segments. Use disk-backed storage: on tmpfs (such as
+        /// `/tmp` on Amazon Linux 2023) segments are held in RAM. A warning is logged
+        /// when the directory is on tmpfs.
         base_path: impl Into<PathBuf>,
         /// Per-file rotation threshold in bytes. Defaults to
         /// `min(100 MiB, max_total_size / 4)` when not set.
@@ -377,6 +404,26 @@ impl SegmentWriter<Disk> {
         let dir = base_path.into();
         if !dir.as_os_str().is_empty() {
             fs::create_dir_all(&dir)?;
+        }
+        // One-time startup check, so no rate limiting. Never fails the writer.
+        #[cfg(target_os = "linux")]
+        {
+            let shown = if dir.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                &dir
+            };
+            match is_tmpfs(&dir) {
+                Ok(true) => tracing::warn!(
+                    "trace directory {} is on tmpfs: segments are held in RAM and count against memory, not disk. Use a disk-backed directory such as /var/tmp",
+                    shown.display()
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    "could not determine whether trace directory {} is on tmpfs: {e}",
+                    shown.display()
+                ),
+            }
         }
         let stem = SEGMENT_STEM.to_string();
         let fs = Fs::new_disk(&dir, stem.as_str());
@@ -3591,5 +3638,42 @@ mod tests {
                 "every event across all rotated segments must reach the processor"
             );
         }
+    }
+
+    /// `is_tmpfs` must agree with the mount table: the filesystem type of the
+    /// longest mount point containing the path decides the answer.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_tmpfs_matches_mount_table() {
+        let dir = TempDir::new().unwrap();
+        let path = std::fs::canonicalize(dir.path()).unwrap();
+        let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
+        let fstype = mounts
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let _device = fields.next()?;
+                let mount_point = fields.next()?;
+                let fstype = fields.next()?;
+                path.starts_with(mount_point)
+                    .then_some((mount_point.len(), fstype))
+            })
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, fstype)| fstype)
+            .expect("root mount must contain the temp dir");
+        assert_eq!(is_tmpfs(&path).unwrap(), fstype == "tmpfs");
+    }
+
+    /// An empty `base_path` is the current directory and must not error.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_tmpfs_accepts_empty_path() {
+        assert!(is_tmpfs(Path::new("")).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_tmpfs_errors_on_missing_path() {
+        assert!(is_tmpfs(Path::new("/dial9-no-such-dir-for-tmpfs-check")).is_err());
     }
 }
