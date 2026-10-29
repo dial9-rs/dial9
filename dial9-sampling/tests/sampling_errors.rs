@@ -399,6 +399,48 @@ async fn zero_list_bound_is_rejected_without_a_request() {
     assert!(fixture.requests.lock().unwrap().is_empty());
 }
 
+#[rstest::rstest]
+#[case("get", 1, 1)]
+#[case("get", 2, 2)]
+#[case("get", 1000, 3)]
+#[case("list", 1000, 3)]
+#[case("head", 1000, 3)]
+#[tokio::test(start_paused = true)]
+async fn sampling_reads_cap_sdk_attempts_including_region_discovery(
+    #[case] operation: &str,
+    #[case] requested_attempts: u32,
+    #[case] expected_attempts: usize,
+) {
+    let fixture = RecordingFixture::new(std::iter::repeat_n(response(503), expected_attempts));
+    if operation == "head" {
+        let error = S3SamplingStore::builder()
+            .config(
+                dial9_destinations_s3::S3Config::builder()
+                    .bucket("traces")
+                    .service_name("sampled")
+                    .build(),
+            )
+            .client(sdk_client(fixture.clone(), requested_attempts))
+            .build()
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    } else {
+        let store = store_with_connector(fixture.clone(), requested_attempts).await;
+        let error = match operation {
+            "get" => store.get("a".into()).await.unwrap_err(),
+            "list" => store
+                .list_sorted_page(ListRequest::builder().prefix("a").build())
+                .await
+                .unwrap_err(),
+            other => panic!("unknown read operation: {other}"),
+        };
+        assert_eq!(kind(&error), "unavailable");
+    }
+    assert_eq!(fixture.requests.lock().unwrap().len(), expected_attempts);
+    assert_eq!(fixture.responses.lock().unwrap().len(), 0);
+}
+
 #[tokio::test(start_paused = true)]
 async fn uncertain_put_is_not_hidden_by_a_retry_precondition_failure() {
     // The first attempt may commit while its acknowledgement is lost. A retry

@@ -21,7 +21,8 @@ const SAMPLING_PREFIX: &str = "_dial9_sampling/";
 /// to the sampler's long-lived runtime.
 ///
 /// Lifecycle and IAM rules must preserve shared rosters while permitting GET,
-/// conditional PUT, sorted LIST and membership DELETE. General purpose buckets
+/// conditional PUT and sorted LIST. Immutable reports expire through lifecycle
+/// policy rather than process shutdown. General purpose buckets
 /// provide the required listing order; directory buckets and their access points
 /// are rejected because they do not.
 #[derive(Clone, Debug)]
@@ -89,6 +90,19 @@ impl S3SamplingStore {
                 aws_sdk_s3::Client::new(&sdk)
             }
         };
+        let retry = bootstrap
+            .config()
+            .retry_config()
+            .cloned()
+            .unwrap_or_else(aws_sdk_s3::config::retry::RetryConfig::standard);
+        let attempts = retry.max_attempts().min(3);
+        let bootstrap = aws_sdk_s3::Client::from_conf(
+            bootstrap
+                .config()
+                .to_builder()
+                .retry_config(retry.with_max_attempts(attempts))
+                .build(),
+        );
         let region = match config.region() {
             Some(region) => region.to_owned(),
             None => bucket_region(&bootstrap, config.bucket()).await?,
