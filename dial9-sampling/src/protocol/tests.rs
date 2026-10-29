@@ -1389,3 +1389,33 @@ async fn slow_many_page_round_expires_with_a_reservation_and_no_false_population
     );
     assert_eq!(store.lists.load(Ordering::SeqCst), before);
 }
+
+#[rstest::rstest]
+#[case("census")]
+#[case("profilers")]
+#[tokio::test(start_paused = true)]
+async fn a_window_dimension_cannot_contaminate_another_pools_observation(#[case] channel: &str) {
+    let store = store_at(622_000);
+    let mut bare = config_for(15, "bare-pool");
+    bare.dimensions.clear();
+    let mut nested = config_for(15, "window-pool");
+    nested.dimensions = vec![("window".into(), "0000000000000009".into())];
+    bare.validate().unwrap();
+    nested.validate().unwrap();
+    report(store.as_ref(), &bare, channel, 9, 1, Cutoff(None)).await;
+    report(store.as_ref(), &nested, channel, 9, 2, Cutoff(None)).await;
+    for pool in [&bare, &nested] {
+        let observed = census::observe(
+            store.as_ref(),
+            pool,
+            channel,
+            9,
+            480,
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(observed.retained, 1);
+        assert_eq!(observed.estimate, 1.0);
+    }
+}

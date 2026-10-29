@@ -543,7 +543,7 @@ async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_cli
             .await
             .unwrap();
     }
-    let report_key = "v3/census/environment=production/window=0000000005977399/575c86b7dbf19363.01M623S6ZY8ND5FEG3ACCRG99J.10000000000000000";
+    let report_key = "v3/census/environment=production/windows/window=0000000005977399/575c86b7dbf19363.01M623S6ZY8ND5FEG3ACCRG99J.10000000000000000";
     let store = S3SamplingStore::builder()
         .config(
             dial9_destinations_s3::S3Config::builder()

@@ -137,7 +137,11 @@ impl Config {
         format!("v3/pools/{}", self.pool_path())
     }
     fn report_prefix(&self, channel: &str, window: u64) -> String {
-        format!("v3/{channel}/{}window={window:016x}/", self.pool_path())
+        // User dimensions always contain `=`, so this component ends their namespace.
+        format!(
+            "v3/{channel}/{}windows/window={window:016x}/",
+            self.pool_path()
+        )
     }
     fn overshoot(&self) -> u32 {
         self.settings

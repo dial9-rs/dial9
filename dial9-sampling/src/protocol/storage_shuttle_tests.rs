@@ -147,8 +147,8 @@ dial9_core::shuttle_test! {
     default;
     fn shuttle_immutable_window_reports_survive_process_exit() {
         let store = Arc::new(MemoryStore::new());
-        let first_key = "v3/census/pool/window=0000000000000001/0123456789abcdef.old-run.10000000000000000";
-        let second_key = "v3/census/pool/window=0000000000000001/0123456789abcdef.new-run.10000000000000000";
+        let first_key = "v3/census/pool/windows/window=0000000000000001/0123456789abcdef.old-run.10000000000000000";
+        let second_key = "v3/census/pool/windows/window=0000000000000001/0123456789abcdef.new-run.10000000000000000";
         let first = store.clone();
         let old_run = thread::spawn(move || {
             put(&first, first_key, "", WriteCondition::absent());
