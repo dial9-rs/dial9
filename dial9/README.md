@@ -203,8 +203,8 @@ Configure the expected number of profiling processes with `.num_target_profilers
 The runner owns storage initialization, census maintenance and cleanup. Its callback runs
 outside Tokio's entered context, so it can branch before allocating a writer,
 construct the instrumented application runtime and run the application normally.
-With the sampler's `dial9` feature, call `status.register_recorder(&recorder)` for
-automatic stop handling on the sampler runtime.
+Call `status.register_recorder(&recorder)` for automatic stop handling on the
+sampler runtime; recorder integration is always available.
 Drop the application runtime and drain the recorder before returning from the callback.
 
 See the [standalone guide](../dial9-sampling/README.md) and the
