@@ -173,7 +173,7 @@ mod shuttle_tests {
             }
             worker.join().unwrap();
             let mut final_snapshot = Vec::new();
-            weights.segment_metadata(&mut final_snapshot);
+            weights.clone().segment_metadata(&mut final_snapshot);
             assert_eq!(final_snapshot[1].1, "0");
         }
     }
