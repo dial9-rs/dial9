@@ -3,22 +3,25 @@
 Proofs, models, reference simulations, review reports and the interactive
 visualization are tracked separately from implementation PR #1093.
 
-The proposed next design is [automatic population discovery](automatic-reporting.md):
+The current source revision is `aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7`.
+Its [automatic population discovery](automatic-reporting.md) means
 callers configure a target, while a learned reporting fraction replaces
-`minimum_population`. It specifies fraction handoffs, quiet-process recovery
-and profiling admission independent of census eligibility. This revision is
-not implemented or validated by the existing models and visualizations.
+`minimum_population`. It implements fraction handoffs, quiet-process recovery
+and profiling admission independent of census eligibility. Its
+[new protocol evidence](automatic/internals/proofs.md) contains the fresh-epoch
+hash argument, finite models, simulations and explicit limits.
 
-The implementation evidence describes schema-3 independent startup admission
+The archived implementation evidence describes schema-3 independent startup admission
 within a configured census subset and Bernoulli thinning, with a scalar current
 expansion weight embedded in traces. Its source revision is recorded in
 [weighted/README.md](weighted/README.md).
 
-- [Proposed automatic reporting design and implementation checklist](automatic-reporting.md)
-- [Current proof, model checks and validation](weighted/README.md)
-- [Sequential expansion-weight proof](weighted/statistics/weighting-proof.md)
-- [Independent storage/control review](weighted/storage/review.md)
-- [Interactive fleet laboratory](weighted/visualization/sampling-fleet-laboratory.html)
+- [Automatic reporting design and implementation checklist](automatic-reporting.md)
+- [Automatic reporting proof, model checks and simulation](automatic/internals/proofs.md)
+- [Archived schema-3 proof, model checks and validation](weighted/README.md)
+- [Archived sequential expansion-weight proof](weighted/statistics/weighting-proof.md)
+- [Archived storage/control review](weighted/storage/review.md)
+- [Archived fleet laboratory](weighted/visualization/sampling-fleet-laboratory.html)
 
 The files at this directory's root preserve the original evidence for commit
 `d719cd52adb020349b119e098552226b124aee90`. Its shared-rank admission and

@@ -1,0 +1,58 @@
+[
+  {
+    "control": null,
+    "expected_violation": null,
+    "exit_code": 0,
+    "generated": 11295,
+    "distinct": 3480
+  },
+  {
+    "control": "MixFractions",
+    "expected_violation": "EpochCorrect",
+    "exit_code": 12,
+    "generated": 751,
+    "distinct": 335
+  },
+  {
+    "control": "EarlyPromotion",
+    "expected_violation": "NoPrematurePromotion",
+    "exit_code": 12,
+    "generated": 116,
+    "distinct": 83
+  },
+  {
+    "control": "ReporterOnlyRecovery",
+    "expected_violation": "QuietRecovery",
+    "exit_code": 12,
+    "generated": 1911,
+    "distinct": 662
+  },
+  {
+    "control": "UnfencedCAS",
+    "expected_violation": "CASFenced",
+    "exit_code": 12,
+    "generated": 26,
+    "distinct": 26
+  },
+  {
+    "control": "ReapplyTrim",
+    "expected_violation": "OnceOnly",
+    "exit_code": 12,
+    "generated": 48,
+    "distinct": 38
+  },
+  {
+    "control": "LateEnable",
+    "expected_violation": "NoLateEnable",
+    "exit_code": 12,
+    "generated": 7,
+    "distinct": 7
+  },
+  {
+    "control": "StalledRecovery",
+    "expected_violation": "QuietRecovery",
+    "exit_code": 12,
+    "generated": 2397,
+    "distinct": 802
+  }
+]

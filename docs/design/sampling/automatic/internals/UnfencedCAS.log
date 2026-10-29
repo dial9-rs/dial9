@@ -1,0 +1,96 @@
+TLC2 Version 2026.10.23.135453 (rev: 2ef2af8)
+Warning: Please run the Java VM, which executes TLC with a throughput optimized garbage collector, by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 47 and seed 5245542482130669487 with 1 worker on 64 cores with 768MB heap and 64MB offheap memory [pid: 34692] (Linux 5.10.270-283.1109.amzn2int.x86_64 amd64, Amazon.com Inc. 17.0.21 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /tmp/dial9-reporting-model-gpkvk2w7/ReportingEpochs.tla
+Parsing file /tmp/tlc-6853554963348957797/Naturals.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /tmp/tlc-6853554963348957797/FiniteSets.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /tmp/tlc-6853554963348957797/TLC.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /tmp/tlc-6853554963348957797/_TLCTrace.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /tmp/tlc-6853554963348957797/Sequences.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /tmp/tlc-6853554963348957797/TLCExt.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /tmp/tlc-6853554963348957797/Integers.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module ReportingEpochs
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module ReportingEpochs
+Starting... (2026-10-28 20:06:46)
+Computing initial states...
+Computed 2 initial states...
+Finished computing initial states: 4 distinct states generated at 2026-10-28 20:06:46.
+Error: Invariant CASFenced is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ active = 0
+/\ observationEpoch = 0
+/\ pendingFraction = 1
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 0
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 1
+/\ promotionReady = TRUE
+/\ pending = 4
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 0
+/\ live = {"a", "b"}
+/\ members = (0 :> {"a", "b"} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 1
+
+State 2: <Propose line 29, col 3 to line 34, col 60 of module ReportingEpochs>
+/\ active = 0
+/\ observationEpoch = 0
+/\ pendingFraction = 2
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 0
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 1
+/\ promotionReady = TRUE
+/\ pending = 1
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 1
+/\ live = {"a", "b"}
+/\ members = (0 :> {"a", "b"} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 1
+
+State 3: <StaleCAS line 101, col 3 to line 105, col 85 of module ReportingEpochs>
+/\ active = 0
+/\ observationEpoch = 0
+/\ pendingFraction = 2
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 0
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 1
+/\ promotionReady = TRUE
+/\ pending = 1
+/\ stalePublished = TRUE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 1
+/\ live = {"a", "b"}
+/\ members = (0 :> {"a", "b"} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 1
+
+26 states generated, 26 distinct states found, 20 states left on queue.
+The depth of the complete state graph search is 3.
+Finished in 00s at (2026-10-28 20:06:46)
+Trace exploration spec path: ./ReportingEpochs_TTrace_1793218006.tla

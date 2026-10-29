@@ -1,8 +1,10 @@
 # Automatic population discovery
 
-Status: proposed design revision, October 28, 2026. This replaces the caller's
-`minimum_population` assumption. PR #1093 still implements the previous protocol;
-its existing proofs, simulations and visualization do not validate this revision.
+Status: implemented revision, October 28, 2026; local integration validated October 29.
+Source: `aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7`.
+This replaces the caller's `minimum_population` assumption. The new
+[protocol evidence](automatic/internals/proofs.md) covers this revision.
+The archived schema-3 proofs and visualization describe the preceding protocol.
 
 ## 1. User-facing documentation
 
@@ -11,11 +13,11 @@ the pool's population; callers do not supply its current size or a minimum size.
 The counted unit is one live process/container run that could emit Dial9 traces.
 Several such processes on one machine count separately.
 
-Identify a pool with named dimensions. `service` is a required dimension and
-uses the same service identity as trace uploads. The S3 integration takes the
-existing `S3Config`; read its `service_name` for this dimension.
-Environment, cell, instance type and other grouping keys are ordinary additional
-dimensions. There is no separate `scope` or combined service/environment string.
+Identify a pool with storage configuration and additional named dimensions.
+The S3 integration takes the existing `S3Config`; its bucket, prefix and
+`service_name` isolate services automatically. Callers add environment, cell,
+instance type and other grouping keys. There is no separate `scope` or required
+caller-provided service dimension.
 
 ```rust,ignore
 let s3 = dial9::s3::S3Config::builder()
@@ -24,7 +26,6 @@ let s3 = dial9::s3::S3Config::builder()
     .build();
 
 Sampling::builder()
-    .add_dimension("service", s3.service_name())
     .add_dimension("environment", "production")
     .add_dimension("instance-type", "m7i.large")
     .add_dimension("az", "us-east-1a")
@@ -52,6 +53,8 @@ while its population estimate forms. The leader then publishes a reporting
 fraction aimed at about `32 * target` census reporters: 480 for target 15.
 Processes use a stable hash to decide whether to continue reporting.
 Others stop membership heartbeats and occasionally read the shared roster.
+The hash is stable within an epoch; each reporting-fraction change uses fresh
+epoch entropy to avoid selecting and measuring with the same hash sample.
 Processes joining an established pool can read its policy first and avoid an
 initial membership write if neither reporting nor profiling requires one.
 
@@ -97,19 +100,17 @@ discovery. This revision does not introduce delayed profiling enablement.
 
 ### Pool dimensions
 
-Pool identity is the canonical sorted tuple of dimension names and values
-within the selected store namespace. Names are unique and nonblank; values
-are nonblank; the tuple contains `service`. Input ordering does not change the
-pool. `service` has no additional hashing or admission behavior. The public
-API uses the same dimension mechanism for it as for other grouping keys.
+Pool identity is the canonical sorted tuple of additional dimension names and
+values within the selected store namespace. Names are unique and nonblank;
+values are nonblank. Input ordering does not change the pool.
 
-Read `S3Config::service_name()` when configuring the service dimension, before
-the asynchronous initializer runs. This keeps the complete pool identity
-available even if initialization fails and the startup fallback is used.
-Validate and canonicalize the dimension tuple before storage initialization.
-Custom stores use the same dimension API; the storage trait does not acquire
-service-discovery or dimension-merging responsibilities. Sampling runs before
-the recorder exists and does not infer service identity from a recorder later.
+The native S3 store isolates configured services in its coordination prefix.
+Custom stores sharing a physical backend provide equivalent namespace isolation.
+Validate the caller's dimension tuple before asynchronous storage initialization;
+the storage trait does not acquire service-discovery or dimension-merging hooks.
+Sampling runs before the recorder exists and does not infer identity from it.
+The dimension hash remains known if initialization fails, interpreted relative
+to the configured store. Existing trace metadata supplies service/bucket/prefix.
 
 ### Reuse S3 upload configuration
 
@@ -124,19 +125,22 @@ and custom stores; the future resolves to the initialized store or an error.
 startup budget, then calls the application callback with its startup status.
 Creating or dropping unused startup configuration performs no I/O. Preserve
 the existing ability to borrow local configuration and supply custom SDK-client
-initialization. The current implementation calls this boundary `with_backend`;
-this revision names it `with_storage`.
+initialization. This replaces the unpublished `with_backend` boundary with
+`with_storage`.
 
 Use the same config for recorder construction. The existing S3 recorder adapter
 already publishes its `service_name` metadata; do not add a second service-name
-configuration or rename that metadata key. The pool's logical `service`
-dimension uses that configured value.
+configuration or rename that metadata key. Coordination uses that configured
+service identity without repeating it in the sampling builder.
 
-Coordination lives under `{configured_prefix}/_dial9_sampling/`, or
-`_dial9_sampling/` when no prefix is configured. Use the config's bucket and
-region semantics, including bucket-region discovery when needed, within the
-bounded startup budget. Provide small typed read-only config accessors for the
-adapter rather than parsing `as_metadata()`. Keep the S3 dependency optional.
+Coordination lives under
+`{configured_prefix}/_dial9_sampling/service={sha256(service_name)}/`, or
+`_dial9_sampling/service={sha256(service_name)}/` when no prefix is configured.
+The configured prefix is preserved verbatim, as in trace keys. Use the config's
+bucket and region semantics, including bucket-region discovery when needed,
+within the bounded startup budget. Provide small typed read-only config
+accessors for the adapter rather than parsing `as_metadata()`. Keep the S3
+dependency optional.
 
 Instance path, boot identity and custom trace `key_fn` describe individual
 uploads, not sampling-pool dimensions or coordination key layout. Keep sampling
@@ -147,7 +151,7 @@ initialized SDK client across runtimes.
 
 ### Process identities and independent decisions
 
-Each simultaneously live trace-emitting process needs a distinct identity.
+Each simultaneously live trace-emitting process gets a fresh private run identity.
 Do not use a physical hostname alone for multiple containers or processes.
 Coordination can start before recorder construction: assign its census rank and
 membership ownership once using the current fresh run identifier. Recorder
@@ -163,9 +167,11 @@ profile_at_startup = fresh_admission_draw < p
 p = min(1, target / usable_population_estimate)
 ```
 
-The census hash is stable for the run and pool, with separate entropy from
-admission and each thinning round. Neither a reporting-policy change nor a
-backend retry reveals another admission coin.
+The census hash is stable within a reporting epoch, with separate entropy from
+admission and each thinning round. A new epoch's fresh ID domain-separates its
+hash after its fraction has been sealed from prior observations. This redraws
+reporter membership without changing profiling. Neither a reporting-policy
+change nor a backend retry reveals another admission coin.
 
 ### Population estimation and the reporting controller
 
@@ -182,13 +188,14 @@ representation; observations record the fraction actually represented.
 Remove the caller's minimum-size assertion and dyadic eligibility ceiling.
 Target zero continues to perform no sampler I/O.
 
-Proposed controller hysteresis: keep the fraction while the healthy reporter
+Controller hysteresis: keep the fraction while the healthy reporter
 count lies between half and twice the budget. After three consecutive complete
 counts outside that band, propose a new fraction using the estimate above.
 A complete zero-reporter count triggers full reporting recovery (`f_next = 1`)
 without waiting for three counts. If `f` is already 1, a small nonzero count
 does not trigger a pointless transition. Do not adjust the fraction using a
-failed census. These tuning values require the validation below.
+failed census. The executed models and simulations document these tuning values
+and their limits.
 
 For a fixed fraction chosen independently of the ranks being measured, complete
 membership, and independent uniform hashes:
@@ -205,13 +212,14 @@ the Gaussian 95% reference is approximately +/-8.92%. A full census has no
 hash sampling error. With few reporters, use discrete uncertainty rather than
 a Gaussian approximation.
 
-These equations do not by themselves prove unbiasedness after adaptive changes
-chosen from the same hashes. The [Theta Sketch framework][theta] explicitly
-conditions its guarantees on the threshold-selection rule (sections 3.2 and 3.6).
-Our feedback controller also handles departures and asynchronous reporting.
-Its bias and coverage must be established separately; hysteresis alone is not
-an unbiasedness proof. If validation rejects stable-hash adaptation, evaluate a
-fresh independent census salt per measurement epoch before adding more machinery.
+These equations do not apply to adaptive changes chosen from the same hashes.
+The [Theta Sketch framework][theta] explicitly conditions its guarantees on the
+threshold-selection rule (sections 3.2 and 3.6). The rejected stable-rank control
+has roughly `1/480` relative feedback bias in the tested interior adjustment.
+The implementation seals a new fraction before choosing its fresh epoch hash
+salt, giving the conditional binomial argument at fixed observation times.
+The data-dependent promotion time, asynchronous delivery and changing fleet
+remain separate limitations; this is not an unconditional error bound.
 
 Hash uncertainty describes visible membership, not exact instantaneous liveness.
 Late reports, failed cleanup, short-lived processes, stale observations and
@@ -233,9 +241,10 @@ Reporting epochs and thinning rounds have independent identifiers and purposes.
 3. Membership keys distinguish epochs. The leader lists and deduplicates each
    epoch separately; it never divides an old epoch's count by a pending fraction.
 4. Promotion requires the collection delay and a complete, guarded pending
-   census. The delay must cover the configured maximum quiet-reader interval,
-   immediate-write jitter, request budget and clock uncertainty under healthy
-   delivery. Time passing cannot certify that unavailable processes reported.
+   census. The delay is `5*poll + 2*skew + backend timestamp uncertainty`;
+   promotion also waits for four plateau observations. It covers quiet polling,
+   immediate reports and bounded operations under healthy delivery. Time passing
+   cannot certify that unavailable processes reported.
    Apply the existing settling checks as heuristics, not completeness proofs.
 5. A CAS publishes the new active epoch and its population observation together.
    Later roster reads end old-epoch heartbeats. Old keys may expire normally.
@@ -317,13 +326,13 @@ resolution; they are not a prerequisite for decoding a segment's scalar weight.
 
 This is a protocol change: the previous schema treats the reporting fraction as
 immutable configuration and excludes nonreporters from profiling and all I/O.
-Use a new protocol schema and isolated storage namespace; old and new workers
+Schema 4 uses new `v3/` coordination keys; old and new workers
 must not share leadership or interpret each other's membership. Check published
 API compatibility before removing `minimum_population`; the intended new
 onboarding path never asks for it.
 The dimension-only pool key also supersedes the old `(scope, dimensions)` key.
-Replace `scope` with explicit service/environment dimensions and check public
-API compatibility rather than silently joining previously named pools.
+Replace `scope` with S3Config service isolation and extra grouping dimensions;
+check public API compatibility rather than silently joining previously named pools.
 
 Preserve the existing implementation evidence as an archive. New proofs and
 simulations must identify this revision and must not inherit its results by
@@ -331,38 +340,39 @@ changing labels in the previous visualization.
 
 ## 3. Concrete changes and validation checklist
 
-- [ ] Remove the minimum-population requirement and local nonreporter startup
+- [x] Remove the minimum-population requirement and local nonreporter startup
   shortcut. All valid nonzero-target processes initialize bounded coordination.
-- [ ] Replace `scope` with a required `service` dimension matching core segment
-  metadata. Canonicalize the complete dimension tuple, reject duplicates and
-  update examples to reuse `S3Config` for sampling and recorder creation.
-- [ ] Name the existing asynchronous factory boundary `with_storage`, checking
+- [x] Remove `scope`; reuse `S3Config` service isolation without a repeated
+  service setting. Canonicalize extra dimensions, reject duplicates and share
+  the config with recorder construction.
+- [x] Name the existing asynchronous factory boundary `with_storage`, checking
   published compatibility. Let the S3 store constructor take `S3Config` and
   initialize asynchronously inside that future. Expose the small typed config
-  accessors needed to reuse storage settings and configure the service dimension.
+  accessors needed to reuse storage settings.
   Keep custom stores and bounded worker-owned client setup.
-- [ ] Separate profiling admission from census eligibility; store the actual
+- [x] Separate profiling admission from census eligibility; store the actual
   startup probability and remove tracking-fraction caps from fallback admission.
-- [ ] Add mutable reporting epochs, one pending handoff and epoch-qualified
+- [x] Add mutable reporting epochs, one pending handoff and epoch-qualified
   membership keys under the existing leadership CAS. Preserve fencing/readback.
-- [ ] Keep profilers visible outside the census subset, exclude their extra
+- [x] Keep profilers visible outside the census subset, exclude their extra
   records from `R/f`, and allow quiet processes to recover leadership.
-- [ ] Update terminal cleanup so thinned nonreporters can eventually stop
+- [x] Update terminal cleanup so thinned nonreporters can eventually stop
   membership writes once stale active records cannot win. Keep ordinary disable.
-- [ ] Preserve scalar metadata and historical observations with the correct
+- [x] Preserve scalar metadata and historical observations with the correct
   epoch/fraction; update onboarding and API compatibility notes.
-- [ ] Model handoff, takeover, zero-reporters recovery, stale CAS, terminal
-  precedence and duplicate thinning in TLA+. Include broken controls for mixed
-  fractions, premature promotion and reporter-only recovery.
-- [ ] Simulate cold start, rolling starts, one start per minute, one-minute
+- [x] Model handoff, zero-reporters recovery, stale CAS, terminal startup
+  choices and duplicate thinning in TLA+. Include broken controls for mixed
+  fractions, premature promotion and reporter-only recovery. Rust regressions
+  separately exercise takeover and terminal membership precedence.
+- [x] Simulate cold start, rolling starts, one start per minute, one-minute
   lifetimes, many containers, large growth/shrink, lost reporters, delayed polls,
   failed writes/cleanup and partitions. Show true live processes, estimated
   population, actual profiling processes, and total GET/PUT/LIST/CAS operations.
-- [ ] Measure adaptive-estimator bias, empirical error quantiles, profiler
+- [x] Measure adaptive-estimator bias, empirical error quantiles, profiler
   distributions and weighted heterogeneous workload. Label Gaussian curves as
   fixed-fraction references. Prove the conditional admission/thinning weights;
   do not require an exact target count or claim instantaneous census accuracy.
-- [ ] Add focused Rust, paused-time and Shuttle regressions for those protocol
+- [x] Add focused Rust, paused-time and Shuttle regressions for those protocol
   invariants; run the required workspace/feature/format/Clippy checks after coding.
 
 [theta]: https://raw.githubusercontent.com/apache/datasketches-website/master/docs/pdf/ThetaSketchFramework.pdf

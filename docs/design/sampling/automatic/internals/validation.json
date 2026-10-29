@@ -1,0 +1,226 @@
+{
+  "rust": {
+    "focused_command": "cargo nextest run -p dial9-sampling --features s3,dial9 --lib",
+    "tests_passed": 74,
+    "stress_seconds": 20,
+    "stress_iterations_passed": 101,
+    "shuttle_command": "RUSTFLAGS='--cfg shuttle' cargo test -p dial9-sampling --lib --features dial9 -- shuttle",
+    "shuttle_tests_passed": 12,
+    "format": "cargo fmt --check passed",
+    "clippy": "cargo clippy -p dial9-sampling --all-targets --all-features passed",
+    "workspace": {
+      "tests_passed": 1744,
+      "tests_skipped": 4,
+      "stress_seconds": 20,
+      "stress_iterations_passed": 1,
+      "shuttle_suites": {
+        "dial9-sampling": 12,
+        "dial9-core": 39,
+        "dial9-tokio-telemetry": 2,
+        "dial9-utils": 3
+      },
+      "checks": [
+        {
+          "name": "format",
+          "command": [
+            "cargo",
+            "fmt",
+            "--check"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 1.047
+        },
+        {
+          "name": "workspace-clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 3.719
+        },
+        {
+          "name": "workspace-stress",
+          "command": [
+            "cargo",
+            "nextest",
+            "run",
+            "--workspace",
+            "--all-features",
+            "--stress-duration",
+            "20s"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 173.35
+        },
+        {
+          "name": "shuttle",
+          "command": [
+            "bash",
+            "scripts/test-shuttle.sh"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 106.022
+        },
+        {
+          "name": "bare-clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "-p",
+            "dial9-sampling",
+            "--all-targets",
+            "--no-default-features"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 4.345
+        },
+        {
+          "name": "s3-clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "-p",
+            "dial9-sampling",
+            "--all-targets",
+            "--no-default-features",
+            "--features",
+            "s3"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 2.363
+        },
+        {
+          "name": "dial9-clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "-p",
+            "dial9-sampling",
+            "--all-targets",
+            "--no-default-features",
+            "--features",
+            "dial9"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 1.592
+        },
+        {
+          "name": "doctests",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "dial9-sampling",
+            "--all-features",
+            "--doc"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 7.587
+        },
+        {
+          "name": "bare-rustdoc",
+          "command": [
+            "cargo",
+            "doc",
+            "-p",
+            "dial9-sampling",
+            "--no-deps",
+            "--no-default-features"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 1.508
+        },
+        {
+          "name": "all-rustdoc",
+          "command": [
+            "cargo",
+            "doc",
+            "-p",
+            "dial9-sampling",
+            "--no-deps",
+            "--all-features"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 2.424
+        }
+      ],
+      "warnings": "Existing unrelated warnings remain; no dependency versions changed.",
+      "facade_tests_passed": 4,
+      "limits": "Local Linux validation; GitHub CI status is recorded separately in the PR."
+    }
+  },
+  "models": [
+    {
+      "control": null,
+      "expected_violation": null,
+      "exit_code": 0,
+      "generated": 11295,
+      "distinct": 3480
+    },
+    {
+      "control": "MixFractions",
+      "expected_violation": "EpochCorrect",
+      "exit_code": 12,
+      "generated": 751,
+      "distinct": 335
+    },
+    {
+      "control": "EarlyPromotion",
+      "expected_violation": "NoPrematurePromotion",
+      "exit_code": 12,
+      "generated": 116,
+      "distinct": 83
+    },
+    {
+      "control": "ReporterOnlyRecovery",
+      "expected_violation": "QuietRecovery",
+      "exit_code": 12,
+      "generated": 1911,
+      "distinct": 662
+    },
+    {
+      "control": "UnfencedCAS",
+      "expected_violation": "CASFenced",
+      "exit_code": 12,
+      "generated": 26,
+      "distinct": 26
+    },
+    {
+      "control": "ReapplyTrim",
+      "expected_violation": "OnceOnly",
+      "exit_code": 12,
+      "generated": 48,
+      "distinct": 38
+    },
+    {
+      "control": "LateEnable",
+      "expected_violation": "NoLateEnable",
+      "exit_code": 12,
+      "generated": 7,
+      "distinct": 7
+    },
+    {
+      "control": "StalledRecovery",
+      "expected_violation": "QuietRecovery",
+      "exit_code": 12,
+      "generated": 2397,
+      "distinct": 802
+    }
+  ],
+  "simulations": {
+    "cases": 12,
+    "adaptation_trials": 20000,
+    "result_file": "simulation-results.json",
+    "limits": "Seeded coarse simulation; Gaussian reference excludes delivery/churn/ghost error"
+  },
+  "source_revision": "aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7",
+  "validated_at": "2026-10-29T14:59:32.579310+00:00",
+  "environment": {
+    "python": "3.12.12",
+    "numpy": "2.2.6"
+  }
+}

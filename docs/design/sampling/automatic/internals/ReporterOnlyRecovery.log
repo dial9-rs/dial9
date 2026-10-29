@@ -1,0 +1,201 @@
+TLC2 Version 2026.10.23.135453 (rev: 2ef2af8)
+Warning: Please run the Java VM, which executes TLC with a throughput optimized garbage collector, by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 53 and seed 8072783246109313910 with 1 worker on 64 cores with 768MB heap and 64MB offheap memory [pid: 34421] (Linux 5.10.270-283.1109.amzn2int.x86_64 amd64, Amazon.com Inc. 17.0.21 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /tmp/dial9-reporting-model-j3ti1zfh/ReportingEpochs.tla
+Parsing file /tmp/tlc-2691117260021665135/Naturals.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /tmp/tlc-2691117260021665135/FiniteSets.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /tmp/tlc-2691117260021665135/TLC.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /tmp/tlc-2691117260021665135/_TLCTrace.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /tmp/tlc-2691117260021665135/Sequences.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /tmp/tlc-2691117260021665135/TLCExt.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /tmp/tlc-2691117260021665135/Integers.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module ReportingEpochs
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module ReportingEpochs
+Starting... (2026-10-28 20:06:46)
+Computing initial states...
+Computed 2 initial states...
+Finished computing initial states: 4 distinct states generated at 2026-10-28 20:06:46.
+Error: Invariant QuietRecovery is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ active = 0
+/\ observationEpoch = 0
+/\ pendingFraction = 1
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 0
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 1
+/\ promotionReady = TRUE
+/\ pending = 4
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 0
+/\ live = {"a", "b"}
+/\ members = (0 :> {"a", "b"} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 1
+
+State 2: <Propose line 29, col 3 to line 34, col 60 of module ReportingEpochs>
+/\ active = 0
+/\ observationEpoch = 0
+/\ pendingFraction = 2
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 0
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 1
+/\ promotionReady = TRUE
+/\ pending = 1
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 1
+/\ live = {"a", "b"}
+/\ members = (0 :> {"a", "b"} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 1
+
+State 3: <Tick line 37, col 3 to line 41, col 40 of module ReportingEpochs>
+/\ active = 0
+/\ observationEpoch = 0
+/\ pendingFraction = 2
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 1
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 1
+/\ promotionReady = TRUE
+/\ pending = 1
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 1
+/\ live = {"a", "b"}
+/\ members = (0 :> {"a", "b"} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 1
+
+State 4: <Tick line 37, col 3 to line 41, col 40 of module ReportingEpochs>
+/\ active = 0
+/\ observationEpoch = 0
+/\ pendingFraction = 2
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 2
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 1
+/\ promotionReady = TRUE
+/\ pending = 1
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 1
+/\ live = {"a", "b"}
+/\ members = (0 :> {"a", "b"} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 1
+
+State 5: <Report("a") line 44, col 3 to line 51, col 40 of module ReportingEpochs>
+/\ active = 0
+/\ observationEpoch = 0
+/\ pendingFraction = 2
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 2
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 1
+/\ promotionReady = TRUE
+/\ pending = 1
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 1
+/\ live = {"a", "b"}
+/\ members = (0 :> {"a", "b"} @@ 1 :> {"a"} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 1
+
+State 6: <Promote line 55, col 3 to line 63, col 85 of module ReportingEpochs>
+/\ active = 1
+/\ observationEpoch = 1
+/\ pendingFraction = 2
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 2
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 2
+/\ promotionReady = TRUE
+/\ pending = 4
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 2
+/\ live = {"a", "b"}
+/\ members = (0 :> {"a", "b"} @@ 1 :> {"a"} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 2
+
+State 7: <Leave("a") line 66, col 3 to line 71, col 74 of module ReportingEpochs>
+/\ active = 1
+/\ observationEpoch = 1
+/\ pendingFraction = 2
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 2
+/\ applied = {}
+/\ zeroSeen = FALSE
+/\ fraction = 2
+/\ promotionReady = TRUE
+/\ pending = 4
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 2
+/\ live = {"b"}
+/\ members = (0 :> {"b"} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 2
+
+State 8: <ObserveZero line 74, col 3 to line 79, col 30 of module ReportingEpochs>
+/\ active = 1
+/\ observationEpoch = 1
+/\ pendingFraction = 2
+/\ startup = {}
+/\ stopped = {}
+/\ profiling = {}
+/\ readVersion = 0
+/\ ticks = 2
+/\ applied = {}
+/\ zeroSeen = TRUE
+/\ fraction = 2
+/\ promotionReady = TRUE
+/\ pending = 4
+/\ stalePublished = FALSE
+/\ weightPower = [a |-> 0, b |-> 0]
+/\ version = 2
+/\ live = {"b"}
+/\ members = (0 :> {"b"} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ observationFraction = 2
+
+1911 states generated, 662 distinct states found, 155 states left on queue.
+The depth of the complete state graph search is 8.
+Finished in 00s at (2026-10-28 20:06:46)
+Trace exploration spec path: ./ReportingEpochs_TTrace_1793218005.tla
