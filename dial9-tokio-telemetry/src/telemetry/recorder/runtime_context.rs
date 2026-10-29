@@ -1107,6 +1107,86 @@ mod shuttle_tests {
     use dial9_core::shuttle_test;
 
     shuttle_test! {
+        num_iters = 10_000, depth = 3, stack_size = dial9_core::primitives::SHUTTLE_TOKIO_STACK_SIZE;
+        /// A worker can register after the flush thread snapshots metadata,
+        /// then fill the segment before the next snapshot. Shutdown must
+        /// preserve that final mapping even if no more events follow it.
+        fn shuttle_late_worker_metadata_survives_rotation() {
+            let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+                metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+            ));
+            let writer = dial9_core::buffer::MemoryBuffer::builder()
+                .max_total_size(50 * 1024)
+                .max_segment_size(64)
+                .build()
+                .unwrap();
+            let (capture, captured) = CapturingProcessor::new();
+            let recorder = dial9_core::recorder::recorder(writer)
+                .pipe(capture)
+                .build();
+            let handle = recorder.handle().clone();
+            let runtime = handle
+                .attach_tokio_runtime(
+                    tokio::runtime::Builder::new_current_thread(),
+                    TokioAttachOptions::builder().runtime_name("svc").build(),
+                )
+                .unwrap();
+            let ctx = recorder_tokio::tokio_attach_state(&handle)
+                .unwrap()
+                .registry
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.runtime_name.as_deref() == Some("svc"))
+                .cloned()
+                .unwrap();
+            let workers: Vec<_> = (0..2)
+                .map(|_| {
+                    let ctx = ctx.clone();
+                    crate::primitives::thread::spawn(move || {
+                        // Shuttle has no live Tokio worker threads. Drive their
+                        // real first-touch registration and event encoding here.
+                        let worker_id = ctx.reserve_worker_ids(1);
+                        register_worker_if_needed(&ctx, worker_id);
+                        ctx.recorder_handle.record_event(WorkerParkEvent {
+                            timestamp_ns: worker_id,
+                            worker_id: WorkerId(worker_id),
+                            local_queue: 0,
+                            cpu_time_ns: 0,
+                            tid: 0,
+                        });
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().unwrap();
+            }
+            drop(runtime);
+            recorder.graceful_shutdown(Duration::from_secs(5));
+
+            let mut workers = BTreeSet::new();
+            let mut listed = None;
+            for bytes in captured.lock().unwrap().iter() {
+                for event in crate::telemetry::format::decode_events(bytes).unwrap() {
+                    match event {
+                        crate::telemetry::analysis_events::Dial9Event::WorkerParkEvent(event) => {
+                            workers.insert(event.worker_id.as_u64());
+                        }
+                        crate::telemetry::analysis_events::Dial9Event::SegmentMetadataEvent(meta) => {
+                            if let Some(csv) = meta.entries.get("runtime.svc") {
+                                listed = Some(csv.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert_eq!(workers, BTreeSet::from([0, 1]), "both workers must be captured");
+            assert_eq!(listed.as_deref(), Some("0,1"), "final metadata must list both workers");
+        }
+    }
+
+    shuttle_test! {
         // Attaching a pipeline stage makes `build()` spawn the
         // worker thread, whose call depth overflows shuttle's bare-core
         // 60KB default stack (SIGBUS). `num_iters`/`depth` match

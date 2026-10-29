@@ -281,6 +281,9 @@ pub struct SegmentWriter<Mode: BufferMode = Disk> {
     /// Whether any real (non-metadata) events have been written to the current segment.
     /// Reset on rotation; used by `finalize()` to avoid sealing empty segments.
     has_real_events: bool,
+    /// Metadata changed since the last seal. A final snapshot can be useful
+    /// even when the last event batch already triggered rotation.
+    metadata_changed_since_seal: bool,
     /// Byte-rate adaptation settings. `None` holds the period fixed at
     /// `rotation_period`.
     adaptive_rotation: Option<AdaptiveRotationConfig>,
@@ -406,6 +409,7 @@ impl SegmentWriter<Disk> {
             dropped_events: 0,
             seals: Default::default(),
             has_real_events: false,
+            metadata_changed_since_seal: false,
             adaptive_rotation,
             current_period: first_period,
             segment_started_at: now,
@@ -472,6 +476,7 @@ impl SegmentWriter<Disk> {
             dropped_events: 0,
             seals: Default::default(),
             has_real_events: false,
+            metadata_changed_since_seal: false,
             adaptive_rotation: None,
             current_period: Duration::MAX,
             segment_started_at: now,
@@ -600,6 +605,7 @@ impl SegmentWriter<Memory> {
             dropped_events: 0,
             seals: Default::default(),
             has_real_events: false,
+            metadata_changed_since_seal: false,
             adaptive_rotation,
             current_period: first_period,
             segment_started_at: now,
@@ -806,6 +812,7 @@ impl<M: BufferMode> SegmentWriter<M> {
         };
         self.active_path = new_path;
         self.has_real_events = false;
+        self.metadata_changed_since_seal = false;
 
         tracing::debug!(
             segment_index = self.next_index - 1,
@@ -934,6 +941,7 @@ impl<M: BufferMode> SegmentWriter<M> {
                 WriterState::Active { need_metadata, .. } => *need_metadata = true,
                 WriterState::Finished => {}
             }
+            self.metadata_changed_since_seal = true;
         }
     }
 
@@ -1006,7 +1014,7 @@ impl<M: BufferMode> SegmentWriter<M> {
 
         let current_index = self.next_index - 1;
 
-        if self.has_real_events {
+        if self.has_real_events || (self.metadata_changed_since_seal && self.next_index > 1) {
             match self.fs.seal(handle, &self.active_path, current_index) {
                 Ok(seg_ref) => {
                     if M::IS_DISK {
@@ -1028,8 +1036,8 @@ impl<M: BufferMode> SegmentWriter<M> {
                 }
             }
         } else {
-            // No real events — just header + metadata. Remove instead of
-            // sealing so the background worker doesn't upload an empty segment.
+            // No events or changed metadata for a preceding segment. Remove
+            // instead of uploading an unchanged empty segment.
             tracing::debug!(
                 "removing empty final segment {}",
                 self.active_path.display()
@@ -1737,6 +1745,49 @@ mod tests {
     }
 
     #[test]
+    fn test_finalize_preserves_metadata_updated_after_rotation() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1)
+            .max_total_size(100_000)
+            .segment_metadata(vec![("runtime.svc".into(), "0".into())])
+            .build()
+            .unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.update_segment_metadata(vec![("runtime.svc".into(), "1".into())]);
+        writer.finalize().unwrap();
+
+        let path = dir.path().join("trace.1.bin");
+        let bytes = std::fs::read(&path).expect("changed final metadata must be sealed");
+        let metadata = decode_all(&bytes)
+            .into_iter()
+            .filter_map(|event| match event {
+                Decoded::SegmentMetadata { entries, .. } => Some(entries),
+                _ => None,
+            })
+            .next_back()
+            .expect("final segment metadata");
+        assert_eq!(metadata.get("runtime.svc").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn test_finalize_removes_initial_metadata_only_segment() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
+        writer.update_segment_metadata(vec![("runtime.svc".into(), "0".into())]);
+        writer.finalize().unwrap();
+
+        assert!(!dir.path().join("trace.0.bin").exists());
+        assert!(!dir.path().join("trace.0.bin.active").exists());
+    }
+
+    #[test]
     fn test_finalize_removes_empty_segment_after_rotation() {
         let dir = TempDir::new().unwrap();
         // Small max_file_size so one event triggers rotation.
@@ -1744,6 +1795,7 @@ mod tests {
             .base_path(dir.path())
             .max_file_size(1)
             .max_total_size(100_000)
+            .segment_metadata(vec![("runtime.svc".into(), "0".into())])
             .build()
             .unwrap();
         // Write an event — this fills segment 0 and triggers rotation to segment 1.
@@ -1751,6 +1803,7 @@ mod tests {
         // Segment 0 is sealed, segment 1 is active with only header + metadata.
         assert!(dir.path().join("trace.0.bin").exists());
         assert!(dir.path().join("trace.1.bin.active").exists());
+        writer.update_segment_metadata(vec![("runtime.svc".into(), "0".into())]);
 
         // Finalize should remove the empty segment 1 instead of sealing it.
         writer.finalize().unwrap();
