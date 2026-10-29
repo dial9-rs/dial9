@@ -62,7 +62,6 @@ fn main() -> io::Result<()> {
     let s3 = dial9::s3::S3Config::builder()
         .bucket(bucket)
         .service_name("dial9-sampling-smoke")
-        .prefix("dial9-traces/sampling-smoke")
         .build();
     let target = match optional_env("DIAL9_SAMPLING_TARGET")? {
         Some(value) => value.parse::<u32>().map_err(io::Error::other)?,
