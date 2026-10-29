@@ -237,42 +237,30 @@ impl ListRequest {
     }
 }
 #[derive(Clone, Debug, bon::Builder)]
-/// TODO_REWRITE
-///
-/// Object key returned by listing.
+/// Object key
 pub struct ListedObject {
-    /// TODO_REWRITE
     #[builder(into)]
     key: String,
 }
 impl ListedObject {
-    /// TODO_REWRITE
-    ///
-    /// Returns the key relative to the backend namespace.
+    /// Listed object key
     pub fn key(&self) -> &str {
         &self.key
     }
 }
 #[derive(Clone, Debug, bon::Builder)]
-/// TODO_REWRITE
-///
 /// One listing page, in any order, and an optional cursor for the next page.
 pub struct ListPage {
-    /// TODO_REWRITE
     #[builder(default)]
     objects: Vec<ListedObject>,
-    /// TODO_REWRITE
     continuation: Option<ContinuationToken>,
 }
 impl ListPage {
-    /// TODO_REWRITE
-    ///
     /// Returns the objects in this page, without an ordering guarantee.
     pub fn objects(&self) -> &[ListedObject] {
         &self.objects
     }
-    /// TODO_REWRITE
-    ///
+
     /// Returns the opaque cursor for continuing this listing, if present.
     pub fn continuation(&self) -> Option<&ContinuationToken> {
         self.continuation.as_ref()
@@ -281,79 +269,57 @@ impl ListPage {
 
 #[non_exhaustive]
 #[derive(Clone, Debug)]
-/// TODO_REWRITE
-///
 /// Storage failure classification; unknown writes may have committed.
 pub enum StoreErrorKind {
     #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
     /// The backend or transport is unavailable.
     Unavailable {},
     #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
     /// The request was denied.
     Unauthorized {},
     #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
     /// Required metadata or response structure is invalid.
     InvalidResponse {},
     #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
     /// The backend cannot honor this operation.
     Unsupported {},
     #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
-    /// A write may have committed; do not treat this as a definitive failed claim.
+    /// A write may have committed but exact outcome is unknown
     WriteOutcomeUnknown {},
 }
 impl StoreErrorKind {
-    /// TODO_REWRITE
-    ///
     /// Classifies a transport/service availability failure.
     pub fn unavailable() -> Self {
         Self::Unavailable {}
     }
-    /// TODO_REWRITE
-    ///
+
     /// Classifies a denied request.
     pub fn unauthorized() -> Self {
         Self::Unauthorized {}
     }
-    /// TODO_REWRITE
-    ///
+
     /// Classifies missing or malformed storage response data.
     pub fn invalid_response() -> Self {
         Self::InvalidResponse {}
     }
-    /// TODO_REWRITE
-    ///
+
     /// Classifies an unsupported backend primitive or response.
     pub fn unsupported() -> Self {
         Self::Unsupported {}
     }
-    /// TODO_REWRITE
-    ///
+
     /// Classifies a write that may have committed despite the observed failure.
     pub fn write_outcome_unknown() -> Self {
         Self::WriteOutcomeUnknown {}
     }
 }
 #[derive(Debug)]
-/// TODO_REWRITE
-///
 /// A classified storage failure with a displayable explanation.
 pub struct StoreError {
     kind: StoreErrorKind,
     source: Box<dyn std::error::Error + Send + Sync>,
 }
 impl StoreError {
-    /// TODO_REWRITE
-    ///
     /// Combines a storage failure classification with its underlying error.
     pub fn new(
         kind: StoreErrorKind,
@@ -364,8 +330,6 @@ impl StoreError {
             source: source.into(),
         }
     }
-    /// TODO_REWRITE
-    ///
     /// Returns the storage failure classification.
     pub fn kind(&self) -> &StoreErrorKind {
         &self.kind

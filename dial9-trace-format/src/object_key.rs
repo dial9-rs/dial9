@@ -1,8 +1,6 @@
 //! Shared Hive partition-path escaping for trace storage and sampling keys.
-//! TODO_REWRITE
 
 /// Escape a Hive partition-path value using Hive's canonical ASCII table.
-/// TODO_REWRITE
 ///
 /// This intentionally preserves empty strings instead of substituting Hive's
 /// SQL null-partition sentinel: dial9 values are ordinary strings, not nullable

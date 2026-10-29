@@ -1,10 +1,6 @@
-//! TODO_REWRITE
+//! Startup-probability backed by object storage
 //!
-//! Sticky startup admission around a synchronous application entry point.
-//!
-//! The sampler reads the roster on its own runtime and keeps coordination
-//! alive until your application returns. Register the recorder for automatic
-//! stop handling; your application owns its normal runtime/recorder shutdown.
+//! `dial9-sampling` provides an automatic mechanism to achieve behaviors like "about 4 hosts have profiling enabled for each set of properties I care about."
 //!
 //! ```no_run
 //! # #[cfg(feature = "s3")]
@@ -106,13 +102,9 @@ use tokio::runtime::Runtime;
 pub struct Sampling {
     #[builder(field)]
     dimensions: Vec<(String, String)>,
-    /// TODO_REWRITE
-    ///
-    /// Expected number of profiling processes/containers per complete dimension tuple.
+    /// Expected number of profiling processes/containers per dimension.
     num_target_profilers: u32,
-    /// TODO_REWRITE
-    ///
-    /// Required behavior on storage failure or timeout.
+    /// Behavior on storage failure or timeout.
     if_failed: StartupFailure,
     /// TODO_REWRITE
     ///
@@ -148,9 +140,7 @@ pub struct Sampling {
 }
 
 impl<S: sampling_builder::State> SamplingBuilder<S> {
-    /// TODO_REWRITE
-    ///
-    /// Adds a dimension. Names must be unique; names and values must be nonblank.
+    /// Add a dimension to this sample
     pub fn add_dimension(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.dimensions.push((name.into(), value.into()));
         self
