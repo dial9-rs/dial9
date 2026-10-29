@@ -1,7 +1,4 @@
-//! TODO_REWRITE
-//!
-//! Storage primitives for implementing a custom sampling backend.
-//! A failed or cancelled write may have committed.
+//! Sampling backend storage primitives
 use bytes::Bytes;
 use std::{future::Future, pin::Pin, time::SystemTime};
 
@@ -28,16 +25,10 @@ pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>>
 /// Backends must not hide an uncertain earlier attempt behind a retry's
 /// precondition failure; return an unknown write outcome for reconciliation.
 pub trait SamplingStore: Send + Sync + 'static {
-    /// TODO_REWRITE
-    ///
-    /// Maximum amount by which a returned modification time precedes the
-    /// actual write time, in addition to the configured clock-skew allowance.
-    /// Exact-time backends can use zero; second-resolution timestamps need 1s.
+    /// Resolution of the `modified_at` field of stored objects
     fn modification_time_uncertainty(&self) -> std::time::Duration {
         std::time::Duration::ZERO
     }
-    /// TODO_REWRITE
-    ///
     /// Reads an object's current contents and version, or returns `None` if absent.
     ///
     /// # Errors
@@ -45,9 +36,8 @@ pub trait SamplingStore: Send + Sync + 'static {
     /// Returns [`StoreError`] if the object cannot be read or its contents,
     /// version or modification time cannot satisfy the storage contract.
     fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>>;
-    /// TODO_REWRITE
-    ///
-    /// Atomically writes under the requested condition; uncertainty requires reconciliation.
+
+    /// Writes `request` to the store
     ///
     /// # Errors
     ///
@@ -55,10 +45,10 @@ pub trait SamplingStore: Send + Sync + 'static {
     /// [`StoreErrorKind::WriteOutcomeUnknown`]; a definitive precondition failure
     /// is a [`PutOutcome::PreconditionFailed`], rather than an error.
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome>;
-    /// TODO_REWRITE
+
+    /// Lists one page of keys under the requested prefix
     ///
-    /// Lists one page of keys under the requested prefix, including completed writes.
-    ///
+    /// TODO(agent): update this, then tag TODO_REWRITE again after we update for the sorted key design
     /// Keys are relative to the store namespace and must match the requested prefix.
     /// Order is unspecified within and across pages; duplicate keys may appear.
     /// Continue with each opaque cursor until [`ListPage::continuation`] returns
@@ -71,20 +61,17 @@ pub trait SamplingStore: Send + Sync + 'static {
     /// Returns [`StoreError`] if listing fails or the response cannot satisfy
     /// the namespace or complete-pagination contract.
     fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage>;
-    /// TODO_REWRITE
-    ///
-    /// Deletes a process's unique membership object; deleting an absent object succeeds.
+
+    /// Deletes the object at `key`
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if the deletion fails. Cancellation or an error
-    /// does not prove that the object still exists.
+    /// Returns [`StoreError`] if the deletion fails.
+    /// TODO(agent): can this be &str?
     fn delete(&self, key: String) -> StoreFuture<'_, ()>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// TODO_REWRITE
-///
 /// Opaque object version used for conditional writes; callers must not interpret it.
 pub struct VersionToken(String);
 impl VersionToken {
@@ -102,8 +89,6 @@ impl VersionToken {
     }
 }
 #[derive(Clone, Debug)]
-/// TODO_REWRITE
-///
 /// Opaque backend cursor for continuing a listing.
 pub struct ContinuationToken(String);
 impl ContinuationToken {
@@ -123,46 +108,27 @@ impl ContinuationToken {
 
 #[non_exhaustive]
 #[derive(Clone, Debug)]
-/// TODO_REWRITE
-///
 /// The atomic precondition required for a write.
 pub enum WriteCondition {
-    #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
     /// Writes regardless of the current object version.
-    Unconditional {},
-    #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
+    Unconditional,
     /// Writes only if the object is absent.
-    Absent {},
-    #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
+    Absent,
     /// Writes only if the current version matches.
     Matches {
-        /// TODO_REWRITE
-        ///
         /// Version that must still identify the current object.
         version: VersionToken,
     },
 }
 impl WriteCondition {
-    /// TODO_REWRITE
-    ///
-    /// Allows replacing any value; shared roster writes use stricter conditions.
+    /// Writes regardless of the current object version.
     pub fn unconditional() -> Self {
         Self::Unconditional {}
     }
-    /// TODO_REWRITE
-    ///
-    /// Allows writing only when the object does not exist.
+    /// Allows writing iff the object does not exist.
     pub fn absent() -> Self {
         Self::Absent {}
     }
-    /// TODO_REWRITE
-    ///
     /// Allows writing only while the supplied object version still matches.
     pub fn matching(version: VersionToken) -> Self {
         Self::Matches { version }
@@ -170,34 +136,25 @@ impl WriteCondition {
 }
 
 #[derive(Clone, Debug, bon::Builder)]
-/// TODO_REWRITE
-///
 /// Object key, body and conditional-write requirement.
 pub struct PutRequest {
-    /// TODO_REWRITE
     #[builder(into)]
     key: String,
-    /// TODO_REWRITE
     body: Bytes,
-    /// TODO_REWRITE
     #[builder(default = WriteCondition::absent())]
     condition: WriteCondition,
 }
 impl PutRequest {
-    /// TODO_REWRITE
-    ///
     /// Returns the key relative to the backend namespace.
     pub fn key(&self) -> &str {
         &self.key
     }
-    /// TODO_REWRITE
-    ///
+
     /// Returns the stored or requested object bytes.
     pub fn body(&self) -> &Bytes {
         &self.body
     }
-    /// TODO_REWRITE
-    ///
+
     /// Returns the atomic precondition for this write.
     pub fn condition(&self) -> &WriteCondition {
         &self.condition
@@ -205,35 +162,23 @@ impl PutRequest {
 }
 #[non_exhaustive]
 #[derive(Clone, Debug)]
-/// TODO_REWRITE
-///
 /// A write result that distinguishes definitive failure from uncertainty.
 pub enum PutOutcome {
     #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
     /// The write succeeded and returned its new version.
     Stored {
-        /// TODO_REWRITE
-        ///
         /// New object version returned by the completed write.
         version: VersionToken,
     },
     #[non_exhaustive]
-    /// TODO_REWRITE
-    ///
-    /// Every attempt definitively failed its precondition without changing the object.
+    /// The precondition prevented this object from being inserted
     PreconditionFailed {},
 }
 impl PutOutcome {
-    /// TODO_REWRITE
-    ///
     /// Constructs a successful write result with the new version.
     pub fn stored(version: VersionToken) -> Self {
         Self::Stored { version }
     }
-    /// TODO_REWRITE
-    ///
     /// Constructs a definitive failure: no attempt in this call changed the object.
     pub fn precondition_failed() -> Self {
         Self::PreconditionFailed {}
@@ -241,66 +186,51 @@ impl PutOutcome {
 }
 
 #[derive(Clone, Debug, bon::Builder)]
-/// TODO_REWRITE
-///
-/// Object contents, conditional-write version and server modification time.
+/// Stored object
 pub struct StoredObject {
-    /// TODO_REWRITE
     body: Bytes,
-    /// TODO_REWRITE
     version: VersionToken,
-    /// TODO_REWRITE
     modified_at: SystemTime,
 }
 impl StoredObject {
-    /// TODO_REWRITE
-    ///
-    /// Returns the stored or requested object bytes.
+    /// Returns the stored object bytes.
     pub fn body(&self) -> &Bytes {
         &self.body
     }
-    /// TODO_REWRITE
-    ///
+
     /// Returns the opaque version required to conditionally replace the observed object.
     pub fn version(&self) -> &VersionToken {
         &self.version
     }
-    /// TODO_REWRITE
-    ///
+
     /// Returns the server modification time; consumers must account for backend timestamp uncertainty.
     pub fn modified_at(&self) -> SystemTime {
         self.modified_at
     }
 }
 #[derive(Clone, Debug, bon::Builder)]
-/// TODO_REWRITE
-///
-/// Prefix, page size and optional continuation cursor for a listing.
+/// ListRequest
 pub struct ListRequest {
-    /// TODO_REWRITE
+    /// Prefix to filter the List by
     #[builder(into)]
     prefix: String,
-    /// TODO_REWRITE
+    /// Page size
     #[builder(default = 256)]
     page_size: usize,
-    /// TODO_REWRITE
+    /// Optional continuation token to paginate
     continuation: Option<ContinuationToken>,
 }
 impl ListRequest {
-    /// TODO_REWRITE
-    ///
     /// Returns the relative key prefix to list.
     pub fn prefix(&self) -> &str {
         &self.prefix
     }
-    /// TODO_REWRITE
-    ///
+
     /// Returns the requested maximum number of objects in one page.
     pub fn page_size(&self) -> usize {
         self.page_size
     }
-    /// TODO_REWRITE
-    ///
+
     /// Returns the opaque cursor for continuing this listing, if present.
     pub fn continuation(&self) -> Option<&ContinuationToken> {
         self.continuation.as_ref()

@@ -1,6 +1,4 @@
-//! TODO_REWRITE
-//!
-//! Sampler-owned roster selection and coordination around the application entry point.
+//! Run an application with sampling enabled
 use dial9::{Dial9HandleTokioExt, MemoryBuffer, RecorderS3ClientExt, TokioAttachOptions};
 use dial9_sampling::{Sampling, SamplingStatus, StartupFailure, s3::S3SamplingStore};
 use std::{io, time::Duration};

@@ -195,24 +195,14 @@ Missing variables use defaults. Blank, invalid, or non-Unicode values emit a war
 
 ## Startup sampling
 
-TODO_REWRITE
+Use `dial9-sampling` to sample at the host/process level:
+```rust
+TODO(agent): minimal code snippet
+```
 
-Use `dial9-sampling` to choose which processes profile at startup:
-`sampling.with_storage(async { ... }).start_application(|status| { ... })`.
-Configure the expected number of profiling processes with `.num_target_profilers(15)`.
-The runner owns storage initialization, census maintenance and cleanup. Its callback runs
-outside Tokio's entered context, so it can branch before allocating a writer,
-construct the instrumented application runtime and run the application normally.
-Call `status.register_recorder(&recorder)` for automatic stop handling on the
-sampler runtime; recorder integration is always available.
-Drop the application runtime and drain the recorder before returning from the callback.
+`dial9-sampling` uses S3 or another similar object store to allow you to pick a target of number of hosts to enable profiling on. It will be fully managed by dial9 itself.
 
-See the [standalone guide](../dial9-sampling/README.md) and the
-[application entry-point example](examples/manual_sampling.rs). Selected processes
-reuse one `S3Config` for coordination and trace upload, with separate clients
-initialized on their respective worker runtimes. Service isolation comes from
-that config; callers add grouping dimensions without a separate sampling scope
-or minimum-population assumption.
+See the [standalone guide](../dial9-sampling/README.md) and the [application entry-point example](examples/manual_sampling.rs). 
 
 ## Why dial9?
 
