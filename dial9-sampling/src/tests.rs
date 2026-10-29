@@ -86,21 +86,6 @@ async fn cold_disabled_startup_never_enables_after_roster_settles(#[case] poll_i
             tokio::task::yield_now().await;
         }
     }
-    let census = sampling
-        .population_at()
-        .store(store.as_ref())
-        // This helper exercises the public admission path's wall clock;
-        // MemoryStore's modification times advance with paused Tokio time.
-        .at(std::time::SystemTime::now())
-        .max_age(Duration::from_secs(10))
-        .call()
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        census.no_support, 1,
-        "cold disabled cohort cannot be reconstructed"
-    );
     let future_startup = sampling
         .prepare_on_executor(async { Ok(store.clone()) })
         .await;

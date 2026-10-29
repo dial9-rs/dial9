@@ -184,7 +184,6 @@ struct Counts {
     active: u64,
     carriers: u64,
     unarmed: u64,
-    no_support: u64,
 }
 /// Membership from different fractions must never share a counting namespace.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -290,7 +289,6 @@ impl Roster {
             || self.holder.parse::<ulid::Ulid>().is_err()
             || self.revision.parse::<ulid::Ulid>().is_err()
             || (self.trim.is_some() && self.census_computed_at_ms.is_none())
-            || self.counts.no_support > self.counts.unarmed
             || self
                 .counts
                 .active
@@ -474,9 +472,6 @@ pub(crate) async fn prepare_using(
     let (signal, changes) = watch::channel(recording);
     let stop = CancellationToken::new();
     let mut worker = Worker::new(config, store, clock, observed, signal, membership_allowed);
-    if startup_probability == 0.0 {
-        worker.state = MemberState::NoSupport;
-    }
     #[cfg(feature = "dial9")]
     {
         worker.weights = weights.clone();
@@ -517,7 +512,6 @@ pub(crate) async fn prepare_using(
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum MemberState {
     Unarmed,
-    NoSupport,
     Active,
     Carrier,
 }
@@ -525,7 +519,6 @@ impl MemberState {
     fn code(&self) -> char {
         match self {
             Self::Unarmed => 'u',
-            Self::NoSupport => 'n',
             Self::Active => 'a',
             Self::Carrier => 'c',
         }
@@ -533,7 +526,6 @@ impl MemberState {
     fn parse(value: &str) -> Result<Self, StoreError> {
         match value {
             "u" => Ok(Self::Unarmed),
-            "n" => Ok(Self::NoSupport),
             "a" => Ok(Self::Active),
             "c" => Ok(Self::Carrier),
             _ => Err(invalid("invalid member state")),
@@ -749,10 +741,6 @@ fn count_members(members: &[Member], reporting: &ReportingEpoch) -> Counts {
         }
         match member.state {
             MemberState::Unarmed => counts.unarmed += 1,
-            MemberState::NoSupport => {
-                counts.unarmed += 1;
-                counts.no_support += 1;
-            }
             MemberState::Carrier => counts.carriers += 1,
             MemberState::Active => {
                 counts.active += 1;
@@ -1147,48 +1135,6 @@ impl Worker {
                     roster.trim = None;
                     self.history = std::mem::take(&mut self.pending_history);
                     self.pending_history_epoch = None;
-                }
-            }
-            let observation = crate::history::CensusObservation {
-                schema: 2,
-                pool: self.config.pool_path(),
-                started_ms: started,
-                completed_ms: now,
-                bucket,
-                bucket_ms: width,
-                skew_ms: self.config.max_clock_skew.as_millis() as u64,
-                timestamp_uncertainty_ms: u64::try_from(
-                    self.store
-                        .modification_time_uncertainty()
-                        .as_nanos()
-                        .div_ceil(1_000_000),
-                )
-                .map_err(invalid)?,
-                reporting_epoch: roster.reporting.id.clone(),
-                reporting_cutoff: roster.reporting.cutoff.0,
-                observed: roster.counts.observed,
-                tracked: roster.counts.tracked,
-                admitted: roster.counts.active,
-                carriers: roster.counts.carriers,
-                unarmed: roster.counts.unarmed,
-                no_support: roster.counts.no_support,
-            };
-            // Retain the complete observation before changing the mutable
-            // roster. A fenced/unknown roster CAS does not invalidate a census;
-            // failure to archive must not silently erase its historical evidence.
-            match self
-                .store
-                .put(
-                    PutRequest::builder()
-                        .key(observation.key())
-                        .body(serialize(&observation))
-                        .build(),
-                )
-                .await?
-            {
-                PutOutcome::Stored { .. } => {}
-                PutOutcome::PreconditionFailed {} => {
-                    return Err(invalid("retained census key collision"));
                 }
             }
         } else {

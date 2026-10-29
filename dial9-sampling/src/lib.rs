@@ -62,7 +62,6 @@
 #[doc = include_str!("../README.md")]
 mod readme {}
 
-pub mod history;
 mod protocol;
 
 #[cfg(feature = "dial9")]

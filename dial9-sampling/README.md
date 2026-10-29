@@ -184,47 +184,10 @@ do not change coordination keys.
 
 Grant GET, PUT, LIST and membership DELETE. Within that namespace expire
 **only** `v3/members/`, with retention comfortably exceeding two bucket widths
-and skew (for example one day). Preserve `v3/pools/` rosters. Retain `v3/census/`
-observations at least as long as the traces to be analyzed.
+and skew (for example one day). Preserve `v3/pools/` rosters.
 Custom backends implement `backend::SamplingStore` with strong reads, atomic
 conditional writes, complete pagination and declared timestamp uncertainty;
 unknown writes must never be hidden by blind retries.
-
-## Historical population
-
-The counted unit is a live process/container that could emit Dial9 traces,
-including processes whose profiling choice is off. Each complete, guarded
-census writes an immutable observation before attempting the roster CAS.
-Membership cleanup and roster replacement do not delete observations. A
-publisher that later loses its CAS still supplied a complete measurement;
-the observation does not imply that its cutoffs were adopted.
-
-```rust,ignore
-let estimate = sampling.population_at()
-    .store(&store)
-    .at(time_slice)
-    .max_age(Duration::from_secs(90))
-    .call()
-    .await?;
-```
-
-This returns the latest census completed before the requested time, or `None`
-when no sufficiently recent evidence exists. The result includes the listing
-interval, observation age, bucket width, skew, census reporter count `R`, the
-observation's reporting epoch and fraction `f`, and projected population `R / f`.
-For a fixed fraction independent of the measured hashes and independent identities,
-the plug-in Gaussian standard error is `sqrt(R * (1-f)) / f`; sparse counts
-below 30 omit that approximation. A full census has no hash sampling error.
-Adaptive fraction changes and reporting delays need separate validation; this
-approximation does not bound errors from the controller or handoff.
-
-This uncertainty describes **visible membership**, not an instantaneous live
-count. A short-lived process may finish between observations; a crash or
-failed cleanup can leave a ghost for nearly two bucket widths. Missing
-participants, clock violations, identity reuse and partitions cause separate
-bias. Do not extrapolate a nearby observation into an exact time-slice count.
-The admitted count describes the sampler choice; trace or recorder evidence
-establishes which processes actually recorded.
 
 ## Fleet flamegraph weights
 
@@ -266,8 +229,7 @@ support, independent identities/randomness, exogenous lifetimes/workload and
 usable trace delivery.
 For complete startup-cohort coverage choose a positive `AssumePopulation`
 fallback. A cold `Disabled` cohort has zero inclusion probability and cannot
-be recovered from later traces; `no_support` in census observations exposes
-census-visible members of these cohorts. Missing or dropped trace spans cannot be
+be recovered from later traces. Missing or dropped trace spans cannot be
 repaired by census data. Workload estimates can have large variance; normalizing
 expanded totals into percentages introduces the usual finite-sample ratio error.
 This PR records the evidence needed by a future weighted flamegraph reader;

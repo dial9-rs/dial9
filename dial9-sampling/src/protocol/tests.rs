@@ -82,7 +82,6 @@ async fn seed(store: &MemoryStore, config: &Config, population: u64) -> Roster {
         active: 0,
         carriers: 0,
         unarmed: population,
-        no_support: 0,
     };
     publish(store, config, &roster, WriteCondition::absent()).await;
     roster
@@ -155,48 +154,6 @@ async fn backend_timestamp_uncertainty_rejects_an_impossible_census_window(
     ));
     assert!(node.session.is_none());
     assert_eq!(store.0.operation_count(), 0);
-}
-
-#[tokio::test(start_paused = true)]
-async fn census_history_survives_roster_replacement_and_membership_cleanup() {
-    let store = Arc::new(MemoryStore::new());
-    let policy = config(1, "historical-node");
-    let node = prepare(&policy, store.clone()).await;
-    settle_time(5).await;
-    let time = store.now();
-    let before = policy
-        .population_at()
-        .store(store.as_ref())
-        .at(time)
-        .max_age(Duration::from_secs(5))
-        .call()
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(before.tracked, 1);
-    node.into_session()
-        .unwrap()
-        .shutdown(Duration::from_secs(1))
-        .await;
-    assert!(!store.objects().keys().any(|k| k.contains("/members/")));
-    store
-        .delete(format!("{}roster.json", policy.pool_prefix()))
-        .await
-        .unwrap();
-    let after = policy
-        .population_at()
-        .store(store.as_ref())
-        .at(time)
-        .max_age(Duration::from_secs(5))
-        .call()
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(after.population, before.population);
-    assert_eq!(
-        after.observation_completed_at,
-        before.observation_completed_at
-    );
 }
 
 #[rstest::rstest]
