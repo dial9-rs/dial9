@@ -14,7 +14,7 @@ async fn prepare(policy: &Config, store: Arc<MemoryStore>) -> PreparedSampling {
     prepare_using(
         policy.clone(),
         store.clone(),
-        super::super::DEFAULT_PREPARE_TIMEOUT,
+        Duration::from_millis(1000),
         store,
     )
     .await
@@ -207,32 +207,13 @@ async fn zero_budget_has_no_get_but_constructed_store_still_participates(#[case]
 async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
     let store = Arc::new(MemoryStore::new());
     let mut sessions = Vec::new();
-    let mut signals = Vec::new();
     let mut policies = Vec::new();
-    #[cfg(feature = "dial9")]
-    let mut recorders = Vec::new();
     for index in 0..12 {
         let mut policy = config(3, &format!("node-{index}"));
         policy.max_overshoot = Some(0);
         let node = prepare(&policy, store.clone()).await;
         assert!(node.enabled);
-        let session = node.into_session().unwrap();
-        #[cfg(feature = "dial9")]
-        {
-            let registration = Arc::new(crate::registration::RecorderRegistrations::new(Some(
-                tokio::runtime::Handle::current(),
-            )));
-            let mut status = policy.status(true, &DecisionReason::MissingRoster, Some(&session));
-            status.registration = Arc::downgrade(&registration);
-            let recorder = dial9_core::recorder::recorder(
-                dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
-            )
-            .build();
-            status.register_recorder(&recorder);
-            recorders.push((registration, recorder));
-        }
-        signals.push(session.recording_changes());
-        sessions.push(session);
+        sessions.push(node.into_session().unwrap());
         policies.push(policy);
     }
     let salt = nonce();
@@ -254,21 +235,29 @@ async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
     });
     publish(&store, &policies[0], &roster, WriteCondition::absent()).await;
     settle_time(2).await;
-    for (signal, expected) in signals.iter().zip(&expected) {
-        assert_eq!(*signal.borrow(), *expected);
-    }
-    #[cfg(feature = "dial9")]
-    for ((_, recorder), expected) in recorders.iter().zip(&expected) {
-        assert_eq!(recorder.handle().is_enabled(), *expected);
-    }
-    assert_eq!(
-        sessions
-            .iter()
-            .filter(|session| session.is_recording())
-            .count(),
-        expected.iter().filter(|&&kept| kept).count()
+    let assert_membership = |members: Vec<Member>| {
+        assert_eq!(members.len(), policies.len());
+        for (policy, &kept) in policies.iter().zip(&expected) {
+            let member = members
+                .iter()
+                .find(|member| member.invocation_id == policy.invocation_id)
+                .unwrap();
+            assert_eq!(
+                member.state,
+                if kept {
+                    MemberState::Active
+                } else {
+                    MemberState::Carrier
+                }
+            );
+        }
+    };
+    let bucket = millis(store.now()).unwrap() / policies[0].bucket_width.as_millis() as u64;
+    assert_membership(
+        census(store.as_ref(), &policies[0], &roster.reporting, bucket)
+            .await
+            .unwrap(),
     );
-    let terminal: Vec<_> = signals.iter().map(|signal| !*signal.borrow()).collect();
     // A later permissive roster cannot rearm a carrier.
     let mut policy = config(3, "reader");
     policy.max_overshoot = Some(0);
@@ -291,26 +280,14 @@ async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
         .await
         .unwrap();
     settle_time(2).await;
-    for (was_terminal, signal) in terminal.iter().zip(&signals) {
-        if *was_terminal {
-            assert!(!*signal.borrow());
-        }
-    }
-    #[cfg(feature = "dial9")]
-    for ((_, recorder), expected) in recorders.iter().zip(&expected) {
-        assert_eq!(recorder.handle().is_enabled(), *expected);
-        if !expected {
-            recorder.enable();
-            assert!(recorder.handle().is_enabled());
-        }
-    }
+    let bucket = millis(store.now()).unwrap() / policy.bucket_width.as_millis() as u64;
+    assert_membership(
+        census(store.as_ref(), &policy, &roster.reporting, bucket)
+            .await
+            .unwrap(),
+    );
     for session in sessions {
         session.shutdown(Duration::from_secs(1)).await;
-    }
-    #[cfg(feature = "dial9")]
-    for (registration, recorder) in recorders {
-        registration.stop();
-        assert!(!recorder.handle().is_enabled());
     }
 }
 
@@ -792,6 +769,20 @@ fn worker(policy: &Config, store: Arc<dyn SamplingStore>, clock: Arc<dyn Clock>)
 }
 
 #[cfg(feature = "dial9")]
+fn evaluated_weight(weights: &crate::trace_weights::TraceWeights) -> f64 {
+    use dial9_core::source::Source;
+    let mut metadata = Vec::new();
+    weights.clone().segment_metadata(&mut metadata);
+    metadata
+        .iter()
+        .find(|(key, _)| key == "dial9.sampling.weight")
+        .unwrap()
+        .1
+        .parse()
+        .unwrap()
+}
+
+#[cfg(feature = "dial9")]
 #[tokio::test(start_paused = true)]
 async fn survivor_weights_apply_each_new_epoch_once_and_new_joiners_skip_old_rounds() {
     let store = Arc::new(MemoryStore::new());
@@ -817,11 +808,11 @@ async fn survivor_weights_apply_each_new_epoch_once_and_new_joiners_skip_old_rou
         });
         publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
         active.observed = active.read_roster().await.unwrap();
-        let before = weights.current_expansion_weight().unwrap();
+        let before = evaluated_weight(&weights);
         active.apply_trim().await.unwrap();
-        assert_eq!(weights.current_expansion_weight(), Some(before * factor));
+        assert_eq!(evaluated_weight(&weights), before * factor);
         active.apply_trim().await.unwrap();
-        assert_eq!(weights.current_expansion_weight(), Some(before * factor));
+        assert_eq!(evaluated_weight(&weights), before * factor);
         let (signal, _) = watch::channel(true);
         let mut joining = Worker::new(
             config(3, "new-joiner"),
@@ -834,7 +825,7 @@ async fn survivor_weights_apply_each_new_epoch_once_and_new_joiners_skip_old_rou
         let joining_weights = crate::trace_weights::TraceWeights::new(policy.pool_path(), 10.0);
         joining.weights = Some(joining_weights.clone());
         joining.apply_trim().await.unwrap();
-        assert_eq!(joining_weights.current_expansion_weight(), Some(10.0));
+        assert_eq!(evaluated_weight(&joining_weights), 10.0);
         assert_eq!(joining.state, MemberState::Active);
     }
 }
@@ -927,6 +918,7 @@ async fn a_failed_second_page_cannot_publish_a_leader_count_or_cutoff() {
     assert!(decode(after, &policy).unwrap().roster.population.is_none());
 }
 
+#[cfg(feature = "dial9")]
 #[tokio::test(start_paused = true)]
 async fn partition_can_exceed_soft_cap_then_recovery_only_stops_processes() {
     let store = Arc::new(MemoryStore::new());
@@ -940,13 +932,9 @@ async fn partition_can_exceed_soft_cap_then_recovery_only_stops_processes() {
         fleet.push(node.into_session().unwrap());
     }
     settle_time(8).await;
-    assert_eq!(
-        fleet
-            .iter()
-            .filter(|session| session.is_recording())
-            .count(),
-        12
-    );
+    for session in &fleet {
+        assert_eq!(evaluated_weight(session.weights.as_ref().unwrap()), 1.0);
+    }
     store.set_unavailable(false);
     settle_time(16).await;
     // Statistical concentration is checked by the independent simulator. This
@@ -999,7 +987,12 @@ async fn prepared_startup_choice_is_immutable_even_if_maintenance_trims_before_c
     });
     publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
     settle_time(1).await;
-    assert!(!prepared.session.as_ref().unwrap().is_recording());
+    let bucket = millis(store.now()).unwrap() / policy.bucket_width.as_millis() as u64;
+    let members = census(store.as_ref(), &policy, &roster.reporting, bucket)
+        .await
+        .unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].state, MemberState::Carrier);
     assert!(
         prepared.enabled,
         "callback sees the original startup choice"
@@ -1221,10 +1214,7 @@ async fn pending_epochs_change_reporting_without_rerolling_profiling(#[case] pro
     assert_eq!(*process.signal.borrow(), profiling);
     #[cfg(feature = "dial9")]
     if profiling {
-        assert_eq!(
-            process.weights.as_ref().unwrap().current_expansion_weight(),
-            Some(10.0)
-        );
+        assert_eq!(evaluated_weight(process.weights.as_ref().unwrap()), 10.0);
     }
     let bucket = process.bucket().unwrap();
     let current = census(store.as_ref(), &policy, &roster.reporting, bucket)

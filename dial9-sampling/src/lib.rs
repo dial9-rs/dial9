@@ -261,7 +261,7 @@ impl Sampling {
         SamplingStatus {
             enabled,
             initial_expansion_weight,
-            #[cfg(any(test, feature = "dial9"))]
+            #[cfg(feature = "dial9")]
             changes: _maintenance.map(protocol::SamplingSession::recording_changes),
             #[cfg(feature = "dial9")]
             registration: std::sync::Weak::new(),
@@ -320,25 +320,6 @@ impl<F> SamplingStartup<F> {
     where
         F: Future<Output = io::Result<S>>,
     {
-        self.start_application_with_runtime(application, || {
-            // TODO: trace this runtime separately; future wrappers alone do not
-            // expose worker park/unpark events or attach its runtime context.
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .thread_name("dial9-sampling")
-                .enable_all()
-                .build()
-        })
-    }
-
-    fn start_application_with_runtime<S: SamplingStore, R>(
-        self,
-        application: impl FnOnce(SamplingStatus) -> R,
-        build_runtime: impl FnOnce() -> io::Result<Runtime>,
-    ) -> R
-    where
-        F: Future<Output = io::Result<S>>,
-    {
         assert!(
             tokio::runtime::Handle::try_current().is_err(),
             "start_application must be called outside an entered Tokio runtime"
@@ -350,7 +331,14 @@ impl<F> SamplingStartup<F> {
         let prepared = match sampling.preflight(&policy) {
             Some(prepared) => prepared,
             None => {
-                match build_runtime() {
+                // TODO: trace this runtime separately; future wrappers alone do not
+                // expose worker park/unpark events or attach its runtime context.
+                match tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .thread_name("dial9-sampling")
+                    .enable_all()
+                    .build()
+                {
                     Ok(runtime) => {
                         // Own the runtime before polling user code, so initialization
                         // panics also shut down its spawned tasks without blocking.
@@ -413,7 +401,7 @@ pub struct SamplingStatus {
     /// `register_recorder`. `None` for an unselected process does not prove its
     /// selection probability was zero.
     pub initial_expansion_weight: Option<f64>,
-    #[cfg(any(test, feature = "dial9"))]
+    #[cfg(feature = "dial9")]
     changes: Option<tokio::sync::watch::Receiver<bool>>,
     #[cfg(feature = "dial9")]
     registration: std::sync::Weak<registration::RecorderRegistrations>,
@@ -460,7 +448,7 @@ impl SamplingStatus {
                 .is_some_and(|weights| !weights.attach(recorder))
         {
             disable();
-            registration.register(disable, None::<std::future::Ready<()>>);
+            registration.register(disable, None);
             return;
         }
         if let Some(changes) = &self.changes
@@ -468,33 +456,7 @@ impl SamplingStatus {
         {
             disable();
         }
-        registration.register(disable, self.changes.as_ref().map(|_| self.stopped()));
-    }
-
-    /// An owned future completing when profiling should stop. It never resumes.
-    ///
-    /// An initially disabled application completes immediately. A roster trim
-    /// or maintenance termination also completes it; the sampler never reselects.
-    /// A fallback without a constructed backend keeps recording until cleanup.
-    /// The future does not borrow the status and can be spawned.
-    #[cfg(any(test, feature = "dial9"))]
-    fn stopped(&self) -> impl Future<Output = ()> + Send + 'static {
-        let enabled = self.enabled;
-        let changes = self.changes.clone();
-        async move {
-            if !enabled {
-                return;
-            }
-            if let Some(mut changes) = changes {
-                while *changes.borrow_and_update() {
-                    if changes.changed().await.is_err() {
-                        return;
-                    }
-                }
-                return;
-            }
-            std::future::pending().await
-        }
+        registration.register(disable, self.changes.clone());
     }
 }
 

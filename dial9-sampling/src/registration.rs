@@ -1,6 +1,6 @@
 use dial9_core::primitives::sync::Mutex;
-use std::{future::Future, sync::Arc};
-use tokio::{runtime::Handle, task::JoinHandle};
+use std::sync::Arc;
+use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 pub(crate) type DisableCallback = Arc<dyn Fn() + Send + Sync>;
 
@@ -26,7 +26,7 @@ impl RecorderRegistrations {
     pub(crate) fn register(
         &self,
         disable: DisableCallback,
-        stopped: Option<impl Future<Output = ()> + Send + 'static>,
+        changes: Option<watch::Receiver<bool>>,
     ) {
         let mut state = self.state.lock().expect("recorder registration lock");
         if state.closed {
@@ -34,13 +34,18 @@ impl RecorderRegistrations {
             disable();
             return;
         }
-        let monitor = stopped.map(|stopped| {
+        let monitor = changes.map(|mut changes| {
             let disable = disable.clone();
             self.runtime
                 .as_ref()
                 .expect("coordinated sampling runtime")
                 .spawn(async move {
-                    stopped.await;
+                    // A trim or maintenance termination stops recording once.
+                    while *changes.borrow_and_update() {
+                        if changes.changed().await.is_err() {
+                            break;
+                        }
+                    }
                     disable();
                 })
         });
@@ -60,20 +65,45 @@ impl RecorderRegistrations {
             disable();
         }
     }
+}
 
-    #[cfg(all(test, not(shuttle)))]
-    pub(crate) async fn wait_for_stops(&self) {
-        let monitors: Vec<_> = self
-            .state
-            .lock()
-            .expect("recorder registration lock")
-            .recorders
-            .iter_mut()
-            .filter_map(|(_, monitor)| monitor.take())
-            .collect();
-        for monitor in monitors {
-            monitor.await.expect("recorder stop monitor");
+#[cfg(all(test, not(shuttle)))]
+mod tests {
+    use super::*;
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test(start_paused = true)]
+    async fn terminal_or_closed_notice_disables_recorder(#[case] maintenance_ended: bool) {
+        let registrations = RecorderRegistrations::new(Some(Handle::current()));
+        let recorder =
+            dial9_core::recorder::recorder(dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap())
+                .build();
+        let handle = recorder.handle().clone();
+        let (recording, changes) = tokio::sync::watch::channel(true);
+        let (disabled, notice) = tokio::sync::oneshot::channel();
+        let disabled = Mutex::new(Some(disabled));
+        registrations.register(
+            Arc::new(move || {
+                handle.disable();
+                if let Some(disabled) = disabled.lock().unwrap().take() {
+                    disabled.send(()).unwrap();
+                }
+            }),
+            Some(changes),
+        );
+        if maintenance_ended {
+            drop(recording);
+        } else {
+            recording.send(false).unwrap();
         }
+        notice.await.unwrap();
+        assert!(!recorder.handle().is_enabled());
+        recorder.enable();
+        assert!(recorder.handle().is_enabled());
+        registrations.stop();
+        assert!(!recorder.handle().is_enabled());
     }
 }
 
@@ -91,7 +121,7 @@ mod shuttle_tests {
             let disable: DisableCallback = Arc::new(move || { notice.fetch_add(1, Ordering::SeqCst); });
             let other = registrations.clone();
             let worker = shuttle::thread::spawn(move || {
-                other.register(disable, None::<std::future::Ready<()>>);
+                other.register(disable, None);
             });
             registrations.stop();
             worker.join().unwrap();

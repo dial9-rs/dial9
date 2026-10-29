@@ -63,7 +63,7 @@ impl PreparedSampling {
 pub(crate) struct SamplingSession {
     stop: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
-    #[cfg(any(test, feature = "dial9"))]
+    #[cfg(feature = "dial9")]
     recording: watch::Receiver<bool>,
     startup_probability: f64,
     #[cfg(feature = "dial9")]
@@ -77,11 +77,7 @@ impl SamplingSession {
     pub(crate) fn weights(&self) -> Option<crate::trace_weights::TraceWeights> {
         self.weights.clone()
     }
-    #[cfg(all(test, not(shuttle)))]
-    pub(crate) fn is_recording(&self) -> bool {
-        *self.recording.borrow()
-    }
-    #[cfg(any(test, feature = "dial9"))]
+    #[cfg(feature = "dial9")]
     pub(crate) fn recording_changes(&self) -> watch::Receiver<bool> {
         self.recording.clone()
     }
@@ -495,7 +491,7 @@ pub(crate) async fn prepare_using(
             tracing::debug!("sampling member cleanup timed out");
         }
     });
-    #[cfg(not(any(test, feature = "dial9")))]
+    #[cfg(not(feature = "dial9"))]
     drop(changes);
     prepared.session = Some(SamplingSession {
         stop,
@@ -503,7 +499,7 @@ pub(crate) async fn prepare_using(
         startup_probability,
         #[cfg(feature = "dial9")]
         weights,
-        #[cfg(any(test, feature = "dial9"))]
+        #[cfg(feature = "dial9")]
         recording: changes,
     });
     prepared

@@ -308,3 +308,261 @@ fn backend_error_still_starts_application_with_fallback(
         });
     assert_eq!(enabled, expected);
 }
+
+#[cfg(feature = "dial9")]
+#[rstest::rstest]
+#[case(StartupFailure::assume_population(1), true)]
+#[case(StartupFailure::disabled(), false)]
+fn fallback_recorder_controls_and_cleanup(#[case] failure: StartupFailure, #[case] enabled: bool) {
+    let (status, recorder) = Sampling::builder()
+        .num_target_profilers(1)
+        .startup_timeout(Duration::ZERO)
+        .if_failed(failure)
+        .build()
+        .with_storage(async {
+            panic!("zero budget must not poll the backend");
+            #[allow(unreachable_code)]
+            Ok(MemoryStore::new())
+        })
+        .start_application(|status| {
+            assert_eq!(status.enabled, enabled);
+            assert_eq!(status.initial_expansion_weight, enabled.then_some(1.0));
+            let recorder = dial9_core::recorder::recorder(
+                dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+            )
+            .build();
+            status.register_recorder(&recorder);
+            assert_eq!(recorder.handle().is_enabled(), enabled);
+            recorder.enable();
+            assert!(recorder.handle().is_enabled());
+            (status, recorder)
+        });
+    assert_eq!(
+        status.enabled, enabled,
+        "the public startup choice is frozen"
+    );
+    assert!(!recorder.handle().is_enabled());
+    recorder.enable();
+    assert!(recorder.handle().is_enabled());
+}
+
+#[cfg(feature = "dial9")]
+#[rstest::rstest]
+#[case(false, "1")]
+#[case(true, "0")]
+fn registered_recorder_emits_evaluated_weight_and_existing_trace_metadata(
+    #[case] after_cleanup: bool,
+    #[case] expected_weight: &str,
+) {
+    #[derive(dial9::format::TraceEvent)]
+    struct SamplingMarker {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+    }
+
+    let path = std::env::temp_dir().join(format!("sampling-public-{}.bin", ulid::Ulid::new()));
+    let sealed = path.with_extension("0.bin");
+    let recorder = Sampling::builder()
+        .add_dimension("environment", "customer/prod")
+        .num_target_profilers(1)
+        .startup_timeout(Duration::ZERO)
+        .if_failed(StartupFailure::assume_population(1))
+        .build()
+        .with_storage(async { Ok(MemoryStore::new()) })
+        .start_application(|status| {
+            let recorder = dial9_core::recorder::recorder(
+                dial9_core::buffer::DiskBuffer::single_file(&path).unwrap(),
+            )
+            .segment_metadata([("boot_id".into(), "existing-boot-id".into())])
+            .build();
+            status.register_recorder(&recorder);
+            status.register_recorder(&recorder);
+            assert!(recorder.handle().is_enabled(), "registration is idempotent");
+            recorder.handle().record_event(SamplingMarker {
+                timestamp_ns: dial9_core::clock::clock_monotonic_ns(),
+            });
+            if !after_cleanup {
+                recorder.graceful_shutdown(Duration::ZERO);
+            }
+            recorder
+        });
+    if after_cleanup {
+        recorder.graceful_shutdown(Duration::ZERO);
+    }
+    let bytes = std::fs::read(&sealed).unwrap();
+    std::fs::remove_file(sealed).unwrap();
+    let mut metadata = std::collections::HashMap::new();
+    let mut clock_syncs = 0;
+    dial9::format::Decoder::new(&bytes)
+        .unwrap()
+        .for_each_event(|event| {
+            if event.name == "SegmentMetadataEvent"
+                && let Some(dial9::format::types::FieldValueRef::StringMap(entries)) =
+                    event.fields.first()
+            {
+                metadata.extend(
+                    entries
+                        .iter()
+                        .map(|(key, value)| (key.to_owned(), value.to_owned())),
+                );
+            } else if event.name == "ClockSyncEvent" {
+                clock_syncs += 1;
+            }
+        })
+        .unwrap();
+    assert_eq!(metadata["dial9.sampling.weight"], expected_weight);
+    assert_eq!(
+        metadata["dial9.sampling.pool"],
+        "environment=customer%2Fprod/"
+    );
+    assert_eq!(metadata["boot_id"], "existing-boot-id");
+    assert_eq!(
+        metadata
+            .keys()
+            .filter(|key| key.starts_with("dial9.sampling."))
+            .count(),
+        2
+    );
+    assert!(clock_syncs > 0);
+}
+
+#[cfg(feature = "dial9")]
+#[test]
+fn recorder_cannot_be_registered_to_two_live_sampling_invocations() {
+    let sampling = policy();
+    sampling
+        .clone()
+        .with_storage(async { Ok(MemoryStore::new()) })
+        .start_application(|first| {
+            let recorder = dial9_core::recorder::recorder(
+                dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+            )
+            .build();
+            first.register_recorder(&recorder);
+            assert!(recorder.handle().is_enabled());
+            sampling
+                .with_storage(async { Ok(MemoryStore::new()) })
+                .start_application(|second| {
+                    second.register_recorder(&recorder);
+                    assert!(!recorder.handle().is_enabled());
+                });
+            recorder.enable();
+            assert!(
+                recorder.handle().is_enabled(),
+                "normal enable remains available"
+            );
+        });
+}
+
+#[rstest::rstest]
+#[case("valid", 0, Duration::from_millis(1000))]
+#[case("", 1, Duration::from_millis(1000))]
+#[case("valid", 1, Duration::MAX)]
+#[case("valid", 1, Duration::ZERO)]
+fn zero_or_invalid_startup_does_not_poll_storage(
+    #[case] dimension: &str,
+    #[case] target: u32,
+    #[case] timeout: Duration,
+) {
+    let enabled = Sampling::builder()
+        .add_dimension("test", dimension)
+        .num_target_profilers(target)
+        .startup_timeout(timeout)
+        .if_failed(StartupFailure::disabled())
+        .build()
+        .with_storage(async {
+            panic!("preflight or exhausted budget must not initialize storage");
+            #[allow(unreachable_code)]
+            Ok(MemoryStore::new())
+        })
+        .start_application(|SamplingStatus { enabled, .. }| enabled);
+    assert!(!enabled);
+}
+
+#[cfg(feature = "dial9")]
+#[test]
+fn cold_disabled_recorder_stays_off_when_later_startups_use_the_live_census() {
+    use backend::{
+        ListPage, ListRequest, PutOutcome, PutRequest, SamplingStore, StoreFuture, StoredObject,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct ObservePopulation {
+        inner: Arc<MemoryStore>,
+        ready: Mutex<Option<oneshot::Sender<()>>>,
+    }
+    impl SamplingStore for ObservePopulation {
+        fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
+            self.inner.get(key)
+        }
+        fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
+            Box::pin(async move {
+                let has_population = if request.key().ends_with("/roster.json") {
+                    serde_json::from_slice::<serde_json::Value>(request.body()).unwrap()["population"]
+                        .is_object()
+                } else {
+                    assert!(request.key().starts_with("v3/members/"));
+                    false
+                };
+                let outcome = self.inner.put(request).await?;
+                if has_population
+                    && matches!(outcome, PutOutcome::Stored { .. })
+                    && let Some(ready) = self.ready.lock().unwrap().take()
+                {
+                    ready.send(()).unwrap();
+                }
+                Ok(outcome)
+            })
+        }
+        fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+            self.inner.list_page(request)
+        }
+        fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+            self.inner.delete(key)
+        }
+    }
+
+    let store = Arc::new(MemoryStore::new());
+    let sampling = Sampling::builder()
+        .num_target_profilers(1)
+        .poll_interval(Duration::from_millis(100))
+        .bucket_width(Duration::from_secs(1))
+        .max_clock_skew(Duration::ZERO)
+        .if_failed(StartupFailure::disabled())
+        .build();
+    let (ready, population) = oneshot::channel();
+    sampling
+        .clone()
+        .with_storage(async {
+            Ok(ObservePopulation {
+                inner: store.clone(),
+                ready: Mutex::new(Some(ready)),
+            })
+        })
+        .start_application(|status| {
+            assert!(!status.enabled);
+            let recorder = dial9_core::recorder::recorder(
+                dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+            )
+            .build();
+            status.register_recorder(&recorder);
+            drop(status);
+            let app = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            // Wait for an actual published census, rather than advancing a
+            // fabricated session or assuming that a fixed delay was sufficient.
+            app.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), population)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            });
+            sampling
+                .with_storage(async { Ok(store.clone()) })
+                .start_application(|SamplingStatus { enabled, .. }| assert!(enabled));
+            assert!(!recorder.handle().is_enabled());
+        });
+}

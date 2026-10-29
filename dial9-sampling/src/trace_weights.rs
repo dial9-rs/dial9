@@ -125,30 +125,11 @@ mod tests {
         source.segment_metadata(&mut entries);
         assert!(entries.is_empty());
         assert!(weights.multiply(f64::MAX).is_err());
-        assert_eq!(weights.current_expansion_weight(), None);
         source.segment_metadata(&mut entries);
         assert_eq!(entries[1].1, "null", "overflow is unknown");
         entries.clear();
         source.segment_metadata(&mut entries);
         assert!(entries.is_empty());
-    }
-
-    #[test]
-    fn attaching_is_idempotent_and_rejects_a_different_invocation() {
-        let recorder =
-            dial9_core::recorder::recorder(dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap())
-                .build();
-        let weights = TraceWeights::new("pool".into(), 10.0);
-        assert!(weights.attach(&recorder));
-        assert!(weights.attach(&recorder));
-        let different = TraceWeights::new("pool".into(), 10.0);
-        assert!(!different.attach(&recorder));
-        assert!(!weights.attach(&dial9_core::recorder::recorder_disabled()));
-        let handle = recorder.handle().clone();
-        recorder.graceful_shutdown(std::time::Duration::ZERO);
-        assert!(!handle.is_enabled(), "weights do not own the recorder");
-        weights.multiply(2.0).unwrap();
-        assert_eq!(weights.current_expansion_weight(), Some(20.0));
     }
 
     #[test]
@@ -158,66 +139,9 @@ mod tests {
         weights.stop();
         weights.stop();
         assert!(weights.multiply(2.0).is_err());
-        assert_eq!(weights.current_expansion_weight(), Some(0.0));
         let mut entries = Vec::new();
         weights.clone().segment_metadata(&mut entries);
         assert_eq!(entries[1].1, "0");
-    }
-
-    #[test]
-    fn real_segment_contains_evaluated_weight_and_existing_boot_id() {
-        #[derive(dial9::format::TraceEvent)]
-        struct WeightMarker {
-            #[traceevent(timestamp)]
-            timestamp_ns: u64,
-        }
-
-        let path = std::env::temp_dir().join(format!("dial9-weights-{}.bin", ulid::Ulid::new()));
-        let sealed = path.with_extension("0.bin");
-        let weights = TraceWeights::new("pool".into(), 10.0);
-        let recorder = dial9_core::recorder::recorder(
-            dial9_core::buffer::DiskBuffer::single_file(&path).unwrap(),
-        )
-        .segment_metadata([("boot_id".into(), "existing-boot-id".into())])
-        .build();
-        assert!(weights.attach(&recorder));
-        recorder.handle().record_event(WeightMarker {
-            timestamp_ns: dial9_core::clock::clock_monotonic_ns(),
-        });
-        weights.multiply(2.0).unwrap();
-        recorder.graceful_shutdown(std::time::Duration::ZERO);
-        let bytes = std::fs::read(&sealed).unwrap();
-        std::fs::remove_file(sealed).unwrap();
-        let mut metadata = std::collections::HashMap::new();
-        let mut clock_syncs = 0;
-        dial9::format::Decoder::new(&bytes)
-            .unwrap()
-            .for_each_event(|event| {
-                if event.name == "SegmentMetadataEvent" {
-                    if let Some(dial9::format::types::FieldValueRef::StringMap(entries)) =
-                        event.fields.first()
-                    {
-                        metadata.extend(
-                            entries
-                                .iter()
-                                .map(|(key, value)| (key.to_owned(), value.to_owned())),
-                        );
-                    }
-                } else if event.name == "ClockSyncEvent" {
-                    clock_syncs += 1;
-                }
-            })
-            .unwrap();
-        assert_eq!(metadata["dial9.sampling.weight"], "20");
-        assert_eq!(metadata["boot_id"], "existing-boot-id");
-        assert_eq!(
-            metadata
-                .keys()
-                .filter(|key| key.starts_with("dial9.sampling."))
-                .count(),
-            2
-        );
-        assert!(clock_syncs > 0, "the trace already carries clock data");
     }
 }
 
@@ -248,9 +172,9 @@ mod shuttle_tests {
                 }
             }
             worker.join().unwrap();
-            source.segment_metadata(&mut Vec::new());
-            assert_eq!(weights.current_expansion_weight(), Some(0.0));
-            assert_eq!(source.emitted_weight, Some(Some(0.0)));
+            let mut final_snapshot = Vec::new();
+            weights.segment_metadata(&mut final_snapshot);
+            assert_eq!(final_snapshot[1].1, "0");
         }
     }
 }
