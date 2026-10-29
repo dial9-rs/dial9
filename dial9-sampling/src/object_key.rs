@@ -1,11 +1,11 @@
-//! Shared Hive partition-path escaping for trace storage and sampling keys.
+//! Hive partition-path escaping for sampling coordination keys.
 
 /// Escape a Hive partition-path value using Hive's canonical ASCII table.
 ///
 /// This intentionally preserves empty strings instead of substituting Hive's
 /// SQL null-partition sentinel: dial9 values are ordinary strings, not nullable
 /// table cells.
-pub fn hive_escape(value: &str) -> String {
+pub(crate) fn hive_escape(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
     let mut escaped = String::with_capacity(value.len());

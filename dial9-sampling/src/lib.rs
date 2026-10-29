@@ -4,6 +4,7 @@
     allow(clippy::unwrap_used, reason = "Test assertions fail immediately.")
 )]
 
+mod object_key;
 mod protocol;
 
 mod registration;

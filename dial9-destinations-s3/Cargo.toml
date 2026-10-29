@@ -15,7 +15,6 @@ missing_debug_implementations = "warn"
 
 [dependencies]
 dial9-core = { workspace = true, features = ["pipeline"] }
-dial9-utils = { workspace = true }
 bon = "3"
 # `sync` is used directly (S3Uploader holds a tokio Mutex); do not rely on the
 # aws-smithy stack to enable it.

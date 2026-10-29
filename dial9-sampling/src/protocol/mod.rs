@@ -6,7 +6,7 @@ pub(crate) use rate_limit::rate_limited;
 mod storage_shuttle_tests;
 
 use crate::backend::SamplingStore;
-use dial9_utils::object_key::hive_escape;
+use crate::object_key::hive_escape;
 pub(crate) use engine::{DecisionReason, PreparedSampling, SamplingSession};
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};

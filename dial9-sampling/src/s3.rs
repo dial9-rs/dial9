@@ -3,8 +3,8 @@ use crate::backend::{
     ContinuationToken, ListPage, ListRequest, ListedObject, PutOutcome, PutRequest, SamplingStore,
     StoreError, StoreErrorKind, StoreFuture, StoredObject, VersionToken, WriteCondition,
 };
+use crate::object_key::hive_escape;
 use dial9_destinations_s3::S3Config;
-use dial9_utils::object_key::hive_escape;
 use std::{
     io,
     time::{Duration, SystemTime, UNIX_EPOCH},
