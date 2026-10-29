@@ -370,7 +370,6 @@ fn fallback_recorder_controls_and_cleanup(#[case] failure: StartupFailure, #[cas
         })
         .start_application(|status| {
             assert_eq!(status.enabled, enabled);
-            assert_eq!(status.initial_expansion_weight, enabled.then_some(1.0));
             let recorder = dial9_core::recorder::recorder(
                 dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
             )

@@ -191,7 +191,6 @@ impl Sampling {
         let initial_expansion_weight = enabled.then(|| 1.0 / probability);
         SamplingStatus {
             enabled,
-            initial_expansion_weight,
             changes: maintenance.map(protocol::SamplingSession::recording_changes),
             registration: std::sync::Weak::new(),
             weights: initial_expansion_weight.map(|weight| {
@@ -222,18 +221,7 @@ impl<F> std::fmt::Debug for SamplingStartup<F> {
 }
 
 impl<F> SamplingStartup<F> {
-    /// TODO_REWRITE
-    ///
-    /// Resolves sampling, runs the application, then attempts bounded cleanup.
-    ///
-    /// The callback runs outside the sampling runtime's entered context. It may
-    /// construct its own runtime and block on the application's main future.
-    /// Finish application and recorder shutdown before returning; coordination
-    /// remains alive until then. The callback's result is returned unchanged.
-    ///
-    /// Preparation uses the configured startup budget. Cleanup has a separate
-    /// 500ms cooperative budget, including when the callback unwinds. Abrupt
-    /// process exit or failed cleanup still relies on membership bucket expiry.
+    /// Starts the application with the provided `SamplingStatus` decision available
     ///
     /// # Panics
     ///
@@ -302,50 +290,27 @@ impl<F> SamplingStartup<F> {
     }
 }
 
-/// TODO_REWRITE
-///
-/// Sampling status supplied to the application, without coordination ownership.
+/// Sampling status
 ///
 /// Destructure public fields with `..` so future fields remain compatible.
 /// Dropping this value does not stop roster maintenance or withdraw membership.
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct SamplingStatus {
-    /// TODO_REWRITE
-    ///
-    /// The frozen startup choice. A later stop notification does not change it.
+    /// This application should profile
     pub enabled: bool,
-    /// TODO_REWRITE
-    ///
-    /// Expansion weight at startup, for an initially selected process.
-    ///
-    /// After thinning, use the evaluated weight metadata attached by
-    /// `register_recorder`. `None` for an unselected process does not prove its
-    /// selection probability was zero.
-    pub initial_expansion_weight: Option<f64>,
+
     changes: Option<tokio::sync::watch::Receiver<bool>>,
     registration: std::sync::Weak<registration::RecorderRegistrations>,
     weights: Option<trace_weights::TraceWeights>,
 }
 
 impl SamplingStatus {
-    /// TODO_REWRITE
+    /// Register the sampler with the `dial9` recorder
     ///
-    /// Registers automatic recorder stop handling for this application invocation.
-    ///
-    /// An initially disabled choice disables the recorder immediately.
-    /// Also attaches the current expansion weight for fleet analysis. The
-    /// sampler disables active recorders when a thinning round excludes this
-    /// process. Storage failures preserve the current state.
-    /// The sampler never re-enables recording.
-    ///
-    /// All registered recorders are disabled before sampling cleanup when the
-    /// application returns or unwinds. Registration stores a recording handle;
-    /// the application continues to own the recorder and its shutdown.
-    /// Sampling uses normal `disable()`; the application retains `enable()` control.
-    /// Explicit enables override the sampling decision and its weight estimates.
-    /// Registering through a status returned from an ended invocation disables
-    /// the recorder immediately.
+    /// This provides two automatic behaviors:
+    /// 1. The relative weight of this segment will be automatically kept up to date and included in the segment metadata of all traces
+    /// 2. If the sampler becomes disabled after startup (e.g. more nodes launch), the recorder will be automatically disabled.
     pub fn register_recorder(&self, recorder: &dial9_core::recording::Recorder) {
         let handle = recorder.handle().clone();
         let weights = self.weights.clone();

@@ -13,39 +13,30 @@ use std::{sync::Arc, time::Duration};
 
 pub(crate) const CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// TODO_REWRITE
-///
-/// Startup choice when no compatible, settled roster is available.
+/// Startup choice when a sampling decision could not be made within the timeout
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum StartupFailure {
-    /// TODO_REWRITE
-    ///
-    /// Keeps profiling off. This still participates in the background census.
+    /// Profiling disabled on failure
     #[non_exhaustive]
     Disabled {},
-    /// TODO_REWRITE
+    /// Make a decision based on a guess of the total population within this scope
     ///
-    /// Uses an independent invocation draw with probability `min(1, target / population)`,
-    /// The population assumption is the caller's; it does not bound actual volume.
+    /// The startup probability will be `target` / `population`
     #[non_exhaustive]
     AssumePopulation {
-        /// TODO_REWRITE
-        ///
         /// Assumed number of live processes. Must be positive.
         population: u64,
     },
 }
 impl StartupFailure {
-    /// TODO_REWRITE
-    ///
-    /// Keeps profiling off on startup failure or an absent/unsettled roster.
+    /// Profiling disabled on failure
     pub fn disabled() -> Self {
         Self::Disabled {}
     }
-    /// TODO_REWRITE
+    /// Make a decision based on a guess of the total population within this scope
     ///
-    /// Selects by an independent invocation draw using a positive assumed population.
+    /// The startup probability will be `target` / `population`
     pub fn assume_population(population: u64) -> Self {
         Self::AssumePopulation { population }
     }
