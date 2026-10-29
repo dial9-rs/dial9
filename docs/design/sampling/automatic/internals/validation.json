@@ -222,5 +222,99 @@
   "environment": {
     "python": "3.12.12",
     "numpy": "2.2.6"
+  },
+  "api_rename": {
+    "source_revision": "8bf28b9c0b82d8c3bedb084a1c877af358d6d29f",
+    "method": "num_target_profilers",
+    "tests_passed": 217,
+    "stress_seconds": 20,
+    "stress_iterations_passed": 15,
+    "shuttle_tests_passed": 12,
+    "checks": [
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--check"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 1.015
+      },
+      {
+        "name": "workspace-clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--all-features"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 7.211
+      },
+      {
+        "name": "affected-stress",
+        "command": [
+          "cargo",
+          "nextest",
+          "run",
+          "-p",
+          "dial9-sampling",
+          "-p",
+          "dial9",
+          "--all-features",
+          "--stress-duration",
+          "20s"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 76.291
+      },
+      {
+        "name": "sampler-shuttle",
+        "command": [
+          "env",
+          "RUSTFLAGS=--cfg shuttle",
+          "cargo",
+          "test",
+          "-p",
+          "dial9-sampling",
+          "--lib",
+          "--features",
+          "dial9",
+          "--",
+          "shuttle"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 4.242
+      },
+      {
+        "name": "doctests",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "dial9-sampling",
+          "--all-features",
+          "--doc"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 4.374
+      },
+      {
+        "name": "rustdoc",
+        "command": [
+          "cargo",
+          "doc",
+          "-p",
+          "dial9-sampling",
+          "--no-deps",
+          "--all-features"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 1.822
+      }
+    ],
+    "scope": "Public builder name, examples and documentation; protocol and weighting logic are unchanged."
   }
 }

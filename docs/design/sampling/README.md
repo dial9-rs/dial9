@@ -3,7 +3,9 @@
 Proofs, models, reference simulations, review reports and the interactive
 visualization are tracked separately from implementation PR #1093.
 
-The current source revision is `aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7`.
+The protocol evidence source is `aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7`.
+The public builder uses `num_target_profilers(...)` after naming follow-up
+`8bf28b9c0b82d8c3bedb084a1c877af358d6d29f`, validated by the affected crate tests and docs.
 Its [automatic population discovery](automatic-reporting.md) means
 callers configure a target, while a learned reporting fraction replaces
 `minimum_population`. It implements fraction handoffs, quiet-process recovery

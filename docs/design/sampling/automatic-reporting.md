@@ -1,7 +1,9 @@
 # Automatic population discovery
 
 Status: implemented revision, October 28, 2026; local integration validated October 29.
-Source: `aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7`.
+Protocol source: `aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7`.
+Public builder name updated to `num_target_profilers` at
+`8bf28b9c0b82d8c3bedb084a1c877af358d6d29f`; focused API validation is recorded in the manifest.
 This replaces the caller's `minimum_population` assumption. The new
 [protocol evidence](automatic/internals/proofs.md) covers this revision.
 The archived schema-3 proofs and visualization describe the preceding protocol.
@@ -29,7 +31,7 @@ Sampling::builder()
     .add_dimension("environment", "production")
     .add_dimension("instance-type", "m7i.large")
     .add_dimension("az", "us-east-1a")
-    .target(15)
+    .num_target_profilers(15)
     .if_failed(StartupFailure::disabled())
     .build()
     .with_storage(async {
