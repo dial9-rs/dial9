@@ -407,12 +407,13 @@ fn decode_stack_pool_frame(data: &[u8]) -> Option<(Frame, usize)> {
         let frame_count = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
         pos += 4;
         let bytes = frame_count.checked_mul(8)?;
-        let mut frames = Vec::with_capacity(frame_count);
-        for i in 0..frame_count {
-            let off = pos + i * 8;
-            let addr = u64::from_le_bytes(data.get(off..off + 8)?.try_into().ok()?);
-            frames.push(addr);
-        }
+        // Validate the claimed length against the input before allocating, so a
+        // corrupt `frame_count` cannot request gigabytes.
+        let frame_bytes = data.get(pos..pos.checked_add(bytes)?)?;
+        let frames: Vec<u64> = frame_bytes
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().expect("chunk is 8 bytes")))
+            .collect();
         pos += bytes;
         entries.push(StackPoolEntry { pool_id, frames });
     }
@@ -821,6 +822,17 @@ mod tests {
             0,
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn stack_pool_frame_count_exceeding_input_is_rejected() {
+        // One entry claiming u32::MAX frames but carrying none. Must return
+        // `None` without allocating for the claimed ~32 GiB.
+        let mut data = vec![TAG_STACK_POOL];
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_frame(&data, |_: WireTypeId| None, 0).is_none());
     }
 
     #[test]
