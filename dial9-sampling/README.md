@@ -1,5 +1,7 @@
 # Startup sampling
 
+TODO_REWRITE
+
 `dial9-sampling` makes one profiling decision at application startup from a
 shared S3 population roster. An elected process maintains the census in the
 background; excess profilers stop through normal recorder disable. The target

@@ -15,26 +15,38 @@ pub(crate) const CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(all(test, not(shuttle)))]
 pub(crate) const DEFAULT_PREPARE_TIMEOUT: Duration = Duration::from_millis(1000);
 
+/// TODO_REWRITE
+///
 /// Startup choice when no compatible, settled roster is available.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum StartupFailure {
+    /// TODO_REWRITE
+    ///
     /// Keeps profiling off. This still participates in the background census.
     #[non_exhaustive]
     Disabled {},
+    /// TODO_REWRITE
+    ///
     /// Uses an independent invocation draw with probability `min(1, target / population)`,
     /// The population assumption is the caller's; it does not bound actual volume.
     #[non_exhaustive]
     AssumePopulation {
+        /// TODO_REWRITE
+        ///
         /// Assumed number of live processes. Must be positive.
         population: u64,
     },
 }
 impl StartupFailure {
+    /// TODO_REWRITE
+    ///
     /// Keeps profiling off on startup failure or an absent/unsettled roster.
     pub fn disabled() -> Self {
         Self::Disabled {}
     }
+    /// TODO_REWRITE
+    ///
     /// Selects by an independent invocation draw using a positive assumed population.
     pub fn assume_population(population: u64) -> Self {
         Self::AssumePopulation { population }

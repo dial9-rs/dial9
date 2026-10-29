@@ -195,6 +195,8 @@ Missing variables use defaults. Blank, invalid, or non-Unicode values emit a war
 
 ## Startup sampling
 
+TODO_REWRITE
+
 Use `dial9-sampling` to choose which processes profile at startup:
 `sampling.with_storage(async { ... }).start_application(|status| { ... })`.
 Configure the expected number of profiling processes with `.num_target_profilers(15)`.

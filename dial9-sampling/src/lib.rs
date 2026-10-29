@@ -1,3 +1,5 @@
+//! TODO_REWRITE
+//!
 //! Sticky startup admission around a synchronous application entry point.
 //!
 //! The sampler reads the roster on its own runtime and keeps coordination
@@ -71,6 +73,8 @@ mod test_store;
 
 pub mod backend;
 
+/// TODO_REWRITE
+///
 /// Native S3 backend
 #[cfg(feature = "s3")]
 pub mod s3;
@@ -81,6 +85,8 @@ use backend::SamplingStore;
 use std::{future::Future, io, sync::Arc, time::Duration};
 use tokio::runtime::Runtime;
 
+/// TODO_REWRITE
+///
 /// Startup admission for one complete caller-provided dimension tuple.
 ///
 /// Dimensions group processes within the chosen storage namespace. Native S3
@@ -98,27 +104,41 @@ use tokio::runtime::Runtime;
 pub struct Sampling {
     #[builder(field)]
     dimensions: Vec<(String, String)>,
+    /// TODO_REWRITE
+    ///
     /// Expected number of profiling processes/containers per complete dimension tuple.
     num_target_profilers: u32,
+    /// TODO_REWRITE
+    ///
     /// Required behavior on storage failure or timeout.
     if_failed: StartupFailure,
+    /// TODO_REWRITE
+    ///
     /// Cooperative budget covering runtime setup, backend construction and admission; defaults to 1000ms.
     #[builder(default = Duration::from_millis(1000))]
     startup_timeout: Duration,
     #[builder(skip)]
     invocation_id: String,
+    /// TODO_REWRITE
+    ///
     /// Additional admitted profilers tolerated before randomized thinning.
     /// Defaults to the ceiling of three times the square root of the target.
     max_overshoot: Option<u32>,
+    /// TODO_REWRITE
+    ///
     /// Background roster polling interval; defaults to one minute.
     /// Must be between 100ms and eight hours, using whole milliseconds.
     #[builder(default = Duration::from_secs(60))]
     poll_interval: Duration,
+    /// TODO_REWRITE
+    ///
     /// Membership bucket width; defaults to five minutes.
     /// Must cover two polls plus twice the clock skew, and be at most one day.
     /// Use whole milliseconds.
     #[builder(default = Duration::from_secs(300))]
     bucket_width: Duration,
+    /// TODO_REWRITE
+    ///
     /// Assumed maximum wall-clock skew; defaults to five seconds.
     /// Use whole milliseconds.
     #[builder(default = Duration::from_secs(5))]
@@ -126,6 +146,8 @@ pub struct Sampling {
 }
 
 impl<S: sampling_builder::State> SamplingBuilder<S> {
+    /// TODO_REWRITE
+    ///
     /// Adds a dimension. Names must be unique; names and values must be nonblank.
     pub fn add_dimension(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.dimensions.push((name.into(), value.into()));
@@ -134,6 +156,8 @@ impl<S: sampling_builder::State> SamplingBuilder<S> {
 }
 
 impl Sampling {
+    /// TODO_REWRITE
+    ///
     /// Supplies storage initialization for a synchronous application invocation.
     ///
     /// Nothing runs until [`SamplingStartup::start_application`] is called.
@@ -247,6 +271,8 @@ impl Sampling {
     }
 }
 
+/// TODO_REWRITE
+///
 /// Lazy storage initialization and admission for one application invocation.
 ///
 /// The storage future and application callback may borrow local values and need
@@ -266,6 +292,8 @@ impl<F> std::fmt::Debug for SamplingStartup<F> {
 }
 
 impl<F> SamplingStartup<F> {
+    /// TODO_REWRITE
+    ///
     /// Resolves sampling, runs the application, then attempts bounded cleanup.
     ///
     /// The callback runs outside the sampling runtime's entered context. It may
@@ -360,6 +388,8 @@ impl<F> SamplingStartup<F> {
     }
 }
 
+/// TODO_REWRITE
+///
 /// Sampling status supplied to the application, without coordination ownership.
 ///
 /// Destructure public fields with `..` so future fields remain compatible.
@@ -367,8 +397,12 @@ impl<F> SamplingStartup<F> {
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct SamplingStatus {
+    /// TODO_REWRITE
+    ///
     /// The frozen startup choice. A later stop notification does not change it.
     pub enabled: bool,
+    /// TODO_REWRITE
+    ///
     /// Expansion weight at startup, for an initially selected process.
     ///
     /// After thinning, use the evaluated weight metadata attached by
@@ -384,6 +418,8 @@ pub struct SamplingStatus {
 }
 
 impl SamplingStatus {
+    /// TODO_REWRITE
+    ///
     /// Registers automatic recorder stop handling for this application invocation.
     ///
     /// An initially disabled choice disables the recorder immediately.

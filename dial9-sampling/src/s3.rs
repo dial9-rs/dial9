@@ -1,3 +1,5 @@
+//! TODO_REWRITE
+//!
 //! Native S3 conditional operations, independent of upload circuit breaking.
 use crate::backend::{
     ContinuationToken, ListPage, ListRequest, ListedObject, PutOutcome, PutRequest, SamplingStore,
@@ -10,6 +12,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// TODO_REWRITE
+///
 /// Native S3 implementation of the sampler's conditional storage primitives.
 ///
 /// Reuses the recorder's [`S3Config`], including its bucket, prefix and service.
@@ -30,6 +34,8 @@ pub struct S3SamplingStore {
 
 #[bon::bon]
 impl S3SamplingStore {
+    /// TODO_REWRITE
+    ///
     /// Initializes storage using the trace uploader's configuration.
     ///
     /// An optional SDK client preserves custom credential and endpoint setup.
@@ -44,7 +50,12 @@ impl S3SamplingStore {
     /// region discovery fails or omits the region. The surrounding sampling
     /// startup budget bounds this asynchronous initialization.
     #[builder(finish_fn = build)]
-    pub async fn builder(config: S3Config, client: Option<aws_sdk_s3::Client>) -> io::Result<Self> {
+    pub async fn builder(
+        /// TODO_REWRITE
+        config: S3Config,
+        /// TODO_REWRITE
+        client: Option<aws_sdk_s3::Client>,
+    ) -> io::Result<Self> {
         if config.bucket().trim().is_empty() || config.service_name().trim().is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
