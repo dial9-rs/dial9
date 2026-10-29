@@ -35,6 +35,13 @@ impl MemoryStore {
     pub(crate) fn new() -> Self {
         Self::default()
     }
+    #[cfg(not(shuttle))]
+    pub(crate) fn at(time: SystemTime) -> Self {
+        Self {
+            clock_origin: Mutex::new(Some((time, tokio::time::Instant::now()))),
+            ..Self::default()
+        }
+    }
     /// Makes all subsequent operations fail while enabled.
     #[cfg(not(shuttle))]
     pub(crate) fn set_unavailable(&self, value: bool) {
