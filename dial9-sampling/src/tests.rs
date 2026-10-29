@@ -269,7 +269,7 @@ async fn failed_read_does_not_redraw_or_suppress_the_frozen_report() {
         assert!(body.is_empty(), "report body: {body:?}");
         assert!(key.ends_with(".10000000000000000"), "frozen cutoff: {key}");
         by_window
-            .entry(key.split('/').nth(2).unwrap().into())
+            .entry(key.split('/').nth(3).unwrap().into())
             .or_default()
             .insert(key.clone());
     }
@@ -292,7 +292,7 @@ async fn fill_reports(store: &MemoryStore, target_window: u64, population: u64) 
         for index in 1..=population {
             let rank = (u128::from(index) * SPACE / u128::from(population + 1)) as u64;
             let key = format!(
-                "v3/{channel}/window={target_window:016x}/{rank:016x}.{}.{SPACE:017x}",
+                "v3/{channel}/windows/window={target_window:016x}/{rank:016x}.{}.{SPACE:017x}",
                 ulid::Ulid::from(u128::from(index))
             );
             let outcome = store
