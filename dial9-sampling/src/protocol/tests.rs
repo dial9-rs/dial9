@@ -768,7 +768,6 @@ fn worker(policy: &Config, store: Arc<dyn SamplingStore>, clock: Arc<dyn Clock>)
     Worker::new(policy.clone(), store, clock, None, signal, true)
 }
 
-#[cfg(feature = "dial9")]
 fn evaluated_weight(weights: &crate::trace_weights::TraceWeights) -> f64 {
     use dial9_core::source::Source;
     let mut metadata = Vec::new();
@@ -782,7 +781,6 @@ fn evaluated_weight(weights: &crate::trace_weights::TraceWeights) -> f64 {
         .unwrap()
 }
 
-#[cfg(feature = "dial9")]
 #[tokio::test(start_paused = true)]
 async fn survivor_weights_apply_each_new_epoch_once_and_new_joiners_skip_old_rounds() {
     let store = Arc::new(MemoryStore::new());
@@ -918,7 +916,6 @@ async fn a_failed_second_page_cannot_publish_a_leader_count_or_cutoff() {
     assert!(decode(after, &policy).unwrap().roster.population.is_none());
 }
 
-#[cfg(feature = "dial9")]
 #[tokio::test(start_paused = true)]
 async fn partition_can_exceed_soft_cap_then_recovery_only_stops_processes() {
     let store = Arc::new(MemoryStore::new());
@@ -1186,7 +1183,6 @@ async fn pending_epochs_change_reporting_without_rerolling_profiling(#[case] pro
         signal,
         true,
     );
-    #[cfg(feature = "dial9")]
     if profiling {
         process.weights = Some(crate::trace_weights::TraceWeights::new(
             policy.pool_path(),
@@ -1212,7 +1208,6 @@ async fn pending_epochs_change_reporting_without_rerolling_profiling(#[case] pro
     publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
     process.poll().await.unwrap();
     assert_eq!(*process.signal.borrow(), profiling);
-    #[cfg(feature = "dial9")]
     if profiling {
         assert_eq!(evaluated_weight(process.weights.as_ref().unwrap()), 10.0);
     }

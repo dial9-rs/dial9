@@ -151,7 +151,6 @@ fn cleanup_follows_application_teardown_on_return_error_and_unwind(#[case] exit:
             .start_application(|status| {
                 let SamplingStatus { enabled, .. } = status;
                 assert!(enabled);
-                #[cfg(feature = "dial9")]
                 let _recorder = {
                     let recorder = dial9_core::recorder::recorder(
                         dial9_core::buffer::MemoryBuffer::new(1 << 20).unwrap(),
@@ -199,7 +198,6 @@ fn returned_status_retains_no_runtime() {
     assert_task_stopped(ended);
 }
 
-#[cfg(feature = "dial9")]
 #[test]
 fn registration_disables_returned_recorder_before_runtime_cleanup() {
     let store = Arc::new(MemoryStore::new());
@@ -220,7 +218,6 @@ fn registration_disables_returned_recorder_before_runtime_cleanup() {
     recorder.graceful_shutdown(Duration::ZERO);
 }
 
-#[cfg(feature = "dial9")]
 #[rstest::rstest]
 #[case(false)]
 #[case(true)]
@@ -309,7 +306,6 @@ fn backend_error_still_starts_application_with_fallback(
     assert_eq!(enabled, expected);
 }
 
-#[cfg(feature = "dial9")]
 #[rstest::rstest]
 #[case(StartupFailure::assume_population(1), true)]
 #[case(StartupFailure::disabled(), false)]
@@ -346,7 +342,6 @@ fn fallback_recorder_controls_and_cleanup(#[case] failure: StartupFailure, #[cas
     assert!(recorder.handle().is_enabled());
 }
 
-#[cfg(feature = "dial9")]
 #[rstest::rstest]
 #[case(false, "1")]
 #[case(true, "0")]
@@ -428,7 +423,6 @@ fn registered_recorder_emits_evaluated_weight_and_existing_trace_metadata(
     assert!(clock_syncs > 0);
 }
 
-#[cfg(feature = "dial9")]
 #[test]
 fn recorder_cannot_be_registered_to_two_live_sampling_invocations() {
     let sampling = policy();
@@ -481,7 +475,6 @@ fn zero_or_invalid_startup_does_not_poll_storage(
     assert!(!enabled);
 }
 
-#[cfg(feature = "dial9")]
 #[test]
 fn cold_disabled_recorder_stays_off_when_later_startups_use_the_live_census() {
     use backend::{

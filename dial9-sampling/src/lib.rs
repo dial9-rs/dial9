@@ -7,7 +7,7 @@
 //! stop handling; your application owns its normal runtime/recorder shutdown.
 //!
 //! ```no_run
-//! # #[cfg(all(feature = "s3", feature = "dial9"))]
+//! # #[cfg(feature = "s3")]
 //! # fn example() -> std::io::Result<()> {
 //! use dial9::{Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions};
 //! use dial9_sampling::{Sampling, SamplingStatus, StartupFailure, s3::S3SamplingStore};
@@ -58,15 +58,13 @@
 )]
 
 // Compile the feature-dependent README examples during all-features doctests.
-#[cfg(all(feature = "s3", feature = "dial9"))]
+#[cfg(feature = "s3")]
 #[doc = include_str!("../README.md")]
 mod readme {}
 
 mod protocol;
 
-#[cfg(feature = "dial9")]
 mod registration;
-#[cfg(feature = "dial9")]
 mod trace_weights;
 
 #[cfg(all(test, not(shuttle)))]
@@ -250,10 +248,10 @@ impl Sampling {
         &self,
         enabled: bool,
         reason: &protocol::DecisionReason,
-        _maintenance: Option<&protocol::SamplingSession>,
+        maintenance: Option<&protocol::SamplingSession>,
     ) -> SamplingStatus {
         tracing::info!(enabled, ?reason, "sampling startup decision");
-        let probability = _maintenance.map_or_else(
+        let probability = maintenance.map_or_else(
             || self.failure_cutoff() as f64 / (1u128 << 64) as f64,
             protocol::SamplingSession::startup_probability,
         );
@@ -261,13 +259,10 @@ impl Sampling {
         SamplingStatus {
             enabled,
             initial_expansion_weight,
-            #[cfg(feature = "dial9")]
-            changes: _maintenance.map(protocol::SamplingSession::recording_changes),
-            #[cfg(feature = "dial9")]
+            changes: maintenance.map(protocol::SamplingSession::recording_changes),
             registration: std::sync::Weak::new(),
-            #[cfg(feature = "dial9")]
             weights: initial_expansion_weight.map(|weight| {
-                _maintenance
+                maintenance
                     .and_then(protocol::SamplingSession::weights)
                     .unwrap_or_else(|| trace_weights::TraceWeights::new(self.pool_path(), weight))
             }),
@@ -363,19 +358,15 @@ impl<F> SamplingStartup<F> {
         let enabled = prepared.enabled;
         let reason = prepared.reason.clone();
         session.maintenance = prepared.into_session();
-        #[allow(unused_mut)]
         let mut status = policy.status(enabled, &reason, session.maintenance.as_ref());
-        #[cfg(feature = "dial9")]
-        {
-            let registration = Arc::new(registration::RecorderRegistrations::new(
-                session
-                    .runtime
-                    .as_ref()
-                    .map(|runtime| runtime.handle().clone()),
-            ));
-            status.registration = Arc::downgrade(&registration);
-            session.registration = Some(registration);
-        }
+        let registration = Arc::new(registration::RecorderRegistrations::new(
+            session
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.handle().clone()),
+        ));
+        status.registration = Arc::downgrade(&registration);
+        session.registration = Some(registration);
         application(status)
     }
 }
@@ -401,11 +392,8 @@ pub struct SamplingStatus {
     /// `register_recorder`. `None` for an unselected process does not prove its
     /// selection probability was zero.
     pub initial_expansion_weight: Option<f64>,
-    #[cfg(feature = "dial9")]
     changes: Option<tokio::sync::watch::Receiver<bool>>,
-    #[cfg(feature = "dial9")]
     registration: std::sync::Weak<registration::RecorderRegistrations>,
-    #[cfg(feature = "dial9")]
     weights: Option<trace_weights::TraceWeights>,
 }
 
@@ -427,7 +415,6 @@ impl SamplingStatus {
     /// Explicit enables override the sampling decision and its weight estimates.
     /// Registering through a status returned from an ended invocation disables
     /// the recorder immediately.
-    #[cfg(feature = "dial9")]
     pub fn register_recorder(&self, recorder: &dial9_core::recording::Recorder) {
         let handle = recorder.handle().clone();
         let weights = self.weights.clone();
@@ -462,7 +449,6 @@ impl SamplingStatus {
 
 #[derive(Default)]
 struct ApplicationSession {
-    #[cfg(feature = "dial9")]
     registration: Option<Arc<registration::RecorderRegistrations>>,
     maintenance: Option<protocol::SamplingSession>,
     runtime: Option<Runtime>,
@@ -470,7 +456,6 @@ struct ApplicationSession {
 
 impl Drop for ApplicationSession {
     fn drop(&mut self) {
-        #[cfg(feature = "dial9")]
         if let Some(registration) = self.registration.take() {
             registration.stop();
         }

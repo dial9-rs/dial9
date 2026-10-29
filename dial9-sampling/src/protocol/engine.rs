@@ -63,21 +63,17 @@ impl PreparedSampling {
 pub(crate) struct SamplingSession {
     stop: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
-    #[cfg(feature = "dial9")]
     recording: watch::Receiver<bool>,
     startup_probability: f64,
-    #[cfg(feature = "dial9")]
     weights: Option<crate::trace_weights::TraceWeights>,
 }
 impl SamplingSession {
     pub(crate) fn startup_probability(&self) -> f64 {
         self.startup_probability
     }
-    #[cfg(feature = "dial9")]
     pub(crate) fn weights(&self) -> Option<crate::trace_weights::TraceWeights> {
         self.weights.clone()
     }
-    #[cfg(feature = "dial9")]
     pub(crate) fn recording_changes(&self) -> watch::Receiver<bool> {
         self.recording.clone()
     }
@@ -461,17 +457,13 @@ pub(crate) async fn prepare_using(
         population = ?observed.as_ref().and_then(|o| o.roster.population.as_ref()).map(Population::estimate),
         "sampling startup roster"
     );
-    #[cfg(feature = "dial9")]
     let weights = recording.then(|| {
         crate::trace_weights::TraceWeights::new(config.pool_path(), 1.0 / startup_probability)
     });
     let (signal, changes) = watch::channel(recording);
     let stop = CancellationToken::new();
     let mut worker = Worker::new(config, store, clock, observed, signal, membership_allowed);
-    #[cfg(feature = "dial9")]
-    {
-        worker.weights = weights.clone();
-    }
+    worker.weights = weights.clone();
     let cancellation = stop.clone();
     let task = tokio::spawn(async move {
         tokio::select! {
@@ -479,7 +471,6 @@ pub(crate) async fn prepare_using(
             () = cancellation.cancelled() => {},
             () = worker.run() => {},
         }
-        #[cfg(feature = "dial9")]
         if let Some(weights) = &worker.weights {
             weights.stop();
         }
@@ -491,15 +482,11 @@ pub(crate) async fn prepare_using(
             tracing::debug!("sampling member cleanup timed out");
         }
     });
-    #[cfg(not(feature = "dial9"))]
-    drop(changes);
     prepared.session = Some(SamplingSession {
         stop,
         task: Some(task),
         startup_probability,
-        #[cfg(feature = "dial9")]
         weights,
-        #[cfg(feature = "dial9")]
         recording: changes,
     });
     prepared
@@ -779,7 +766,6 @@ struct Worker {
     poll_ms: u64,
     membership_allowed: bool,
     last_trim_epoch: u64,
-    #[cfg(feature = "dial9")]
     weights: Option<crate::trace_weights::TraceWeights>,
 }
 impl Worker {
@@ -826,7 +812,6 @@ impl Worker {
             poll_ms,
             membership_allowed,
             last_trim_epoch,
-            #[cfg(feature = "dial9")]
             weights: None,
         }
     }
@@ -1189,12 +1174,10 @@ impl Worker {
         }
         self.last_trim_epoch = trim.epoch;
         if trim.survival.includes(self.config.draw("trim", &trim.salt)) {
-            #[cfg(feature = "dial9")]
             if let Some(weights) = &self.weights {
                 weights.multiply(1.0 / trim.survival.probability())?;
             }
         } else {
-            #[cfg(feature = "dial9")]
             if let Some(weights) = &self.weights {
                 weights.stop();
             }

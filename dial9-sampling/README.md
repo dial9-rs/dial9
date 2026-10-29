@@ -8,7 +8,7 @@ background; excess profilers stop through normal recorder disable. The target
 is an expected count. Overshoot triggers randomized thinning; the profiler count
 has statistical error while storage and the census are healthy.
 
-Enable `s3` for the native backend and `dial9` for recorder registration.
+Enable `s3` for the native backend. Recorder registration is always available.
 
 ```rust,no_run
 use dial9::{Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions};
