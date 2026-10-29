@@ -146,6 +146,7 @@ pub(super) async fn observe(
             last_key = Some(object.key().into());
             reports.push(report);
         }
+        tokio::task::yield_now().await;
         cursor = page.continuation().cloned();
         exhausted = cursor.is_none();
         if let Some(token) = &cursor

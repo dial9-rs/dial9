@@ -1,3 +1,5 @@
+#[path = "observation.rs"]
+mod observation;
 use super::census::{self, Cutoff, SPACE};
 use super::{Config, rate_limited};
 use crate::backend::{
@@ -5,6 +7,7 @@ use crate::backend::{
     WriteCondition,
 };
 use bytes::Bytes;
+use observation::ObservationDriver;
 use serde::{Deserialize, Serialize};
 use std::{
     sync::Arc,
@@ -64,6 +67,8 @@ pub(crate) struct SamplingSession {
     stop: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
     recording: watch::Receiver<bool>,
+    signal: watch::Sender<bool>,
+    reports: Arc<observation::JobTracker>,
     startup_probability: f64,
     weights: Option<crate::trace_weights::TraceWeights>,
 }
@@ -79,16 +84,26 @@ impl SamplingSession {
     }
     pub(crate) async fn shutdown(mut self, timeout: Duration) {
         self.stop.cancel();
+        if let Some(weights) = &self.weights {
+            weights.stop();
+        }
+        self.signal.send_replace(false);
         if let Some(mut task) = self.task.take() {
             match tokio::time::timeout(timeout, &mut task).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::error!(%error, "sampling maintenance failed"),
                 Err(_) => {
                     task.abort();
+                    if let Err(error) = task.await
+                        && !error.is_cancelled()
+                    {
+                        tracing::error!(%error, "sampling supervisor failed after cancellation");
+                    }
                     tracing::debug!("sampling cleanup deadline expired");
                 }
             }
         }
+        self.reports.abort_and_join().await;
     }
 }
 impl Drop for SamplingSession {
@@ -451,15 +466,44 @@ pub(crate) async fn prepare_using(
             );
         }
     };
-    worker.weights = weights.clone();
+    let signal = worker.signal.clone();
+    let reports = Arc::new(observation::JobTracker::default());
+    let mut driver = match ObservationDriver::new(
+        worker.config.clone(),
+        worker.store.clone(),
+        worker.clock.clone(),
+        worker.cache.clone(),
+        signal.clone(),
+        weights.clone(),
+        reports.clone(),
+    ) {
+        Ok(driver) => driver,
+        Err(error) => {
+            return PreparedSampling::disabled(
+                DecisionReason::store_failure(error.to_string()),
+                fallback,
+            );
+        }
+    };
+    let terminal_weights = weights.clone();
+    let terminal_signal = signal.clone();
     let cancellation = stop.clone();
     let task = tokio::spawn(async move {
-        tokio::select! { biased; () = cancellation.cancelled() => {}, () = worker.run() => {} }
-        if let Some(weights) = &worker.weights {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {},
+            result = catch_panic(worker.run()) => { if let Err(error) = result { tracing::error!(%error, "sampling controller stopped"); } },
+            result = catch_panic(driver.run()) => { match result {
+                Ok(Ok(())) => {},
+                Ok(Err(error)) | Err(error) => tracing::error!(%error, "sampling observation driver stopped"),
+            } },
+        }
+        driver.shutdown().await;
+        if let Some(weights) = terminal_weights {
             weights.stop();
         }
-        worker.signal.send_replace(false);
-        // Historical reports remain immutable after exit; storage lifecycle owns expiry.
+        terminal_signal.send_replace(false);
+        // Immutable historical reports expire through storage lifecycle policy.
     });
     PreparedSampling {
         enabled: recording,
@@ -468,21 +512,58 @@ pub(crate) async fn prepare_using(
             stop,
             task: Some(task),
             recording: recording_changes,
+            signal,
+            reports,
             startup_probability,
             weights,
         }),
     }
 }
 
-struct WindowPlan {
-    window: u64,
-    cutoff: Cutoff,
-    census_rank: u64,
-    census_at: u64,
-    profiler_rank: u64,
-    profiler_at: u64,
-    census_done: bool,
-    profiler_done: bool,
+// Catch a maintenance panic while retaining the driver so its report jobs can
+// still be aborted and joined before the callback-owned session terminates.
+async fn catch_panic<T>(future: impl std::future::Future<Output = T>) -> Result<T, StoreError> {
+    let mut future = Box::pin(future);
+    std::future::poll_fn(move |cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Ok(std::task::Poll::Ready(value)) => std::task::Poll::Ready(Ok(value)),
+            Err(_) => std::task::Poll::Ready(Err(invalid("sampling maintenance panicked"))),
+        }
+    })
+    .await
+}
+
+#[derive(Clone)]
+struct Cache {
+    observed: Option<Observed>,
+    compatible: bool,
+}
+fn publish_cache(cache: &watch::Sender<Cache>, incoming: Option<Observed>, compatible: bool) {
+    cache.send_if_modified(|current| {
+        if !compatible {
+            current.compatible = false;
+            return true;
+        }
+        // A successful incompatible response is terminal for joining in this run.
+        // An older compatible GET may still complete after that response.
+        if !current.compatible {
+            return false;
+        }
+        if let Some(incoming) = &incoming
+            && let Some(old) = &current.observed
+            && (incoming.roster.epoch < old.roster.epoch
+                || (incoming.roster.epoch == old.roster.epoch
+                    && incoming.roster.revision != old.roster.revision))
+        {
+            return false;
+        }
+        // An earlier successful missing read cannot erase a later immutable roster.
+        if incoming.is_some() || current.observed.is_none() {
+            current.observed = incoming;
+        }
+        true
+    });
 }
 struct Worker {
     config: Config,
@@ -491,18 +572,10 @@ struct Worker {
     observed: Option<Observed>,
     leader: Option<Observed>,
     signal: watch::Sender<bool>,
-    born_ms: u64,
-    next_poll_ms: u64,
+    cache: watch::Sender<Cache>,
     next_pass_ms: u64,
-    cutoff: Cutoff,
-    pending_control: Option<Control>,
-    plan: Option<WindowPlan>,
-    pending_trim: Option<Trim>,
-    last_trim_epoch: u64,
     compatible: bool,
     election_needed: bool,
-    read_in_turn: bool,
-    weights: Option<crate::trace_weights::TraceWeights>,
 }
 impl Worker {
     fn new(
@@ -513,29 +586,16 @@ impl Worker {
         signal: watch::Sender<bool>,
         authoritative: bool,
     ) -> Result<Self, StoreError> {
-        let timing = Timing::new(&config);
         let born_ms = millis(clock.now())?;
-        let window = born_ms / timing.width;
-        let phase = config.draw("roster-phase", "") % timing.poll;
-        let next_poll_ms = born_ms / timing.poll * timing.poll + phase;
-        let next_poll_ms = if next_poll_ms <= born_ms {
-            next_poll_ms + timing.poll
-        } else {
-            next_poll_ms
-        };
-        let cutoff = observed
-            .as_ref()
-            .and_then(|o| o.roster.applicable(window))
-            .map_or(Cutoff(None), |c| c.reporting.clone());
-        let pending_control = observed
-            .as_ref()
-            .and_then(|o| o.roster.next_control.clone())
-            .filter(|c| c.effective_window > window);
-        let last_trim_epoch = observed.as_ref().map_or(0, |o| o.roster.epoch);
         let election_needed = authoritative
             && observed
                 .as_ref()
                 .is_none_or(|o| expired(o, &config, store.as_ref(), clock.now()));
+        let cache = watch::channel(Cache {
+            observed: observed.clone(),
+            compatible: true,
+        })
+        .0;
         Ok(Self {
             config,
             store,
@@ -543,84 +603,28 @@ impl Worker {
             observed,
             leader: None,
             signal,
-            born_ms,
-            next_poll_ms,
+            cache,
             next_pass_ms: born_ms,
-            cutoff,
-            pending_control,
-            plan: None,
-            pending_trim: None,
-            last_trim_epoch,
             compatible: true,
             election_needed,
-            read_in_turn: false,
-            weights: None,
         })
     }
     fn now(&self) -> Result<u64, StoreError> {
         millis(self.clock.now())
     }
-    fn ensure_plan(&mut self, now: u64) -> Result<(), StoreError> {
-        let timing = Timing::new(&self.config);
-        let window = now / timing.width;
-        if self.plan.as_ref().is_some_and(|p| p.window >= window) {
-            return Ok(());
-        }
-        if self
-            .pending_control
-            .as_ref()
-            .is_some_and(|c| c.effective_window <= window)
-        {
-            self.cutoff = self
-                .pending_control
-                .take()
-                .expect("pending control")
-                .reporting;
-        }
-        self.apply_trim(window, now)?;
-        let label = window.to_string();
-        let start = window * timing.width;
-        let census_at = start
-            + (u128::from(self.config.draw("census-instant", &label)) * u128::from(timing.width)
-                / SPACE) as u64;
-        let profiler_at = start
-            + (u128::from(self.config.draw("profiler-instant", &label)) * u128::from(timing.width)
-                / SPACE) as u64;
-        self.plan = Some(WindowPlan {
-            window,
-            cutoff: self.cutoff.clone(),
-            census_rank: self.config.draw("census-rank", &label),
-            census_at,
-            profiler_rank: self.config.draw("profiler-rank", &label),
-            profiler_at,
-            census_done: census_at < self.born_ms
-                || now > census_at.saturating_add(timing.dispatch),
-            profiler_done: profiler_at < self.born_ms
-                || now > profiler_at.saturating_add(timing.dispatch),
-        });
-        Ok(())
+    fn learn(&mut self, observed: Option<Observed>, _now: u64) {
+        publish_cache(&self.cache, observed, true);
+        self.consume_cache();
     }
-    fn learn(&mut self, observed: Option<Observed>, now: u64) {
-        let window = now / Timing::new(&self.config).width;
-        if let Some(current) = &observed {
-            let selected = current
-                .roster
-                .next_control
-                .as_ref()
-                .unwrap_or(&current.roster.control);
-            if selected.source_window.is_none_or(|source| source < window) {
-                let mut control = selected.clone();
-                control.effective_window = control.effective_window.max(window.saturating_add(1));
-                self.pending_control = Some(control);
-            }
-            if let Some(trim) = &current.roster.trim
-                && trim.epoch > self.last_trim_epoch
-                && trim.effective_window > window
-                && self.born_ms / Timing::new(&self.config).width <= trim.source_window
-            {
-                self.pending_trim = Some(trim.clone());
-            }
+    fn consume_cache(&mut self) {
+        let state = self.cache.borrow().clone();
+        self.compatible = state.compatible;
+        if !self.compatible {
+            self.leader = None;
+            self.election_needed = false;
+            return;
         }
+        let observed = state.observed;
         if self.leader.as_ref().is_some_and(|leader| {
             observed.as_ref().is_none_or(|current| {
                 current.version != leader.version
@@ -642,46 +646,41 @@ impl Worker {
         self.observed = observed;
     }
     async fn read_roster(&self) -> Result<Option<Observed>, StoreError> {
-        bounded(
+        let result = bounded(
             Timing::new(&self.config).operation,
             self.store
                 .get(format!("{}roster.json", self.config.pool_prefix())),
         )
-        .await?
-        .map(|o| decode(o, &self.config))
-        .transpose()
-    }
-    async fn poll(&mut self) -> Result<(), StoreError> {
-        self.read_in_turn = true;
-        self.election_needed = false;
-        match self.read_roster().await {
-            Ok(observed) => {
-                self.compatible = true;
-                self.learn(observed, self.now()?);
-                Ok(())
-            }
-            Err(error) => {
-                if matches!(error.kind(), StoreErrorKind::Unsupported {}) {
-                    self.compatible = false;
-                    self.leader = None;
-                }
-                Err(error)
-            }
+        .await
+        .and_then(|object| object.map(|o| decode(o, &self.config)).transpose());
+        if result
+            .as_ref()
+            .is_err_and(|error| matches!(error.kind(), StoreErrorKind::Unsupported {}))
+        {
+            publish_cache(&self.cache, None, false);
         }
+        result
     }
     async fn replace(
         &self,
         roster: &Roster,
         previous: Option<&VersionToken>,
     ) -> Result<Option<Observed>, StoreError> {
-        replace(
+        let result = replace(
             &self.config,
             self.store.as_ref(),
             self.clock.as_ref(),
             roster,
             previous,
         )
-        .await
+        .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| matches!(error.kind(), StoreErrorKind::Unsupported {}))
+        {
+            publish_cache(&self.cache, None, false);
+        }
+        result
     }
     async fn election(&mut self) -> Result<(), StoreError> {
         if !self.election_needed || !self.compatible {
@@ -715,132 +714,10 @@ impl Worker {
         }
         Ok(())
     }
-    fn apply_trim(&mut self, window: u64, now: u64) -> Result<(), StoreError> {
-        let Some(trim) = self.pending_trim.clone() else {
-            return Ok(());
-        };
-        if window < trim.effective_window {
-            return Ok(());
-        }
-        self.pending_trim = None;
-        self.last_trim_epoch = self.last_trim_epoch.max(trim.epoch);
-        // A suspended process skips a missed activation; control never acts retroactively.
-        if window != trim.effective_window || !*self.signal.borrow() {
-            return Ok(());
-        }
-        let timing = Timing::new(&self.config);
-        if now > window * timing.width + timing.dispatch
-            || self
-                .observed
-                .as_ref()
-                .is_none_or(|o| expired(o, &self.config, self.store.as_ref(), self.clock.now()))
-            || timing
-                .end(trim.source_window)
-                .is_none_or(|end| now > end.saturating_add(timing.age))
-        {
-            return Ok(());
-        }
-        if trim.survival.includes(self.config.draw("trim", &trim.salt)) {
-            if let Some(weights) = &self.weights {
-                weights.multiply(1.0 / trim.survival.probability())?;
-            }
-        } else {
-            if let Some(weights) = &self.weights {
-                weights.stop();
-            }
-            self.signal.send_replace(false);
-            tracing::info!("sampling active process excluded by thinning");
-        }
-        Ok(())
-    }
-    async fn write_report(
-        &self,
-        channel: &str,
-        window: u64,
-        rank: u64,
-        cutoff: &Cutoff,
-    ) -> Result<(), StoreError> {
-        let timing = Timing::new(&self.config);
-        let deadline = timing
-            .end(window)
-            .and_then(|end| end.checked_add(timing.submission))
-            .ok_or_else(|| invalid("report deadline overflow"))?;
-        let key = census::report_key(&self.config, channel, window, rank, cutoff);
-        for attempt in 0..2 {
-            let now = self.now()?;
-            if !self.compatible || now >= deadline {
-                return Err(invalid("report submission deadline expired"));
-            }
-            let remaining = Duration::from_millis(deadline - now);
-            let result = bounded(
-                timing.operation.min(remaining),
-                self.store.put(
-                    PutRequest::builder()
-                        .key(&key)
-                        .body(Bytes::new())
-                        .condition(WriteCondition::absent())
-                        .build(),
-                ),
-            )
-            .await;
-            match result {
-                Ok(PutOutcome::Stored { .. } | PutOutcome::PreconditionFailed {}) => return Ok(()),
-                Err(error) if attempt == 0 => {
-                    rate_limited!(Duration::from_secs(60), {
-                        tracing::debug!(%error, "retrying immutable sampling report");
-                    });
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        unreachable!("two report attempts return")
-    }
-    async fn reports(&mut self, now: u64) -> Result<(), StoreError> {
-        let timing = Timing::new(&self.config);
-        let Some(plan) = &mut self.plan else {
-            return Ok(());
-        };
-        let census = if !plan.census_done && now >= plan.census_at {
-            plan.census_done = true;
-            (now <= plan.census_at.saturating_add(timing.dispatch)
-                && plan.cutoff.includes(plan.census_rank))
-            .then(|| (plan.window, plan.census_rank, plan.cutoff.clone()))
-        } else {
-            None
-        };
-        let profiler = if !plan.profiler_done && now >= plan.profiler_at {
-            plan.profiler_done = true;
-            (now <= plan.profiler_at.saturating_add(timing.dispatch) && *self.signal.borrow())
-                .then_some((plan.window, plan.profiler_rank))
-        } else {
-            None
-        };
-        if (census.is_some() || profiler.is_some()) && !self.read_in_turn {
-            // This GET only caches future control. Transport failure cannot suppress an eligible report.
-            if let Err(error) = self.poll().await {
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(%error, "sampling report control read failed");
-                });
-            }
-        }
-        let mut failure = None;
-        if self.compatible {
-            if let Some((window, rank, cutoff)) = census
-                && let Err(error) = self.write_report("census", window, rank, &cutoff).await
-            {
-                failure = Some(error);
-            }
-            if let Some((window, rank)) = profiler
-                && let Err(error) = self
-                    .write_report("profilers", window, rank, &Cutoff(None))
-                    .await
-            {
-                failure = Some(error);
-            }
-        }
-        failure.map_or(Ok(()), Err)
-    }
     async fn leader_pass(&mut self) -> Result<(), StoreError> {
+        bounded(self.config.settings.poll_interval, self.leader_pass_inner()).await
+    }
+    async fn leader_pass_inner(&mut self) -> Result<(), StoreError> {
         let Some(previous) = self.leader.take() else {
             return Ok(());
         };
@@ -867,7 +744,7 @@ impl Worker {
             return Ok(());
         };
         self.leader = Some(reserved.clone());
-        self.observed = Some(reserved.clone());
+        self.learn(Some(reserved.clone()), now);
         let Some(window) = assess else {
             return Ok(());
         };
@@ -915,32 +792,15 @@ impl Worker {
         }
     }
     async fn run_checked(&mut self) -> Result<(), StoreError> {
+        let mut changes = self.cache.subscribe();
         loop {
-            let now = self.now()?;
-            if let Err(error) = self.ensure_plan(now) {
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(%error, "sampling boundary control failed");
-                });
-            }
-            self.read_in_turn = false;
-            let poll_due = now >= self.next_poll_ms;
-            if poll_due {
-                // Advance the anchored schedule independently of selected-report work.
-                let period = Timing::new(&self.config).poll;
-                self.next_poll_ms += ((now - self.next_poll_ms) / period + 1) * period;
-            }
-            if let Err(error) = self.reports(now).await {
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(%error, "sampling report failed");
-                });
-            }
-            if poll_due
-                && !self.read_in_turn
-                && let Err(error) = self.poll().await
+            self.now()?;
+            if changes
+                .has_changed()
+                .map_err(|_| invalid("sampling control cache closed"))?
             {
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(%error, "sampling scheduled control read failed");
-                });
+                changes.borrow_and_update();
+                self.consume_cache();
             }
             if let Err(error) = self.election().await {
                 self.leader = None;
@@ -948,10 +808,8 @@ impl Worker {
                     tracing::warn!(%error, "sampling election failed");
                 });
             }
-            if self.leader.is_some() && self.now().is_ok_and(|now| now >= self.next_pass_ms) {
-                if let Err(error) =
-                    bounded(self.config.settings.poll_interval, self.leader_pass()).await
-                {
+            if self.leader.is_some() && self.now()? >= self.next_pass_ms {
+                if let Err(error) = self.leader_pass().await {
                     self.leader = None;
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!(%error, "sampling leader round failed");
@@ -965,29 +823,34 @@ impl Worker {
                 } else {
                     close.saturating_add(timing.width)
                 };
-                // Short private leader cadences can renew the lease between closures.
                 self.next_pass_ms = self
                     .next_pass_ms
                     .min(now.saturating_add(self.config.settings.poll_interval.as_millis() as u64));
             }
             let now = self.now()?;
-            let timing = Timing::new(&self.config);
-            let mut next = self
-                .next_poll_ms
-                .min((now / timing.width + 1) * timing.width);
-            if let Some(plan) = &self.plan {
-                if !plan.census_done {
-                    next = next.min(plan.census_at);
-                }
-                if !plan.profiler_done {
-                    next = next.min(plan.profiler_at);
-                }
+            let next = if self.leader.is_some() {
+                self.next_pass_ms
+            } else {
+                now.saturating_add(Timing::new(&self.config).poll)
+            };
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_millis(next.saturating_sub(now).max(1))) => {},
+                result = changes.changed() => { result.map_err(|_| invalid("sampling control cache closed"))?; self.consume_cache(); },
             }
-            if self.leader.is_some() {
-                next = next.min(self.next_pass_ms);
-            }
-            tokio::time::sleep(Duration::from_millis(next.saturating_sub(now).max(1))).await;
         }
+    }
+}
+
+fn next_slot(now: u64, period: u64, phase: u64) -> Result<u64, StoreError> {
+    let slot = (now / period)
+        .checked_mul(period)
+        .and_then(|base| base.checked_add(phase % period))
+        .ok_or_else(|| invalid("poll time overflow"))?;
+    if slot >= now {
+        Ok(slot)
+    } else {
+        slot.checked_add(period)
+            .ok_or_else(|| invalid("poll time overflow"))
     }
 }
 
@@ -1022,6 +885,15 @@ async fn replace(
         })),
         Ok(PutOutcome::PreconditionFailed {}) => Ok(None),
         Err(error) => {
+            if !matches!(
+                error.kind(),
+                StoreErrorKind::WriteOutcomeUnknown { .. } | StoreErrorKind::Unavailable { .. }
+            ) {
+                return Err(error);
+            }
+            rate_limited!(Duration::from_secs(60), {
+                tracing::debug!(%error, "reconciling uncertain roster write");
+            });
             // Cancelled writes may still commit. One readback reconciles the exact fresh revision.
             match bounded(timeout, store.get(key)).await {
                 Ok(Some(object)) => {
@@ -1085,11 +957,12 @@ fn update(
                 && roster
                     .trim
                     .as_ref()
-                    .is_none_or(|t| window >= t.effective_window.saturating_add(6)) =>
+                    .is_none_or(|t| window >= t.effective_window.saturating_add(1)) =>
         {
-            let lead = timing.poll
+            let lead = timing.width
                 + 2 * config.settings.max_clock_skew.as_millis() as u64
-                + timing.operation.as_millis() as u64;
+                + 3 * timing.operation.as_millis() as u64
+                + timing.dispatch;
             roster.trim = Some(Trim {
                 epoch: roster.epoch,
                 salt: nonce(),

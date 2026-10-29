@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     backend::{ContinuationToken, ListPage, ListRequest, ListedObject, StoreFuture},
     protocol::{Clock, prepare_using},
-    test_store::MemoryStore,
+    test_store::{MemoryStore, StoreOperation},
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,6 +17,63 @@ impl Clock for MemoryStore {
     fn now(&self) -> SystemTime {
         self.now()
     }
+}
+
+/// Storage events let paused tests wait for actual requests without scheduling guesses.
+struct NotifyingStore {
+    inner: Arc<MemoryStore>,
+    puts: tokio::sync::mpsc::UnboundedSender<(String, bool)>,
+    active: AtomicUsize,
+}
+struct ActiveOperation<'a>(&'a AtomicUsize);
+impl Drop for ActiveOperation<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+impl NotifyingStore {
+    fn operation(&self) -> ActiveOperation<'_> {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        ActiveOperation(&self.active)
+    }
+}
+impl SamplingStore for NotifyingStore {
+    fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
+        Box::pin(async move {
+            let _active = self.operation();
+            self.inner.get(key).await
+        })
+    }
+    fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
+        Box::pin(async move {
+            let _active = self.operation();
+            let key = request.key().to_owned();
+            self.puts.send((key.clone(), false)).unwrap();
+            let outcome = self.inner.put(request).await?;
+            self.puts.send((key, true)).unwrap();
+            Ok(outcome)
+        })
+    }
+    fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+        Box::pin(async move {
+            let _active = self.operation();
+            self.inner.list_sorted_page(request).await
+        })
+    }
+}
+async fn sleep_until(store: &MemoryStore, ms: u64) {
+    let target = UNIX_EPOCH + Duration::from_millis(ms);
+    tokio::time::sleep(target.duration_since(store.now()).unwrap()).await;
+}
+fn metadata_weight(weights: &crate::trace_weights::TraceWeights) -> String {
+    use dial9_core::source::Source;
+    let mut entries = Vec::new();
+    weights.clone().segment_metadata(&mut entries);
+    entries
+        .into_iter()
+        .find(|(key, _)| key == "dial9.sampling.weight")
+        .unwrap()
+        .1
 }
 fn config_for(target: u32, name: &str) -> Config {
     let mut config = crate::Sampling::builder()
@@ -144,9 +201,6 @@ impl SamplingStore for ScriptStore {
                 .pop_front()
                 .ok_or_else(|| invalid("unexpected replacement LIST"))
         })
-    }
-    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
-        self.inner.delete(key)
     }
 }
 
@@ -453,105 +507,6 @@ async fn verified_empty_windows_ramp_future_cutoffs_and_never_publish_population
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_control_get_at_an_opportunity_changes_only_a_future_lottery() {
-    let store = store_at(600_000);
-    let policy = config_for(15, "node");
-    let mut node = worker(&policy, store.clone(), false);
-    node.cutoff = Cutoff::threshold(SPACE / 2);
-    node.ensure_plan(600_000).unwrap();
-    let old_rank = node.plan.as_ref().unwrap().census_rank;
-    let mut roster = Roster::initial(&policy, &nonce());
-    roster.control = Control {
-        source_window: Some(8),
-        effective_window: 9,
-        reporting: Cutoff::threshold(SPACE / 4),
-    };
-    publish(store.as_ref(), &policy, &roster, WriteCondition::absent()).await;
-    node.poll().await.unwrap();
-    assert_eq!(node.plan.as_ref().unwrap().cutoff.value(), SPACE / 2);
-    assert_eq!(node.plan.as_ref().unwrap().census_rank, old_rank);
-    tokio::time::advance(Duration::from_secs(60)).await;
-    node.ensure_plan(660_000).unwrap();
-    assert_eq!(node.plan.as_ref().unwrap().cutoff.value(), SPACE / 4);
-    assert_ne!(node.plan.as_ref().unwrap().census_rank, old_rank);
-}
-
-#[tokio::test(start_paused = true)]
-async fn get_failure_does_not_suppress_an_eligible_report_and_lost_put_ack_retries_same_key() {
-    let policy = config_for(15, "node");
-    let store = Arc::new(ScriptStore::new(vec![]));
-    store.get_failure.store(true, Ordering::SeqCst);
-    store.inner.lose_write_acknowledgements(1);
-    let mut node = Worker::new(
-        policy.clone(),
-        store.clone(),
-        store.clone(),
-        None,
-        watch::channel(false).0,
-        false,
-    )
-    .unwrap();
-    node.ensure_plan(600_000).unwrap();
-    let at = node.plan.as_ref().unwrap().census_at;
-    tokio::time::advance(Duration::from_millis(at - 600_000)).await;
-    node.reports(at).await.unwrap();
-    assert_eq!(store.puts.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        store.inner.objects().len(),
-        1,
-        "uncertain retry uses the same immutable object"
-    );
-    assert!(
-        !node.election_needed,
-        "failed GET cannot authorize election"
-    );
-    node.reports(at).await.unwrap();
-    assert_eq!(
-        store.puts.load(Ordering::SeqCst),
-        2,
-        "there is no second eligibility draw"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn late_start_and_suspension_skip_opportunities_without_catchup() {
-    let store = store_at(600_000);
-    let policy = config_for(15, "node");
-    let mut first = worker(&policy, store.clone(), false);
-    first.ensure_plan(600_000).unwrap();
-    let at = first.plan.as_ref().unwrap().census_at;
-    tokio::time::advance(Duration::from_millis(at - 600_000 + 1)).await;
-    let mut late = worker(&policy, store.clone(), false);
-    late.ensure_plan(at + 1).unwrap();
-    late.reports(at + 1).await.unwrap();
-    assert!(late.plan.as_ref().unwrap().census_done);
-    assert!(store.objects().is_empty());
-    first
-        .reports(at + Timing::new(&policy).dispatch + 1)
-        .await
-        .unwrap();
-    assert!(store.objects().is_empty());
-}
-
-#[tokio::test(start_paused = true)]
-async fn polling_deadlines_are_fixed_phase_and_unrelated_gets_never_reset_them() {
-    let store = store_at(600_000);
-    let policy = config_for(15, "quiet");
-    let mut node = worker(&policy, store.clone(), false);
-    let deadline = node.next_poll_ms;
-    assert!(deadline > 600_000 && deadline <= 900_000);
-    let mut roster = Roster::initial(&policy, &nonce());
-    roster.control.reporting = Cutoff::threshold(1);
-    publish(store.as_ref(), &policy, &roster, WriteCondition::absent()).await;
-    for _ in 0..5 {
-        node.poll().await.unwrap();
-    }
-    assert_eq!(node.next_poll_ms, deadline);
-    let phase = policy.draw("roster-phase", "") % 300_000;
-    assert_eq!(deadline % 300_000, phase);
-}
-
-#[tokio::test(start_paused = true)]
 async fn any_disabled_process_can_claim_a_successfully_observed_expired_lease() {
     let store = store_at(600_000);
     let policy = config_for(15, "quiet");
@@ -559,10 +514,12 @@ async fn any_disabled_process_can_claim_a_successfully_observed_expired_lease() 
     roster.control.reporting = Cutoff::threshold(1);
     publish(store.as_ref(), &policy, &roster, WriteCondition::absent()).await;
     let mut node = worker(&policy, store.clone(), false);
-    node.poll().await.unwrap();
+    let observed = node.read_roster().await.unwrap();
+    node.learn(observed, node.now().unwrap());
     assert!(!node.election_needed);
     tokio::time::advance(Duration::from_secs(186)).await;
-    node.poll().await.unwrap();
+    let observed = node.read_roster().await.unwrap();
+    node.learn(observed, node.now().unwrap());
     assert!(node.election_needed);
     node.election().await.unwrap();
     assert!(node.leader.is_some());
@@ -658,12 +615,12 @@ async fn trim_has_poll_propagation_lead_and_cannot_repeat_before_postactivation_
         }),
     );
     let first = roster.trim.clone().unwrap();
-    assert!(first.effective_window * 60_000 > 562_000 + 300_000 + 10_000 + 3000);
+    assert!(first.effective_window * 60_000 > 562_000 + 60_000 + 10_000 + 9000 + 2000);
     assert!((first.survival.probability() - 0.15).abs() < 1e-12);
     update(
         &mut roster,
         &policy,
-        first.effective_window + 5,
+        first.effective_window,
         1_300_000,
         Ok(census::Sample {
             estimate: 1000.0,
@@ -677,53 +634,160 @@ async fn trim_has_poll_propagation_lead_and_cannot_repeat_before_postactivation_
     assert_eq!(roster.trim.as_ref().unwrap().salt, first.salt);
 }
 
-#[rstest::rstest]
-#[case(true)]
-#[case(false)]
 #[tokio::test(start_paused = true)]
-async fn future_trim_applies_once_and_maintains_inverse_survival_weight(#[case] survivor: bool) {
+async fn trim_lead_reserves_slow_publication_and_uncertain_write_readback() {
+    let store = store_at(638_999);
+    let policy = config_for(15, "slow-publication");
+    let mut roster = Roster::initial(&policy, &policy.invocation_id);
+    let previous = publish(store.as_ref(), &policy, &roster, WriteCondition::absent()).await;
+    roster.mutate(&policy.invocation_id).unwrap();
+    update(
+        &mut roster,
+        &policy,
+        9,
+        638_999,
+        Ok(census::Sample {
+            estimate: 1000.0,
+            retained: 480,
+        }),
+        Ok(census::Sample {
+            estimate: 100.0,
+            retained: 64,
+        }),
+    );
+    let activation = roster.trim.as_ref().unwrap().effective_window * 60_000;
+    assert_eq!(activation, 720_000, "pin the smallest propagation margin");
+    store.set_latency(Duration::from_millis(2999));
+    store.lose_write_acknowledgements(1);
+    let published = replace(
+        &policy,
+        store.as_ref(),
+        store.as_ref(),
+        &roster,
+        Some(&previous),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(millis(published.modified_at).unwrap(), 641_998);
+    assert_eq!(millis(store.now()).unwrap(), 644_997);
+    assert!(activation - millis(store.now()).unwrap() > 75_000);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_role_read_of_an_incompatible_policy_refuses_further_joining() {
     let store = store_at(600_000);
-    let policy = config_for(15, "node");
-    let mut node = worker(&policy, store.clone(), true);
-    let salt = (0..1000)
-        .map(|i| ulid::Ulid::from(i).to_string())
-        .find(|salt| (policy.draw("trim", salt) < u64::MAX / 2) == survivor)
-        .unwrap();
-    let trim = Trim {
-        epoch: 1,
-        salt,
-        source_window: 9,
-        effective_window: 11,
-        created_ms: 600_000,
-        survival: Cutoff::threshold(SPACE / 2),
-    };
-    let mut roster = Roster::initial(&policy, &nonce());
-    roster.epoch = 1;
-    roster.trim = Some(trim.clone());
-    let version = publish(store.as_ref(), &policy, &roster, WriteCondition::absent()).await;
-    node.weights = Some(crate::trace_weights::TraceWeights::new(
-        policy.pool_path(),
-        10.0,
-    ));
-    node.observed = Some(Observed {
-        roster,
-        version,
-        modified_at: store.now(),
+    let policy = config_for(15, "incompatible-role");
+    let mut foreign = Roster::initial(&policy, &nonce());
+    foreign.policy.target = 16;
+    publish(store.as_ref(), &policy, &foreign, WriteCondition::absent()).await;
+    let node = worker(&policy, store, true);
+    let error = node.read_roster().await.err().unwrap();
+    assert!(matches!(error.kind(), StoreErrorKind::Unsupported {}));
+    assert!(!node.cache.borrow().compatible);
+    assert!(
+        *node.signal.borrow(),
+        "protocol refusal is separate from recorder state"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn uncertain_roster_publication_refuses_an_incompatible_superseding_readback() {
+    struct SupersedingStore {
+        inner: MemoryStore,
+        foreign: Bytes,
+    }
+    impl Clock for SupersedingStore {
+        fn now(&self) -> SystemTime {
+            self.inner.now()
+        }
+    }
+    impl SamplingStore for SupersedingStore {
+        fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
+            self.inner.get(key)
+        }
+        fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
+            Box::pin(async move {
+                let key = request.key().to_owned();
+                let own = self.inner.put(request).await?;
+                assert!(matches!(own, PutOutcome::Stored { .. }));
+                self.inner
+                    .put(
+                        PutRequest::builder()
+                            .key(key)
+                            .body(self.foreign.clone())
+                            .condition(WriteCondition::unconditional())
+                            .build(),
+                    )
+                    .await?;
+                Err(StoreError::new(
+                    StoreErrorKind::write_outcome_unknown(),
+                    "own committed CAS was superseded before readback",
+                ))
+            })
+        }
+        fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+            self.inner.list_sorted_page(request)
+        }
+    }
+    let policy = config_for(15, "incompatible-readback");
+    let own = Roster::initial(&policy, &policy.invocation_id);
+    let mut foreign = own.clone();
+    foreign.policy.target = 16;
+    foreign.mutate(&nonce()).unwrap();
+    let store = Arc::new(SupersedingStore {
+        inner: MemoryStore::at(UNIX_EPOCH + Duration::from_secs(600)),
+        foreign: serialize(&foreign),
     });
-    node.pending_trim = Some(trim);
-    node.apply_trim(10, 600_000).unwrap();
+    let node = Worker::new(
+        policy,
+        store.clone(),
+        store,
+        None,
+        watch::channel(true).0,
+        true,
+    )
+    .unwrap();
+    let error = node.replace(&own, None).await.err().unwrap();
+    assert!(matches!(error.kind(), StoreErrorKind::Unsupported {}));
+    assert!(!node.cache.borrow().compatible);
+    assert!(*node.signal.borrow());
+}
+
+#[test]
+fn delayed_cache_responses_cannot_restore_old_controls_or_known_incompatibility() {
+    let policy = config_for(15, "cache");
+    let mut old = Roster::initial(&policy, &nonce());
+    old.epoch = 10;
+    let older = Observed {
+        roster: old,
+        version: VersionToken::new("old"),
+        modified_at: UNIX_EPOCH + Duration::from_secs(600),
+    };
+    let mut new = older.clone();
+    new.roster.mutate(&policy.invocation_id).unwrap();
+    new.version = VersionToken::new("new");
+    new.roster.next_control = Some(Control {
+        source_window: Some(9),
+        effective_window: 11,
+        reporting: Cutoff::threshold(SPACE / 2),
+    });
+    let (cache, _) = watch::channel(Cache {
+        observed: Some(older.clone()),
+        compatible: true,
+    });
+    publish_cache(&cache, Some(new.clone()), true);
+    publish_cache(&cache, Some(older), true);
     assert_eq!(
-        node.weights.as_ref().unwrap().current_expansion_weight(),
-        Some(10.0)
+        cache.borrow().observed.as_ref().unwrap().version,
+        new.version
     );
-    tokio::time::advance(Duration::from_secs(60)).await;
-    node.apply_trim(11, 660_000).unwrap();
-    node.apply_trim(11, 660_000).unwrap();
-    assert_eq!(*node.signal.borrow(), survivor);
-    assert_eq!(
-        node.weights.as_ref().unwrap().current_expansion_weight(),
-        Some(if survivor { 20.0 } else { 0.0 })
-    );
+    publish_cache(&cache, None, false);
+    // Even a delayed response for the same accepted epoch/revision must not undo
+    // a successful incompatible response that completed before it.
+    publish_cache(&cache, Some(new), true);
+    assert!(!cache.borrow().compatible);
+    assert_eq!(cache.borrow().observed.as_ref().unwrap().roster.epoch, 11);
 }
 
 #[tokio::test(start_paused = true)]
@@ -740,6 +804,235 @@ async fn cancelled_session_preserves_immutable_historical_reports() {
         .shutdown(Duration::from_secs(1))
         .await;
     assert!(store.objects().contains_key(&key));
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_leader_requests_do_not_block_either_observation_channel() {
+    let inner = store_at(600_000);
+    let policy = config_for(15, "overlap-48");
+    let (puts, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let store = Arc::new(NotifyingStore {
+        inner: inner.clone(),
+        puts,
+        active: AtomicUsize::new(0),
+    });
+    let prepared = prepare_using(
+        policy.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        inner.clone(),
+    )
+    .await;
+    assert!(prepared.enabled);
+    let session = prepared.into_session().unwrap();
+    inner.set_latency(Duration::from_millis(2500));
+    let census_key = census::report_key(
+        &policy,
+        "census",
+        10,
+        policy.draw("census-rank", "10"),
+        &Cutoff(None),
+    );
+    let profiler_key = census::report_key(
+        &policy,
+        "profilers",
+        10,
+        policy.draw("profiler-rank", "10"),
+        &Cutoff(None),
+    );
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let (mut census, mut profiler) = (false, false);
+        while !(census && profiler) {
+            let (key, completed) = events.recv().await.unwrap();
+            census |= completed && key == census_key;
+            profiler |= completed && key == profiler_key;
+        }
+    })
+    .await
+    .expect("both independent observation jobs must finish in their original window");
+    let log = inner.operation_log();
+    for (key, purpose, get_delay) in [
+        (&census_key, "census-instant", 2500),
+        (&profiler_key, "profiler-instant", 0),
+    ] {
+        let instant = 600_000 + (u128::from(policy.draw(purpose, "10")) * 60_000 / SPACE) as u64;
+        let put_ms = log
+            .iter()
+            .find_map(|(at, operation)| match operation {
+                StoreOperation::Put { key: actual, .. } if actual == key => {
+                    Some(millis(*at).unwrap())
+                }
+                _ => None,
+            })
+            .expect("the exact rank and cutoff key was written");
+        assert!(
+            (instant + get_delay..=instant + get_delay + 1).contains(&put_ms),
+            "{purpose} at {instant} was postponed to {put_ms}"
+        );
+        assert!(
+            log.iter().any(|(at, operation)| {
+                matches!(
+                    operation,
+                    StoreOperation::Get(_) | StoreOperation::Put { .. }
+                ) && millis(*at).unwrap() <= instant
+                    && millis(*at).unwrap() + 2500 > instant
+            }),
+            "the observation did not overlap another storage request"
+        );
+        assert!(inner.objects().contains_key(key));
+    }
+    session.shutdown(Duration::from_secs(1)).await;
+    assert_eq!(store.active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn forced_shutdown_joins_pending_report_and_controller_requests() {
+    let inner = store_at(600_000);
+    let policy = config_for(15, "overlap-48");
+    let historical = census::report_key(&policy, "census", 9, 1, &Cutoff(None));
+    report(inner.as_ref(), &policy, "census", 9, 1, Cutoff(None)).await;
+    let (puts, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let store = Arc::new(NotifyingStore {
+        inner: inner.clone(),
+        puts,
+        active: AtomicUsize::new(0),
+    });
+    let session = prepare_using(
+        policy.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        inner.clone(),
+    )
+    .await
+    .into_session()
+    .unwrap();
+    let weights = session.weights().unwrap();
+    let recording = session.recording_changes();
+    inner.set_latency(Duration::from_millis(2500));
+    let pending = census::report_key(
+        &policy,
+        "profilers",
+        10,
+        policy.draw("profiler-rank", "10"),
+        &Cutoff(None),
+    );
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let (key, completed) = events.recv().await.unwrap();
+            if key == pending && !completed {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(store.active.load(Ordering::SeqCst) >= 2);
+    session.shutdown(Duration::ZERO).await;
+    assert_eq!(
+        store.active.load(Ordering::SeqCst),
+        0,
+        "shutdown returned while storage futures still belonged to the session"
+    );
+    assert!(!*recording.borrow());
+    assert_eq!(metadata_weight(&weights), "0");
+    assert!(inner.objects().contains_key(&historical));
+    assert!(!inner.objects().contains_key(&pending));
+    let attempts = inner.operation_count();
+    tokio::time::advance(Duration::from_secs(120)).await;
+    assert_eq!(inner.operation_count(), attempts);
+}
+
+#[tokio::test(start_paused = true)]
+async fn common_trim_boundary_is_independent_of_a_slow_many_page_leader_round() {
+    let store = store_at(480_000);
+    let policy = config_for(400, "boundary-11");
+    let mut roster = Roster::initial(&policy, &policy.invocation_id);
+    roster.epoch = 1;
+    roster.control.reporting = Cutoff::threshold(1);
+    roster.population = Some(Population {
+        window: 6,
+        estimate: 400.0,
+        computed_ms: 442_000,
+    });
+    publish(store.as_ref(), &policy, &roster, WriteCondition::absent()).await;
+    let session = prepare_using(
+        policy.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        store.clone(),
+    )
+    .await
+    .into_session()
+    .unwrap();
+    let weights = session.weights().unwrap();
+    sleep_until(&store, 562_000).await;
+    let observed = decode(
+        store
+            .get(format!("{}roster.json", policy.pool_prefix()))
+            .await
+            .unwrap()
+            .unwrap(),
+        &policy,
+    )
+    .unwrap();
+    roster = observed.roster;
+    roster.mutate(&policy.invocation_id).unwrap();
+    roster.trim = Some(Trim {
+        epoch: roster.epoch,
+        salt: ulid::Ulid::from(1u128).to_string(),
+        source_window: 8,
+        effective_window: 11,
+        created_ms: 562_000,
+        survival: Cutoff::threshold(SPACE / 2),
+    });
+    assert!(
+        roster
+            .trim
+            .as_ref()
+            .unwrap()
+            .survival
+            .includes(policy.draw("trim", &roster.trim.as_ref().unwrap().salt))
+    );
+    publish(
+        store.as_ref(),
+        &policy,
+        &roster,
+        WriteCondition::matching(observed.version),
+    )
+    .await;
+    // Thirteen valid pages make the final healthy 2.5s CAS cross the boundary.
+    for i in 0..12_801u64 {
+        let mut member = policy.clone();
+        member.invocation_id = ulid::Ulid::from(u128::from(i) + 1).to_string();
+        report(store.as_ref(), &member, "census", 9, i, Cutoff(None)).await;
+    }
+    store.set_latency(Duration::from_millis(2500));
+    sleep_until(&store, 659_999).await;
+    assert_eq!(metadata_weight(&weights), "1");
+    sleep_until(&store, 660_001).await;
+    assert_eq!(
+        metadata_weight(&weights),
+        "2",
+        "leader storage work postponed the common thinning boundary"
+    );
+    let log = store.operation_log();
+    assert!(
+        log.iter().any(|(at, operation)| {
+            matches!(operation, StoreOperation::Put { key, body } if key.ends_with("/roster.json") && !body.is_empty())
+                && millis(*at).unwrap() < 660_000
+                && millis(*at).unwrap() + 2500 > 660_000
+        }),
+        "the leader's final CAS did not overlap the thinning boundary"
+    );
+    assert!(
+        log.iter().any(|(at, operation)| {
+            matches!(operation, StoreOperation::Get(_)) && millis(*at).unwrap() == 659_231
+        }),
+        "active control polls must run during that leader round"
+    );
+    sleep_until(&store, 680_001).await;
+    assert_eq!(metadata_weight(&weights), "2", "thinning applied twice");
+    session.shutdown(Duration::from_secs(1)).await;
 }
 
 #[rstest::rstest]
@@ -762,13 +1055,20 @@ fn dimensions_remain_sorted_and_hive_escaped(
 async fn report_put_failures_have_exactly_two_attempts_without_a_new_lottery() {
     let store = store_at(600_000);
     let policy = config_for(15, "partition");
-    let node = worker(&policy, store.clone(), false);
     store.set_unavailable(true);
     let before = store.operation_count();
     assert!(
-        node.write_report("census", 10, 1, &Cutoff(None))
-            .await
-            .is_err()
+        observation::write_report(
+            &policy,
+            store.as_ref(),
+            store.as_ref(),
+            "census",
+            10,
+            1,
+            &Cutoff(None)
+        )
+        .await
+        .is_err()
     );
     assert_eq!(store.operation_count() - before, 2);
     assert!(store.objects().is_empty());
@@ -821,25 +1121,32 @@ async fn report_deadline_uses_one_time_snapshot_and_cannot_underflow_on_clock_ad
     let store = store_at(600_000);
     let policy = config_for(15, "deadline");
     let clock = Arc::new(AdvancingClock(std::sync::atomic::AtomicU64::new(600_000)));
-    let node = Worker::new(
-        policy,
-        store.clone(),
-        clock.clone(),
-        None,
-        watch::channel(false).0,
-        false,
-    )
-    .unwrap();
     clock.0.store(670_999, Ordering::SeqCst);
-    node.write_report("census", 10, 1, &Cutoff(None))
-        .await
-        .unwrap();
+    observation::write_report(
+        &policy,
+        store.as_ref(),
+        clock.as_ref(),
+        "census",
+        10,
+        1,
+        &Cutoff(None),
+    )
+    .await
+    .unwrap();
     assert_eq!(store.objects().len(), 1);
     let before = store.operation_count();
     assert!(
-        node.write_report("census", 10, 2, &Cutoff(None))
-            .await
-            .is_err()
+        observation::write_report(
+            &policy,
+            store.as_ref(),
+            clock.as_ref(),
+            "census",
+            10,
+            2,
+            &Cutoff(None)
+        )
+        .await
+        .is_err()
     );
     assert_eq!(
         store.operation_count(),
@@ -849,15 +1156,102 @@ async fn report_deadline_uses_one_time_snapshot_and_cannot_underflow_on_clock_ad
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_slow_startup_clock_never_uses_already_promoted_future_control_early() {
-    let policy = config_for(15, "slow");
-    let store = store_at(659_000);
-    let mut roster = Roster::initial(&policy, &nonce());
-    roster.control = Control {
-        source_window: Some(9),
-        effective_window: 11,
-        reporting: Cutoff::threshold(SPACE / 100),
+async fn collection_waits_until_the_completed_window_closure_margin() {
+    let store = store_at(621_999);
+    let policy = config_for(15, "leader");
+    let mut roster = Roster::initial(&policy, &policy.invocation_id);
+    roster.last_window = Some(8);
+    let version = publish(store.as_ref(), &policy, &roster, WriteCondition::absent()).await;
+    report(
+        store.as_ref(),
+        &config_for(15, "member"),
+        "census",
+        9,
+        1,
+        Cutoff(None),
+    )
+    .await;
+    let observed = Observed {
+        roster,
+        version,
+        modified_at: store.now(),
     };
+    let mut node = worker(&policy, store.clone(), false);
+    node.leader = Some(observed);
+    let before = store.operation_count();
+    node.leader_pass().await.unwrap();
+    assert_eq!(
+        store.operation_count() - before,
+        2,
+        "the current completed prefix is not yet closed"
+    );
+    assert!(node.leader.as_ref().unwrap().roster.population.is_none());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let before = store.operation_count();
+    node.leader_pass().await.unwrap();
+    assert_eq!(store.operation_count() - before, 5);
+    assert_eq!(
+        node.leader
+            .as_ref()
+            .unwrap()
+            .roster
+            .population
+            .as_ref()
+            .unwrap()
+            .window,
+        9
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_many_page_round_expires_with_a_reservation_and_no_false_population() {
+    struct SlowStore {
+        inner: MemoryStore,
+        lists: AtomicUsize,
+    }
+    impl Clock for SlowStore {
+        fn now(&self) -> SystemTime {
+            self.inner.now()
+        }
+    }
+    impl SamplingStore for SlowStore {
+        fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
+            self.inner.get(key)
+        }
+        fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
+            self.inner.put(request)
+        }
+        fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+            self.lists.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if request.prefix().starts_with("v3/profilers/") {
+                    return Ok(page(vec![], None));
+                }
+                let offset = request
+                    .continuation()
+                    .map_or(0, |cursor| cursor.as_str().parse::<usize>().unwrap());
+                let next = offset + request.page_size();
+                let keys = (offset..next)
+                    .map(|i| {
+                        format!(
+                            "{}{:016x}.{}.10000000000000000",
+                            request.prefix(),
+                            i + 1,
+                            ulid::Ulid::from(i as u128 + 1)
+                        )
+                    })
+                    .collect();
+                Ok(page(keys, Some(&next.to_string())))
+            })
+        }
+    }
+    let store = Arc::new(SlowStore {
+        inner: MemoryStore::at(UNIX_EPOCH + Duration::from_millis(622_000)),
+        lists: AtomicUsize::new(0),
+    });
+    let policy = config_for(10000, "slow-leader");
+    let roster = Roster::initial(&policy, &policy.invocation_id);
     let version = publish(store.as_ref(), &policy, &roster, WriteCondition::absent()).await;
     let observed = Observed {
         roster,
@@ -865,18 +1259,37 @@ async fn a_slow_startup_clock_never_uses_already_promoted_future_control_early()
         modified_at: store.now(),
     };
     let mut node = Worker::new(
-        policy,
+        policy.clone(),
         store.clone(),
-        store,
-        Some(observed),
+        store.clone(),
+        Some(observed.clone()),
         watch::channel(false).0,
         true,
     )
     .unwrap();
-    node.ensure_plan(659_000).unwrap();
-    assert_eq!(
-        node.plan.as_ref().unwrap().cutoff.value(),
-        SPACE,
-        "bootstrap fallback is positive and independent"
+    node.leader = Some(observed);
+    let started = Instant::now();
+    let error = node.leader_pass().await.unwrap_err();
+    assert!(matches!(error.kind(), StoreErrorKind::Unavailable { .. }));
+    assert_eq!(started.elapsed(), Duration::from_secs(60));
+    let roster = decode(
+        store
+            .get(format!("{}roster.json", policy.pool_prefix()))
+            .await
+            .unwrap()
+            .unwrap(),
+        &policy,
+    )
+    .unwrap()
+    .roster;
+    assert_eq!(roster.last_window, Some(9));
+    assert!(roster.population.is_none());
+    let before = store.lists.load(Ordering::SeqCst);
+    let observed = node.read_roster().await.unwrap();
+    node.learn(observed, node.now().unwrap());
+    assert!(
+        node.leader.is_some(),
+        "authoritative control reads resume after round cancellation"
     );
+    assert_eq!(store.lists.load(Ordering::SeqCst), before);
 }

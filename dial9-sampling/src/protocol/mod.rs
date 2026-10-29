@@ -8,7 +8,7 @@ mod storage_shuttle_tests;
 
 use crate::backend::SamplingStore;
 use crate::object_key::hive_escape;
-#[cfg(test)]
+#[cfg(all(test, not(shuttle)))]
 pub(crate) use engine::{Clock, prepare_using};
 pub(crate) use engine::{DecisionReason, PreparedSampling, SamplingSession};
 use sha2::{Digest, Sha256};
