@@ -10,6 +10,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+const SAMPLING_PREFIX: &str = "_dial9_sampling/";
+
 /// Native S3 implementation of the sampler's conditional storage primitives.
 ///
 /// Reuses the recorder's [`S3Config`], including its bucket, prefix and service.
@@ -104,9 +106,8 @@ impl S3SamplingStore {
                 .build(),
         );
         let sampling_prefix = match config.prefix() {
-            // TODO(agent): extract _dial9_sampling into a constant
-            Some(prefix) => format!("{prefix}/_dial9_sampling/"),
-            None => "_dial9_sampling/".to_owned(),
+            Some(prefix) => format!("{prefix}/{SAMPLING_PREFIX}"),
+            None => SAMPLING_PREFIX.to_owned(),
         };
         let service = hive_escape(config.service_name());
         Ok(Self {
