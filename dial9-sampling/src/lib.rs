@@ -110,22 +110,35 @@ pub struct Sampling {
 
     #[builder(skip)]
     invocation_id: String,
-    // TODO(agent): refactor these into internal settings all settings below here.
+    #[builder(skip)]
+    settings: InternalSettings,
+}
+
+#[derive(Clone, Debug)]
+struct InternalSettings {
     /// Additional admitted profilers tolerated before randomized thinning.
     /// Defaults to the ceiling of three times the square root of the target.
     max_overshoot: Option<u32>,
     /// Polling interval for the leader to check the profiler roster
-    #[builder(default = Duration::from_secs(60))]
     poll_interval: Duration,
     /// Membership bucket width; defaults to five minutes.
     /// Must cover two polls plus twice the clock skew, and be at most one day.
-    #[builder(default = Duration::from_secs(300))]
     bucket_width: Duration,
     /// Assumed maximum wall-clock skew; defaults to five seconds.
     ///
     /// If the real offset exceeds this, counting of active instances can become unreliable
-    #[builder(default = Duration::from_secs(5))]
     max_clock_skew: Duration,
+}
+
+impl Default for InternalSettings {
+    fn default() -> Self {
+        Self {
+            max_overshoot: None,
+            poll_interval: Duration::from_secs(60),
+            bucket_width: Duration::from_secs(300),
+            max_clock_skew: Duration::from_secs(5),
+        }
+    }
 }
 
 impl<S: sampling_builder::State> SamplingBuilder<S> {

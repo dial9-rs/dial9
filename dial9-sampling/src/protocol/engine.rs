@@ -163,9 +163,9 @@ impl Policy {
             pool: config.pool_path(),
             target: config.target(),
             max_overshoot: config.overshoot(),
-            poll_ms: config.poll_interval.as_millis() as u64,
-            bucket_ms: config.bucket_width.as_millis() as u64,
-            skew_ms: config.max_clock_skew.as_millis() as u64,
+            poll_ms: config.settings.poll_interval.as_millis() as u64,
+            bucket_ms: config.settings.bucket_width.as_millis() as u64,
+            skew_ms: config.settings.max_clock_skew.as_millis() as u64,
         }
     }
 }
@@ -218,7 +218,7 @@ impl Population {
         )
     }
     fn fresh(&self, now: u64, config: &Config) -> bool {
-        let skew = config.max_clock_skew.as_millis() as u64 * 2;
+        let skew = config.settings.max_clock_skew.as_millis() as u64 * 2;
         self.computed_ms <= now.saturating_add(skew)
             && now <= self.computed_ms.saturating_add(observation_age_ms(config))
     }
@@ -226,9 +226,9 @@ impl Population {
 // Keep the preceding observation usable through a healthy reporting handoff,
 // while rejecting arbitrarily stale startup probabilities during outages.
 fn observation_age_ms(config: &Config) -> u64 {
-    config.bucket_width.as_millis() as u64 * 2
-        + config.poll_interval.as_millis() as u64 * 6
-        + config.max_clock_skew.as_millis() as u64 * 2
+    config.settings.bucket_width.as_millis() as u64 * 2
+        + config.settings.poll_interval.as_millis() as u64 * 6
+        + config.settings.max_clock_skew.as_millis() as u64 * 2
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Trim {
@@ -294,8 +294,8 @@ impl Roster {
                     || pending.reporting.id == self.reporting.id
                     || pending.collect_after_ms
                         < pending.created_ms.saturating_add(
-                            config.poll_interval.as_millis() as u64 * 5
-                                + config.max_clock_skew.as_millis() as u64 * 2,
+                            config.settings.poll_interval.as_millis() as u64 * 5
+                                + config.settings.max_clock_skew.as_millis() as u64 * 2,
                         )
             })
             || self.population.as_ref().is_some_and(|population| {
@@ -352,8 +352,8 @@ fn expired(
     // margins only delay takeover.
     observed
         .modified_at
-        .checked_add(config.poll_interval.saturating_mul(3))
-        .and_then(|time| time.checked_add(config.max_clock_skew))
+        .checked_add(config.settings.poll_interval.saturating_mul(3))
+        .and_then(|time| time.checked_add(config.settings.max_clock_skew))
         .and_then(|time| time.checked_add(store.modification_time_uncertainty()))
         .is_some_and(|deadline| now > deadline)
 }
@@ -368,12 +368,13 @@ pub(crate) async fn prepare_using(
         return PreparedSampling::disabled(DecisionReason::invalid_configuration(message), false);
     }
     let guard_ms = config
+        .settings
         .max_clock_skew
         .saturating_mul(2)
         .saturating_add(store.modification_time_uncertainty())
         .as_nanos()
         .div_ceil(1_000_000);
-    if config.bucket_width.as_millis() <= guard_ms.saturating_mul(2) {
+    if config.settings.bucket_width.as_millis() <= guard_ms.saturating_mul(2) {
         return PreparedSampling::disabled(
             DecisionReason::invalid_configuration(
                 "bucket width must exceed twice the census guard (two clock skews plus backend timestamp uncertainty)",
@@ -699,8 +700,8 @@ fn compute(
         roster.trim = None;
     } else if roster.trim.as_ref().is_none_or(|trim| {
         now.saturating_sub(trim.created_ms)
-            >= config.poll_interval.as_millis() as u64 * 3
-                + config.max_clock_skew.as_millis() as u64 * 2
+            >= config.settings.poll_interval.as_millis() as u64 * 3
+                + config.settings.max_clock_skew.as_millis() as u64 * 2
     }) {
         roster.trim = Some(Trim {
             epoch: roster.epoch,
@@ -784,9 +785,10 @@ impl Worker {
             .parse::<ulid::Ulid>()
             .expect("fresh invocation identity")
             .random() as u64;
-        let offset_ms = entropy % config.bucket_width.as_millis() as u64;
+        let offset_ms = entropy % config.settings.bucket_width.as_millis() as u64;
         // A fixed per-run jitter also spreads polls and remains testable.
-        let poll_ms = (config.poll_interval.as_millis() as u64 * (900 + entropy % 201)) / 1000;
+        let poll_ms =
+            (config.settings.poll_interval.as_millis() as u64 * (900 + entropy % 201)) / 1000;
         let rank = config.rank();
         Self {
             config,
@@ -816,7 +818,7 @@ impl Worker {
         }
     }
     fn bucket(&self) -> Result<u64, StoreError> {
-        Ok(millis(self.clock.now())? / self.config.bucket_width.as_millis() as u64)
+        Ok(millis(self.clock.now())? / self.config.settings.bucket_width.as_millis() as u64)
     }
     fn reporting_epochs(&self) -> Vec<ReportingEpoch> {
         let Some(observed) = &self.observed else {
@@ -881,7 +883,7 @@ impl Worker {
             return Ok(());
         }
         let now = millis(self.clock.now())?;
-        let width = self.config.bucket_width.as_millis() as u64;
+        let width = self.config.settings.bucket_width.as_millis() as u64;
         let bucket = now / width;
         let epochs = self.reporting_epochs();
         self.written_buckets
@@ -944,7 +946,7 @@ impl Worker {
         }) {
             return Ok(());
         }
-        let delay_span_ms = (self.config.poll_interval.as_millis() / 2).min(2000);
+        let delay_span_ms = (self.config.settings.poll_interval.as_millis() / 2).min(2000);
         let delay_ms = u128::from(self.rank) * delay_span_ms / (1u128 << 64);
         tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
         // Most contenders see the winner during this one background re-read.
@@ -986,6 +988,7 @@ impl Worker {
     }
     fn guard_ms(&self) -> u128 {
         self.config
+            .settings
             .max_clock_skew
             .saturating_mul(2)
             .saturating_add(self.store.modification_time_uncertainty())
@@ -993,21 +996,21 @@ impl Worker {
             .div_ceil(1_000_000)
     }
     fn census_window(&self, now: u64) -> bool {
-        let width = self.config.bucket_width.as_millis();
+        let width = self.config.settings.bucket_width.as_millis();
         let phase = u128::from(now) % width;
         let guard = self.guard_ms();
         phase >= guard && phase.saturating_add(guard) < width
     }
     fn pass_cadence(&self) -> Duration {
         if let Ok(now) = millis(self.clock.now()) {
-            let width = self.config.bucket_width.as_millis();
+            let width = self.config.settings.bucket_width.as_millis();
             let phase = u128::from(now) % width;
             let guard = self.guard_ms();
             if guard.saturating_mul(2) >= width {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::error!("sampling timestamp uncertainty leaves no safe census window");
                 });
-                return self.config.poll_interval;
+                return self.config.settings.poll_interval;
             }
             if !self.census_window(now) {
                 let wait = if phase < guard {
@@ -1015,7 +1018,7 @@ impl Worker {
                 } else {
                     width - phase + guard
                 };
-                return Duration::from_millis(wait as u64).min(self.config.poll_interval);
+                return Duration::from_millis(wait as u64).min(self.config.settings.poll_interval);
             }
         }
         if self.leader.as_ref().is_some_and(|o| {
@@ -1026,9 +1029,9 @@ impl Worker {
                     millis(self.clock.now()).is_ok_and(|now| now < pending.collect_after_ms)
                 })
         }) {
-            self.config.poll_interval
+            self.config.settings.poll_interval
         } else {
-            Duration::from_secs(1).min(self.config.poll_interval)
+            Duration::from_secs(1).min(self.config.settings.poll_interval)
         }
     }
     async fn leader_pass(&mut self) -> Result<(), StoreError> {
@@ -1036,7 +1039,7 @@ impl Worker {
             return Ok(());
         };
         let started = millis(self.clock.now())?;
-        let width = self.config.bucket_width.as_millis() as u64;
+        let width = self.config.settings.bucket_width.as_millis() as u64;
         let bucket = started / width;
         let mut roster = previous.roster.clone();
         roster.mutate(&self.invocation_id)?;
@@ -1049,9 +1052,9 @@ impl Worker {
             Some(pending)
                 if members.is_some()
                     && started
-                        >= pending
-                            .collect_after_ms
-                            .saturating_add(self.config.max_clock_skew.as_millis() as u64 * 2) =>
+                        >= pending.collect_after_ms.saturating_add(
+                            self.config.settings.max_clock_skew.as_millis() as u64 * 2,
+                        ) =>
             {
                 Some((
                     pending.reporting.clone(),
@@ -1072,8 +1075,8 @@ impl Worker {
             && now / width == bucket
             && self.census_window(now)
         {
-            let collection_delay_ms = self.config.poll_interval.as_millis() as u64 * 5
-                + self.config.max_clock_skew.as_millis() as u64 * 2
+            let collection_delay_ms = self.config.settings.poll_interval.as_millis() as u64 * 5
+                + self.config.settings.max_clock_skew.as_millis() as u64 * 2
                 + u64::try_from(
                     self.store
                         .modification_time_uncertainty()
@@ -1157,12 +1160,12 @@ impl Worker {
         // A delayed server commit gets a fresh LastModified even when its
         // census is old. Require the embedded census age independently.
         let now = u128::from(millis(self.clock.now())?);
-        let skew = self.config.max_clock_skew.as_millis() * 2;
+        let skew = self.config.settings.max_clock_skew.as_millis() * 2;
         let Some(computed) = observed.roster.census_computed_at_ms.map(u128::from) else {
             return Ok(());
         };
         if computed > now + skew
-            || now > computed + self.config.poll_interval.as_millis() * 3 + skew
+            || now > computed + self.config.settings.poll_interval.as_millis() * 3 + skew
         {
             return Ok(());
         }
@@ -1260,7 +1263,7 @@ impl Worker {
         let mut next_poll = Instant::now();
         let mut next_pass = Instant::now();
         loop {
-            let operation_budget = self.config.poll_interval;
+            let operation_budget = self.config.settings.poll_interval;
             if let Err(error) = bounded(operation_budget, self.refresh_member(false)).await {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!(%error, "sampling membership refresh failed");
@@ -1291,7 +1294,7 @@ impl Worker {
             }
             // Wake at the per-host heartbeat offset, even when polls are spread.
             if let Ok(now) = millis(self.clock.now()) {
-                let width = self.config.bucket_width.as_millis() as u64;
+                let width = self.config.settings.bucket_width.as_millis() as u64;
                 let bucket = now / width;
                 let due = bucket * width + self.offset_ms;
                 let due = if due <= now {

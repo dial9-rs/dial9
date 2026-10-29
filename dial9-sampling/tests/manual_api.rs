@@ -569,9 +569,6 @@ fn cold_disabled_recorder_stays_off_when_later_startups_use_the_live_census() {
     let store = Arc::new(MemoryStore::new());
     let sampling = Sampling::builder()
         .num_target_profilers(1)
-        .poll_interval(Duration::from_millis(100))
-        .bucket_width(Duration::from_secs(1))
-        .max_clock_skew(Duration::ZERO)
         .if_failed(StartupFailure::disabled())
         .build();
     let (ready, population) = oneshot::channel();
@@ -595,10 +592,10 @@ fn cold_disabled_recorder_stays_off_when_later_startups_use_the_live_census() {
                 .enable_all()
                 .build()
                 .unwrap();
-            // Wait for an actual published census, rather than advancing a
-            // fabricated session or assuming that a fixed delay was sufficient.
+            // Await a real published census with production defaults. The
+            // watchdog allows the bucket-edge guard and initial leader election.
             app.block_on(async {
-                tokio::time::timeout(Duration::from_secs(5), population)
+                tokio::time::timeout(Duration::from_secs(30), population)
                     .await
                     .unwrap()
                     .unwrap();

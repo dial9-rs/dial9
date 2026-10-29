@@ -126,18 +126,31 @@ impl Config {
         // Whole milliseconds are the wire format. Bound all time arithmetic and
         // leave a previous bucket visible while a delayed heartbeat is retried.
         if self.num_target_profilers > 10000
-            || self.poll_interval < Duration::from_millis(100)
-            || self.poll_interval > Duration::from_secs(86400 / 3)
-            || self.bucket_width > Duration::from_secs(86400)
-            || self.bucket_width <= self.max_clock_skew.saturating_mul(4)
-            || self.bucket_width
+            || self.settings.poll_interval < Duration::from_millis(100)
+            || self.settings.poll_interval > Duration::from_secs(86400 / 3)
+            || self.settings.bucket_width > Duration::from_secs(86400)
+            || self.settings.bucket_width <= self.settings.max_clock_skew.saturating_mul(4)
+            || self.settings.bucket_width
                 < self
+                    .settings
                     .poll_interval
                     .saturating_mul(2)
-                    .saturating_add(self.max_clock_skew.saturating_mul(2))
-            || !self.poll_interval.subsec_nanos().is_multiple_of(1_000_000)
-            || !self.bucket_width.subsec_nanos().is_multiple_of(1_000_000)
-            || !self.max_clock_skew.subsec_nanos().is_multiple_of(1_000_000)
+                    .saturating_add(self.settings.max_clock_skew.saturating_mul(2))
+            || !self
+                .settings
+                .poll_interval
+                .subsec_nanos()
+                .is_multiple_of(1_000_000)
+            || !self
+                .settings
+                .bucket_width
+                .subsec_nanos()
+                .is_multiple_of(1_000_000)
+            || !self
+                .settings
+                .max_clock_skew
+                .subsec_nanos()
+                .is_multiple_of(1_000_000)
         {
             return Err("num_target_profilers must be at most 10000; poll must be 100ms..8h; bucket must be <=1d and cover two polls plus clock margins; durations need whole milliseconds".into());
         }
@@ -158,7 +171,8 @@ impl Config {
         format!("v3/members/{}", self.pool_path())
     }
     fn overshoot(&self) -> u32 {
-        self.max_overshoot
+        self.settings
+            .max_overshoot
             .unwrap_or_else(|| (3.0 * f64::from(self.num_target_profilers).sqrt()).ceil() as u32)
     }
     pub(crate) async fn prepare_with_timeout(

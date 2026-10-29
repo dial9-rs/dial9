@@ -24,12 +24,12 @@ fn config(target: u32, run: &str) -> Config {
     let mut policy = crate::Sampling::builder()
         .add_dimension("environment", "prod")
         .num_target_profilers(target)
-        .poll_interval(Duration::from_secs(1))
-        .bucket_width(Duration::from_secs(10))
-        .max_clock_skew(Duration::ZERO)
         .if_failed(StartupFailure::assume_population(u64::from(target.max(1))))
         .build()
         .policy();
+    policy.settings.poll_interval = Duration::from_secs(1);
+    policy.settings.bucket_width = Duration::from_secs(10);
+    policy.settings.max_clock_skew = Duration::ZERO;
     let entropy: [u8; 16] = sha2::Sha256::digest(run.as_bytes())[..16]
         .try_into()
         .unwrap();
@@ -132,9 +132,9 @@ async fn backend_timestamp_uncertainty_rejects_an_impossible_census_window(
         }
     }
     let mut policy = config(15, "node");
-    policy.poll_interval = Duration::from_millis(poll_ms);
-    policy.bucket_width = Duration::from_millis(bucket_ms);
-    policy.max_clock_skew = Duration::from_millis(skew_ms);
+    policy.settings.poll_interval = Duration::from_millis(poll_ms);
+    policy.settings.bucket_width = Duration::from_millis(bucket_ms);
+    policy.settings.max_clock_skew = Duration::from_millis(skew_ms);
     assert!(
         policy.validate().is_ok(),
         "backend-independent settings are valid"
@@ -210,7 +210,7 @@ async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
     let mut policies = Vec::new();
     for index in 0..12 {
         let mut policy = config(3, &format!("node-{index}"));
-        policy.max_overshoot = Some(0);
+        policy.settings.max_overshoot = Some(0);
         let node = prepare(&policy, store.clone()).await;
         assert!(node.enabled);
         sessions.push(node.into_session().unwrap());
@@ -252,7 +252,8 @@ async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
             );
         }
     };
-    let bucket = millis(store.now()).unwrap() / policies[0].bucket_width.as_millis() as u64;
+    let bucket =
+        millis(store.now()).unwrap() / policies[0].settings.bucket_width.as_millis() as u64;
     assert_membership(
         census(store.as_ref(), &policies[0], &roster.reporting, bucket)
             .await
@@ -260,7 +261,7 @@ async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
     );
     // A later permissive roster cannot rearm a carrier.
     let mut policy = config(3, "reader");
-    policy.max_overshoot = Some(0);
+    policy.settings.max_overshoot = Some(0);
     let object = store
         .get(format!("{}roster.json", policy.pool_prefix()))
         .await
@@ -280,7 +281,7 @@ async fn oversized_active_cohort_is_trimmed_once_without_sampler_reenable() {
         .await
         .unwrap();
     settle_time(2).await;
-    let bucket = millis(store.now()).unwrap() / policy.bucket_width.as_millis() as u64;
+    let bucket = millis(store.now()).unwrap() / policy.settings.bucket_width.as_millis() as u64;
     assert_membership(
         census(store.as_ref(), &policy, &roster.reporting, bucket)
             .await
@@ -448,7 +449,7 @@ async fn actual_roster_mutations_change_body_etags_and_fence_paused_publishers()
 async fn takeover_waits_for_server_timestamp_precision_and_clock_skew_margins() {
     let store = Arc::new(MemoryStore::new());
     let mut policy = config(1, "node");
-    policy.max_clock_skew = Duration::from_secs(2);
+    policy.settings.max_clock_skew = Duration::from_secs(2);
     let roster = seed(&store, &policy, 1).await;
     let observed = Observed {
         roster,
@@ -616,7 +617,7 @@ async fn incomplete_or_looping_pagination_cannot_become_a_population(#[case] rep
 #[test]
 fn count_cutoff_and_trim_survival_use_independent_probability_spaces() {
     let mut policy = config(3, "reader");
-    policy.max_overshoot = Some(0);
+    policy.settings.max_overshoot = Some(0);
     let mut roster = Roster::initial(&policy, &nonce());
     roster.epoch = 1;
     let members: Vec<_> = (0..8)
@@ -901,7 +902,7 @@ async fn partition_can_exceed_soft_cap_then_recovery_only_stops_processes() {
     store.set_unavailable(true);
     for index in 0..12 {
         let mut policy = config(3, &format!("node-{index}"));
-        policy.max_overshoot = Some(0);
+        policy.settings.max_overshoot = Some(0);
         let node = prepare(&policy, store.clone()).await;
         assert!(node.enabled);
         fleet.push(node.into_session().unwrap());
@@ -962,7 +963,7 @@ async fn prepared_startup_choice_is_immutable_even_if_maintenance_trims_before_c
     });
     publish(&store, &policy, &roster, WriteCondition::unconditional()).await;
     settle_time(1).await;
-    let bucket = millis(store.now()).unwrap() / policy.bucket_width.as_millis() as u64;
+    let bucket = millis(store.now()).unwrap() / policy.settings.bucket_width.as_millis() as u64;
     let members = census(store.as_ref(), &policy, &roster.reporting, bucket)
         .await
         .unwrap();
@@ -1005,7 +1006,7 @@ impl Clock for FixedClock {
 async fn bucket_edge_renews_lease_without_listing_or_replacing_admission() {
     let store = Arc::new(MemoryStore::new());
     let mut policy = config(15, "node");
-    policy.max_clock_skew = Duration::from_secs(2);
+    policy.settings.max_clock_skew = Duration::from_secs(2);
     let clock = Arc::new(FixedClock(UNIX_EPOCH + Duration::from_millis(29999)));
     let mut leader = worker(&policy, store.clone(), clock);
     leader.election().await.unwrap();
@@ -1033,7 +1034,7 @@ async fn known_policy_mismatch_does_not_register_membership() {
     let incumbent = config(15, "first");
     seed(&store, &incumbent, 100).await;
     let mut wrong = config(15, "other");
-    wrong.max_overshoot = Some(99);
+    wrong.settings.max_overshoot = Some(99);
     let node = prepare(&wrong, store.clone()).await;
     assert_eq!(&node.reason, &DecisionReason::IncompatiblePolicy);
     assert!(node.into_session().is_none());
@@ -1103,7 +1104,7 @@ async fn a_newer_bucket_active_write_cannot_override_a_terminal_carrier_invocati
 #[test]
 fn census_excludes_extra_profilers_but_thinning_counts_them() {
     let mut policy = config(3, "counter");
-    policy.max_overshoot = Some(0);
+    policy.settings.max_overshoot = Some(0);
     let mut roster = Roster::initial(&policy, &nonce());
     roster.reporting = ReportingEpoch {
         id: nonce(),
