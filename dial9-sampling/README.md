@@ -10,6 +10,8 @@ When enabled, the trace files will include metadata to help "unsample" the profi
 an accurate whole-fleet profile can be created.
 
 ```rust,no_run
+# #[cfg(feature = "s3")]
+# fn example() -> std::io::Result<()> {
 # use dial9::{Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions};
 # use dial9_destinations_s3::S3Config;
 # use dial9_sampling::{Sampling, SamplingStatus, StartupFailure, s3::S3SamplingStore};
@@ -33,7 +35,6 @@ an accurate whole-fleet profile can be created.
 #     Ok((recorder, runtime))
 # }
 #
-# fn main() -> io::Result<()> {
 let s3 = S3Config::builder()
     .bucket("dial9-traces-my-service")
     .service_name("checkout")
@@ -62,6 +63,7 @@ Sampling::builder()
         Ok(())
     })
 # }
+# fn main() {}
 ```
 
 For more details see the [complete runnable example](../dial9/examples/manual_sampling.rs).

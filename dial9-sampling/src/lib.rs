@@ -1,62 +1,8 @@
-//! Startup-probability backed by object storage
-//!
-//! `dial9-sampling` provides an automatic mechanism to achieve behaviors like "about 4 hosts have profiling enabled for each set of properties I care about."
-//!
-//! ```no_run
-//! # #[cfg(feature = "s3")]
-//! # fn example() -> std::io::Result<()> {
-//! use dial9::{Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions};
-//! use dial9_sampling::{Sampling, SamplingStatus, StartupFailure, s3::S3SamplingStore};
-//! use std::time::Duration;
-//!
-//! let s3 = dial9_destinations_s3::S3Config::builder()
-//!     .bucket("trace-bucket")
-//!     .service_name("checkout")
-//!     .build();
-//! let sampling = Sampling::builder()
-//!     .add_dimension("environment", "production")
-//!     .add_dimension("instance-type", "m7i.large")
-//!     .add_dimension("az", "us-east-1a")
-//!     .num_target_profilers(15)
-//!     .startup_timeout(Duration::from_secs(5))
-//!     .if_failed(StartupFailure::disabled())
-//!     .build();
-//! sampling.with_storage(async {
-//!     S3SamplingStore::builder().config(s3.clone()).build().await
-//! }).start_application(|status| {
-//!     let SamplingStatus { enabled, .. } = status;
-//!     let recorder = if enabled {
-//!         dial9::recorder(MemoryBuffer::new(16 * 1024 * 1024)?).build()
-//!     } else {
-//!         dial9::recorder_disabled()
-//!     };
-//!     status.register_recorder(&recorder);
-//!     let mut builder = tokio::runtime::Builder::new_multi_thread();
-//!     builder.enable_all();
-//!     let runtime = recorder.handle().attach_tokio_runtime(
-//!         builder,
-//!         TokioAttachOptions::default(),
-//!     )?;
-//!     dial9::block_on(&runtime, async {
-//!         dial9::spawn(async {
-//!             // Run the application's async work here.
-//!         }).await.expect("application task");
-//!     });
-//!     drop(runtime);
-//!     recorder.graceful_shutdown(Duration::from_secs(5));
-//!     Ok(())
-//! })
-//! # }
-//! ```
+#![doc = include_str!("../README.md")]
 #![cfg_attr(
     test,
     allow(clippy::unwrap_used, reason = "Test assertions fail immediately.")
 )]
-
-// Compile the feature-dependent README examples during all-features doctests.
-#[cfg(feature = "s3")]
-#[doc = include_str!("../README.md")]
-mod readme {}
 
 mod protocol;
 
