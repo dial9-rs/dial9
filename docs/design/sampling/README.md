@@ -13,6 +13,12 @@ and profiling admission independent of census eligibility. Its
 [new protocol evidence](automatic/internals/proofs.md) contains the fresh-epoch
 hash argument, finite models, simulations and explicit limits.
 
+Later implementation follow-ups use sorted, Hive-escaped `name=value`
+coordination paths and remove retained census observations and `population_at`.
+Current scalar segment weights remain sufficient for weighted decoding without
+historical population lookup. Those follow-ups are not fresh proof or simulation
+runs; the recorded evidence keeps its original source revision and results.
+
 The archived implementation evidence describes schema-3 independent startup admission
 within a configured census subset and Bernoulli thinning, with a scalar current
 expansion weight embedded in traces. Its source revision is recorded in

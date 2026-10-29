@@ -1,12 +1,17 @@
 # Automatic population discovery
 
-Status: implemented revision, October 28, 2026; local integration validated October 29.
-Protocol source: `aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7`.
+Status: active guide with later implementation follow-ups. The recorded baseline
+revision was implemented October 28, 2026 and locally validated October 29.
+Recorded protocol evidence source: `aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7`.
 Public builder name updated to `num_target_profilers` at
 `8bf28b9c0b82d8c3bedb084a1c877af358d6d29f`; focused API validation is recorded in the manifest.
 This replaces the caller's `minimum_population` assumption. The new
 [protocol evidence](automatic/internals/proofs.md) covers this revision.
 The archived schema-3 proofs and visualization describe the preceding protocol.
+Subsequent implementation follow-ups replace hashed coordination paths with
+escaped sorted dimensions and remove retained census observations and
+`population_at`. The recorded models and simulations retain their original
+source revision and have not been rerun for these follow-ups.
 
 ## 1. User-facing documentation
 
@@ -21,34 +26,9 @@ The S3 integration takes the existing `S3Config`; its bucket, prefix and
 instance type and other grouping keys. There is no separate `scope` or required
 caller-provided service dimension.
 
-```rust,ignore
-let s3 = dial9::s3::S3Config::builder()
-    .bucket("trace-bucket")
-    .service_name("checkout")
-    .build();
-
-Sampling::builder()
-    .add_dimension("environment", "production")
-    .add_dimension("instance-type", "m7i.large")
-    .add_dimension("az", "us-east-1a")
-    .num_target_profilers(15)
-    .if_failed(StartupFailure::disabled())
-    .build()
-    .with_storage(async {
-        S3SamplingStore::builder()
-            .config(s3.clone())
-            .build()
-            .await
-    })
-    .start_application(|status| {
-        let SamplingStatus { enabled, .. } = status;
-        let (recorder, runtime) = configure_application(enabled, &s3)?;
-        status.register_recorder(&recorder);
-        runtime.block_on(application_main());
-        // Drop the runtime and drain the recorder before returning.
-        Ok(())
-    })
-```
+See the [checked startup example][startup-guide] and
+[complete application example][application-example] for storage initialization,
+recorder construction and application shutdown.
 
 When a pool has no usable reporting policy, processes register their presence
 while its population estimate forms. The leader then publishes a reporting
@@ -111,8 +91,12 @@ Custom stores sharing a physical backend provide equivalent namespace isolation.
 Validate the caller's dimension tuple before asynchronous storage initialization;
 the storage trait does not acquire service-discovery or dimension-merging hooks.
 Sampling runs before the recorder exists and does not infer identity from it.
-The dimension hash remains known if initialization fails, interpreted relative
-to the configured store. Existing trace metadata supplies service/bucket/prefix.
+The pool path joins sorted `name=value` components, escaping both names and
+values with the existing Hive partition-path escaping rules. Each component
+ends in `/`; an empty dimension tuple adds no components. The same path
+identifies the pool in trace metadata and remains known if initialization fails,
+interpreted relative to the configured store. Existing trace metadata supplies
+service/bucket/prefix.
 
 ### Reuse S3 upload configuration
 
@@ -136,8 +120,12 @@ configuration or rename that metadata key. Coordination uses that configured
 service identity without repeating it in the sampling builder.
 
 Coordination lives under
-`{configured_prefix}/_dial9_sampling/service={sha256(service_name)}/`, or
-`_dial9_sampling/service={sha256(service_name)}/` when no prefix is configured.
+`{configured_prefix}/_dial9_sampling/service={escaped_service}/`, or
+`_dial9_sampling/service={escaped_service}/` when no prefix is configured.
+The service name uses the same Hive escaping as dimension names and values.
+Within that namespace, `v3/pools/{sorted_dimension_components}roster.json`
+stores the shared roster and `v3/members/{sorted_dimension_components}`
+prefixes membership objects. No retained `v3/census/` objects are written.
 The configured prefix is preserved verbatim, as in trace keys. Use the config's
 bucket and region semantics, including bucket-region discovery when needed,
 within the bounded startup budget. Provide small typed read-only config
@@ -318,11 +306,10 @@ as constant across a segment is an approximation. Existing boot identity and
 clock metadata provide identity and time; add no weight history or extra clock.
 Weight sample mass before summing stacks for fleet flamegraphs.
 
-Retained census observations additionally record reporting epoch, actual `f`,
-`R`, listing interval and existing freshness/quality information. Historical
-population lookup uses the observation's fraction, never today's roster fraction.
-These observations estimate visible process population at the documented
-resolution; they are not a prerequisite for decoding a segment's scalar weight.
+The current roster carries the population estimate needed for admission and
+reporting control. There is no retained census history or `population_at` API.
+Decoding a segment's scalar weight requires neither historical roster storage
+nor a population lookup.
 
 ### Compatibility and evidence
 
@@ -332,7 +319,8 @@ Schema 4 uses new `v3/` coordination keys; old and new workers
 must not share leadership or interpret each other's membership. Check published
 API compatibility before removing `minimum_population`; the intended new
 onboarding path never asks for it.
-The dimension-only pool key also supersedes the old `(scope, dimensions)` key.
+The sorted, escaped dimension path also supersedes the old hashed
+`(scope, dimensions)` key.
 Replace `scope` with S3Config service isolation and extra grouping dimensions;
 check public API compatibility rather than silently joining previously named pools.
 
@@ -360,8 +348,8 @@ changing labels in the previous visualization.
   records from `R/f`, and allow quiet processes to recover leadership.
 - [x] Update terminal cleanup so thinned nonreporters can eventually stop
   membership writes once stale active records cannot win. Keep ordinary disable.
-- [x] Preserve scalar metadata and historical observations with the correct
-  epoch/fraction; update onboarding and API compatibility notes.
+- [x] Preserve current scalar weight metadata; remove retained census history
+  and the historical population lookup API.
 - [x] Model handoff, zero-reporters recovery, stale CAS, terminal startup
   choices and duplicate thinning in TLA+. Include broken controls for mixed
   fractions, premature promotion and reporter-only recovery. Rust regressions
@@ -378,3 +366,6 @@ changing labels in the previous visualization.
   invariants; run the required workspace/feature/format/Clippy checks after coding.
 
 [theta]: https://raw.githubusercontent.com/apache/datasketches-website/master/docs/pdf/ThetaSketchFramework.pdf
+
+[startup-guide]: https://github.com/dial9-rs/dial9/blob/codex/manual-sampling-spike/dial9-sampling/README.md
+[application-example]: https://github.com/dial9-rs/dial9/blob/codex/manual-sampling-spike/dial9/examples/manual_sampling.rs
