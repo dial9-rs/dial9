@@ -101,7 +101,7 @@ impl SamplingStore for ObservedWrites {
         self.store.list_page(request)
     }
 
-    fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
         self.store.delete(key)
     }
 }

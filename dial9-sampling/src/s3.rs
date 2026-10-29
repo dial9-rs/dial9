@@ -221,8 +221,8 @@ impl SamplingStore for S3SamplingStore {
                     request.body().clone(),
                 ));
             put = match request.condition() {
-                WriteCondition::Unconditional { .. } => put,
-                WriteCondition::Absent { .. } => put.if_none_match("*"),
+                WriteCondition::Unconditional => put,
+                WriteCondition::Absent => put.if_none_match("*"),
                 WriteCondition::Matches { version, .. } => put.if_match(version.as_str()),
             };
             // A retry after a committed write with a lost response can return
@@ -331,12 +331,12 @@ impl SamplingStore for S3SamplingStore {
                 .build())
         })
     }
-    fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
         Box::pin(async move {
             self.client
                 .delete_object()
                 .bucket(&self.bucket)
-                .key(self.key(&key))
+                .key(self.key(key))
                 .send()
                 .await
                 .map_err(|error| {

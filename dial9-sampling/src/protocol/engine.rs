@@ -1202,7 +1202,7 @@ impl Worker {
                 })
                 .collect();
             for (epoch, old, key) in old_keys {
-                if let Err(error) = self.store.delete(key.clone()).await {
+                if let Err(error) = self.store.delete(&key).await {
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!(%error, "sampling active member cleanup failed");
                     });
@@ -1309,7 +1309,7 @@ impl Worker {
         // backend contract requires cancellation-safe operations; a late server
         // commit is still bounded by bucket visibility and lifecycle expiration.
         for key in self.keys.values().flat_map(|keys| keys.iter()) {
-            if let Err(error) = self.store.delete(key.clone()).await {
+            if let Err(error) = self.store.delete(key).await {
                 tracing::debug!(%error, "sampling member shutdown cleanup failed");
             }
         }

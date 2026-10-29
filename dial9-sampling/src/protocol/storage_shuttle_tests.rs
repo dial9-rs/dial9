@@ -152,7 +152,7 @@ dial9_core::shuttle_test! {
         put(&store, old, "", WriteCondition::unconditional());
         let cleanup_store = store.clone();
         let cleanup = thread::spawn(move || {
-            block_on(cleanup_store.delete(old.into())).unwrap();
+            block_on(cleanup_store.delete(old)).unwrap();
         });
         let replacement_store = store.clone();
         let restart = thread::spawn(move || {

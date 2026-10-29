@@ -127,7 +127,7 @@ async fn backend_timestamp_uncertainty_rejects_an_impossible_census_window(
         fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
             self.0.list_page(request)
         }
-        fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+        fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
             self.0.delete(key)
         }
     }
@@ -360,7 +360,7 @@ async fn restart_runs_have_distinct_ranks_and_membership_despite_delayed_cleanup
         .shutdown(Duration::from_secs(1))
         .await;
     for key in old_keys {
-        store.delete(key).await.unwrap();
+        store.delete(&key).await.unwrap();
     }
     let after = census(
         store.as_ref(),
@@ -483,7 +483,7 @@ impl SamplingStore for Pages {
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
         self.inner.put(request)
     }
-    fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
         self.inner.delete(key)
     }
     fn list_page(&self, mut request: ListRequest) -> StoreFuture<'_, ListPage> {
@@ -1503,7 +1503,7 @@ async fn failed_pending_census_cannot_publish_or_promote_partial_membership() {
                 self.inner.list_page(request).await
             })
         }
-        fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+        fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
             self.inner.delete(key)
         }
     }

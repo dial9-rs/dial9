@@ -167,7 +167,7 @@ async fn backend_errors_preserve_meaning(
             .list_page(ListRequest::builder().prefix("a").build())
             .await
             .unwrap_err(),
-        "delete" => store.delete("a".into()).await.unwrap_err(),
+        "delete" => store.delete("a").await.unwrap_err(),
         "put" => store
             .put(PutRequest::builder().key("a").body("data".into()).build())
             .await
@@ -326,7 +326,7 @@ async fn requested_write_condition_is_preserved_on_the_wire(
 ) {
     let fixture = RecordingFixture::new([response(200)]);
     let key = match &condition {
-        WriteCondition::Unconditional { .. } => "v2/members/pool/000001/process-run",
+        WriteCondition::Unconditional => "v2/members/pool/000001/process-run",
         _ => "v2/pools/pool/roster.json",
     };
     let result = store_with_connector(fixture.clone(), 5)

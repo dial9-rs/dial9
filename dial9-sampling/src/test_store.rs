@@ -90,8 +90,8 @@ impl SamplingStore for MemoryStore {
             // Integration tests compile this store against non-exhaustive public enums.
             #[allow(unreachable_patterns)]
             let allowed = match request.condition() {
-                WriteCondition::Unconditional { .. } => true,
-                WriteCondition::Absent { .. } => existing.is_none(),
+                WriteCondition::Unconditional => true,
+                WriteCondition::Absent => existing.is_none(),
                 WriteCondition::Matches { version, .. } => {
                     existing.is_some_and(|object| object.version() == version)
                 }
@@ -155,10 +155,10 @@ impl SamplingStore for MemoryStore {
                 .build())
         })
     }
-    fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
         Box::pin(async move {
             self.before().await?;
-            self.objects.lock().expect("store lock").remove(&key);
+            self.objects.lock().expect("store lock").remove(key);
             Ok(())
         })
     }

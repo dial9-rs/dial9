@@ -67,8 +67,7 @@ pub trait SamplingStore: Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns [`StoreError`] if the deletion fails.
-    /// TODO(agent): can this be &str?
-    fn delete(&self, key: String) -> StoreFuture<'_, ()>;
+    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,11 +122,11 @@ pub enum WriteCondition {
 impl WriteCondition {
     /// Writes regardless of the current object version.
     pub fn unconditional() -> Self {
-        Self::Unconditional {}
+        Self::Unconditional
     }
     /// Allows writing iff the object does not exist.
     pub fn absent() -> Self {
-        Self::Absent {}
+        Self::Absent
     }
     /// Allows writing only while the supplied object version still matches.
     pub fn matching(version: VersionToken) -> Self {
@@ -359,7 +358,7 @@ impl<T: SamplingStore + ?Sized> SamplingStore for std::sync::Arc<T> {
     fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
         (**self).list_page(request)
     }
-    fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
         (**self).delete(key)
     }
 }

@@ -513,7 +513,7 @@ fn cold_disabled_recorder_stays_off_when_later_startups_use_the_live_census() {
         fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
             self.inner.list_page(request)
         }
-        fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+        fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
             self.inner.delete(key)
         }
     }
@@ -588,7 +588,7 @@ fn maintenance_termination_disables_registered_recorder_after_status_drop() {
         fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
             self.inner.list_page(request)
         }
-        fn delete(&self, key: String) -> StoreFuture<'_, ()> {
+        fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
             self.inner.delete(key)
         }
     }
