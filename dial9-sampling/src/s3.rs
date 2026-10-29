@@ -3,14 +3,12 @@ use crate::backend::{
     ContinuationToken, ListPage, ListRequest, ListedObject, PutOutcome, PutRequest, SamplingStore,
     StoreError, StoreErrorKind, StoreFuture, StoredObject, VersionToken, WriteCondition,
 };
-use crate::object_key::hive_escape;
 use dial9_destinations_s3::S3Config;
+use dial9_trace_format::object_key::hive_escape;
 use std::{
     io,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-const SAMPLING_PREFIX: &str = "_dial9_sampling/";
 
 /// Native S3 implementation of the sampler's conditional storage primitives.
 ///
@@ -42,12 +40,7 @@ impl S3SamplingStore {
     /// fails or omits the region. The surrounding sampling startup budget bounds
     /// this asynchronous initialization.
     #[builder(finish_fn = build)]
-    pub async fn builder(
-        /// TODO_REWRITE
-        config: S3Config,
-        /// TODO_REWRITE
-        client: Option<aws_sdk_s3::Client>,
-    ) -> io::Result<Self> {
+    pub async fn builder(config: S3Config, client: Option<aws_sdk_s3::Client>) -> io::Result<Self> {
         if config.bucket().trim().is_empty() || config.service_name().trim().is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -106,8 +99,9 @@ impl S3SamplingStore {
                 .build(),
         );
         let sampling_prefix = match config.prefix() {
-            Some(prefix) => format!("{prefix}/{SAMPLING_PREFIX}"),
-            None => SAMPLING_PREFIX.to_owned(),
+            // TODO(agent): extract _dial9_sampling into a constant
+            Some(prefix) => format!("{prefix}/_dial9_sampling/"),
+            None => "_dial9_sampling/".to_owned(),
         };
         let service = hive_escape(config.service_name());
         Ok(Self {
