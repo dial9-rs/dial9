@@ -127,8 +127,14 @@ impl SamplingStore for MemoryStore {
             Ok(PutOutcome::stored(version))
         })
     }
-    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+    fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
         Box::pin(async move {
+            if request.page_size() == 0 {
+                return Err(StoreError::new(
+                    StoreErrorKind::unsupported(),
+                    "LIST page size must be positive",
+                ));
+            }
             self.before().await?;
             let objects = self.objects.lock().expect("store lock");
             use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -136,7 +142,7 @@ impl SamplingStore for MemoryStore {
                 Some(token) if token.as_str() >= request.prefix() => Excluded(token.as_str()),
                 _ => Included(request.prefix()),
             };
-            let size = request.page_size().max(1);
+            let size = request.page_size();
             let mut page: Vec<_> = objects
                 .range::<str, _>((lower, Unbounded))
                 .take_while(|(key, _)| key.starts_with(request.prefix()))

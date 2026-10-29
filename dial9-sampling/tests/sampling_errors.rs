@@ -164,7 +164,7 @@ async fn backend_errors_preserve_meaning(
     let error = match operation {
         "get" => store.get("a".into()).await.unwrap_err(),
         "list" => store
-            .list_page(ListRequest::builder().prefix("a").build())
+            .list_sorted_page(ListRequest::builder().prefix("a").build())
             .await
             .unwrap_err(),
         "delete" => store.delete("a").await.unwrap_err(),
@@ -252,7 +252,7 @@ async fn malformed_list_cannot_become_a_fleet_count(#[case] contents: &str) {
     fixture.body = format!("<ListBucketResult>{contents}</ListBucketResult>");
     let error = store(fixture)
         .await
-        .list_page(ListRequest::builder().prefix("a").build())
+        .list_sorted_page(ListRequest::builder().prefix("a").build())
         .await
         .unwrap_err();
     assert_eq!(kind(&error), "invalid");
@@ -262,7 +262,7 @@ async fn malformed_list_cannot_become_a_fleet_count(#[case] contents: &str) {
 #[case("a2", "a1")]
 #[case("a1", "a1")]
 #[tokio::test(start_paused = true)]
-async fn unordered_and_duplicate_list_entries_reach_the_census(
+async fn unordered_and_duplicate_list_entries_are_invalid(
     #[case] first: &str,
     #[case] second: &str,
 ) {
@@ -274,19 +274,129 @@ async fn unordered_and_duplicate_list_entries_reach_the_census(
          <Contents><Key>{prefix}{second}</Key></Contents>\
          </ListBucketResult>"
     );
-    let page = store(fixture)
+    let error = store(fixture)
         .await
-        .list_page(ListRequest::builder().prefix("a").build())
+        .list_sorted_page(ListRequest::builder().prefix("a").build())
+        .await
+        .unwrap_err();
+    assert_eq!(kind(&error), "invalid");
+}
+
+fn list_response(keys: &[&str], continuation: Option<&str>) -> ResponseFixture {
+    let prefix = "coord/_dial9_sampling/service=sampled/";
+    let contents = keys
+        .iter()
+        .map(|key| format!("<Contents><Key>{prefix}{key}</Key></Contents>"))
+        .collect::<String>();
+    let cursor = continuation.map_or_else(String::new, |cursor| {
+        format!("<NextContinuationToken>{cursor}</NextContinuationToken>")
+    });
+    let mut fixture = response(200);
+    fixture.body = format!(
+        "<ListBucketResult><IsTruncated>{}</IsTruncated>{contents}{cursor}</ListBucketResult>",
+        continuation.is_some()
+    );
+    fixture
+}
+
+#[tokio::test(start_paused = true)]
+async fn sorted_pages_preserve_bounds_and_follow_underfilled_continuations() {
+    let fixture = RecordingFixture::new([
+        list_response(&["a1"], Some("next")),
+        list_response(&[], Some("last")),
+        list_response(&["a2", "a3"], None),
+    ]);
+    let store = store_with_connector(fixture.clone(), 1).await;
+    let mut continuation = None;
+    let mut keys = Vec::new();
+    for expected_size in [1, 0, 2] {
+        let page = store
+            .list_sorted_page(
+                ListRequest::builder()
+                    .prefix("a")
+                    .page_size(2)
+                    .maybe_continuation(continuation)
+                    .build(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.objects().len(), expected_size);
+        keys.extend(page.objects().iter().map(|item| item.key().to_owned()));
+        continuation = page.continuation().cloned();
+    }
+    assert_eq!(keys, ["a1", "a2", "a3"]);
+    assert!(continuation.is_none());
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.uri.contains("max-keys=2"))
+    );
+    assert!(requests[1].uri.contains("continuation-token=next"));
+    assert!(requests[2].uri.contains("continuation-token=last"));
+}
+
+#[rstest::rstest]
+#[case(1, None, &["a1", "a2"], None)]
+#[case(2, Some("same"), &["a1"], Some("same"))]
+#[tokio::test(start_paused = true)]
+async fn oversized_pages_and_nonprogressing_cursors_are_invalid(
+    #[case] page_size: usize,
+    #[case] previous: Option<&str>,
+    #[case] keys: &[&str],
+    #[case] next: Option<&str>,
+) {
+    let error = store(list_response(keys, next))
+        .await
+        .list_sorted_page(
+            ListRequest::builder()
+                .prefix("a")
+                .page_size(page_size)
+                .maybe_continuation(previous.map(ContinuationToken::new))
+                .build(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(kind(&error), "invalid");
+}
+
+#[rstest::rstest]
+#[case(1)]
+#[case(1000)]
+#[case(usize::MAX)]
+#[tokio::test(start_paused = true)]
+async fn requested_list_bound_is_preserved_on_the_wire(#[case] page_size: usize) {
+    let fixture = RecordingFixture::new([list_response(&[], None)]);
+    store_with_connector(fixture.clone(), 1)
+        .await
+        .list_sorted_page(
+            ListRequest::builder()
+                .prefix("a")
+                .page_size(page_size)
+                .build(),
+        )
         .await
         .unwrap();
-    assert_eq!(
-        page.objects()
-            .iter()
-            .map(ListedObject::key)
-            .collect::<Vec<_>>(),
-        [first, second]
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .uri
+            .contains(&format!("max-keys={}", page_size.min(1000)))
     );
-    assert!(page.continuation().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn zero_list_bound_is_rejected_without_a_request() {
+    let fixture = RecordingFixture::new([]);
+    let error = store_with_connector(fixture.clone(), 1)
+        .await
+        .list_sorted_page(ListRequest::builder().prefix("a").page_size(0).build())
+        .await
+        .unwrap_err();
+    assert!(matches!(error.kind(), StoreErrorKind::Unsupported { .. }));
+    assert!(fixture.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -560,6 +670,13 @@ async fn missing_region_is_an_initialization_error(#[case] status: u16) {
 #[case("", "checkout", "us-east-1")]
 #[case("traces", " ", "us-east-1")]
 #[case("traces", "checkout", "")]
+#[case("traces--use1-az1--x-s3", "checkout", "us-east-1")]
+#[case("traces--use1-az1--xa-s3", "checkout", "us-east-1")]
+#[case(
+    "arn:aws:s3express:us-east-1:123456789012:accesspoint/traces",
+    "checkout",
+    "us-east-1"
+)]
 #[tokio::test(start_paused = true)]
 async fn invalid_configuration_does_not_issue_requests(
     #[case] bucket: &str,

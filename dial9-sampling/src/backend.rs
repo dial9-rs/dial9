@@ -15,8 +15,9 @@ pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>>
 /// sharing a physical backend must isolate unrelated services themselves.
 /// Sampling dimensions further group processes within that namespace.
 ///
-/// Lists include completed writes, but neither page order nor an atomic fleet
-/// snapshot is required. Continuation cursors must permit complete enumeration.
+/// Lists include completed writes in UTF-8 byte lexicographic key order, across
+/// pages as well as within each page. They need not form an atomic fleet snapshot.
+/// Continuation cursors must permit complete enumeration.
 /// Versions identify the observed body and may repeat if the body is repeated;
 /// shared roster revisions therefore include a fresh nonce on every write.
 /// Cancellation never proves that a write did not commit. Delete is only for
@@ -46,21 +47,27 @@ pub trait SamplingStore: Send + Sync + 'static {
     /// is a [`PutOutcome::PreconditionFailed`], rather than an error.
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome>;
 
-    /// Lists one page of keys under the requested prefix
+    /// TODO_REWRITE
     ///
-    /// TODO(agent): update this, then tag TODO_REWRITE again after we update for the sorted key design
-    /// Keys are relative to the store namespace and must match the requested prefix.
-    /// Order is unspecified within and across pages; duplicate keys may appear.
+    /// Lists a bounded page of keys in UTF-8 byte lexicographic order.
+    ///
+    /// Keys are relative to the store namespace and must match the requested
+    /// prefix. Each page contains at most [`ListRequest::page_size`] objects;
+    /// page size must be positive. Keys strictly increase within a page and
+    /// across successive pages of the same listing. Sorting individual pages
+    /// of an unordered backend does not satisfy this contract.
+    ///
     /// Continue with each opaque cursor until [`ListPage::continuation`] returns
-    /// `None` to enumerate the complete listing. A failed or cyclic continuation
-    /// leaves an incomplete listing and must not be used as a complete census.
+    /// `None` to enumerate the complete listing. A short or empty page with a
+    /// continuation is not exhaustion. A failed or cyclic continuation leaves
+    /// an incomplete listing and must not be used as a complete census.
     /// Listing does not provide an atomic snapshot of concurrent fleet changes.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if listing fails or the response cannot satisfy
-    /// the namespace or complete-pagination contract.
-    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage>;
+    /// Returns [`StoreError`] if page size is zero, listing fails, or the response
+    /// cannot satisfy the namespace, order, page bound or pagination contract.
+    fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage>;
 
     /// Deletes the object at `key`
     ///
@@ -213,7 +220,9 @@ pub struct ListRequest {
     /// Prefix to filter the List by
     #[builder(into)]
     prefix: String,
-    /// Page size
+    /// TODO_REWRITE
+    ///
+    /// Positive maximum number of objects returned in one page.
     #[builder(default = 256)]
     page_size: usize,
     /// Optional continuation token to paginate
@@ -225,7 +234,11 @@ impl ListRequest {
         &self.prefix
     }
 
-    /// Returns the requested maximum number of objects in one page.
+    /// TODO_REWRITE
+    ///
+    /// Returns the requested maximum number of objects in one page; listing
+    /// requires a positive value.
+    /// Backends may return fewer objects and provide a continuation cursor.
     pub fn page_size(&self) -> usize {
         self.page_size
     }
@@ -248,19 +261,26 @@ impl ListedObject {
     }
 }
 #[derive(Clone, Debug, bon::Builder)]
-/// One listing page, in any order, and an optional cursor for the next page.
+/// TODO_REWRITE
+///
+/// One bounded listing page in key order, and an optional continuation cursor.
 pub struct ListPage {
     #[builder(default)]
     objects: Vec<ListedObject>,
     continuation: Option<ContinuationToken>,
 }
 impl ListPage {
-    /// Returns the objects in this page, without an ordering guarantee.
+    /// TODO_REWRITE
+    ///
+    /// Returns objects in strictly increasing UTF-8 byte lexicographic key order.
     pub fn objects(&self) -> &[ListedObject] {
         &self.objects
     }
 
+    /// TODO_REWRITE
+    ///
     /// Returns the opaque cursor for continuing this listing, if present.
+    /// Only `None` indicates exhaustion, including when this page is short or empty.
     pub fn continuation(&self) -> Option<&ContinuationToken> {
         self.continuation.as_ref()
     }
@@ -355,8 +375,8 @@ impl<T: SamplingStore + ?Sized> SamplingStore for std::sync::Arc<T> {
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
         (**self).put(request)
     }
-    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
-        (**self).list_page(request)
+    fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+        (**self).list_sorted_page(request)
     }
     fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
         (**self).delete(key)

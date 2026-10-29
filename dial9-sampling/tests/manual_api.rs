@@ -26,6 +26,54 @@ fn policy() -> Sampling {
         .build()
 }
 
+#[rstest::rstest]
+#[case(1)]
+#[case(2)]
+#[case(usize::MAX)]
+#[tokio::test(start_paused = true)]
+async fn memory_backend_lists_bounded_sorted_prefix_pages(#[case] page_size: usize) {
+    use backend::{ListRequest, PutRequest, SamplingStore};
+    let store = MemoryStore::new();
+    let expected = ["pool/0", "pool/1", "pool/é", "pool/雪"];
+    for key in ["outside/0"].into_iter().chain(expected.into_iter().rev()) {
+        store
+            .put(PutRequest::builder().key(key).body("member".into()).build())
+            .await
+            .unwrap();
+    }
+    let mut continuation = None;
+    let mut keys = Vec::new();
+    loop {
+        let page = store
+            .list_sorted_page(
+                ListRequest::builder()
+                    .prefix("pool/")
+                    .page_size(page_size)
+                    .maybe_continuation(continuation)
+                    .build(),
+            )
+            .await
+            .unwrap();
+        assert!(page.objects().len() <= page_size);
+        keys.extend(page.objects().iter().map(|item| item.key().to_owned()));
+        continuation = page.continuation().cloned();
+        if continuation.is_none() {
+            break;
+        }
+    }
+    assert_eq!(keys, expected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn memory_backend_rejects_zero_list_bound() {
+    use backend::{ListRequest, SamplingStore, StoreErrorKind};
+    let error = MemoryStore::new()
+        .list_sorted_page(ListRequest::builder().prefix("pool/").page_size(0).build())
+        .await
+        .unwrap_err();
+    assert!(matches!(error.kind(), StoreErrorKind::Unsupported { .. }));
+}
+
 struct SignalDrop(Option<oneshot::Sender<()>>);
 
 impl Drop for SignalDrop {
@@ -510,8 +558,8 @@ fn cold_disabled_recorder_stays_off_when_later_startups_use_the_live_census() {
                 Ok(outcome)
             })
         }
-        fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
-            self.inner.list_page(request)
+        fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+            self.inner.list_sorted_page(request)
         }
         fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
             self.inner.delete(key)
@@ -585,8 +633,8 @@ fn maintenance_termination_disables_registered_recorder_after_status_drop() {
                 panic!("terminate the maintenance task after public registration")
             })
         }
-        fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
-            self.inner.list_page(request)
+        fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+            self.inner.list_sorted_page(request)
         }
         fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
             self.inner.delete(key)

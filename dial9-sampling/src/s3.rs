@@ -23,8 +23,9 @@ use std::{
 /// to the sampler's long-lived runtime.
 ///
 /// Lifecycle and IAM rules must preserve shared rosters while permitting GET,
-/// conditional PUT, LIST and membership DELETE. Unordered directory-bucket
-/// listings are supported.
+/// conditional PUT, sorted LIST and membership DELETE. General purpose buckets
+/// provide the required listing order; directory buckets and their access points
+/// are rejected because they do not.
 #[derive(Clone, Debug)]
 pub struct S3SamplingStore {
     client: aws_sdk_s3::Client,
@@ -46,9 +47,10 @@ impl S3SamplingStore {
     ///
     /// # Errors
     ///
-    /// Returns an error for blank bucket/service configuration or when bucket
-    /// region discovery fails or omits the region. The surrounding sampling
-    /// startup budget bounds this asynchronous initialization.
+    /// Returns an error for blank bucket/service configuration, a directory
+    /// bucket or directory-bucket access point, or when bucket region discovery
+    /// fails or omits the region. The surrounding sampling startup budget bounds
+    /// this asynchronous initialization.
     #[builder(finish_fn = build)]
     pub async fn builder(
         /// TODO_REWRITE
@@ -60,6 +62,15 @@ impl S3SamplingStore {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "S3 bucket and service_name must be nonblank",
+            ));
+        }
+        if config.bucket().ends_with("--x-s3")
+            || config.bucket().ends_with("--xa-s3")
+            || config.bucket().split(':').nth(2) == Some("s3express")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sampling requires sorted S3 listings; directory buckets and their access points are unsupported",
             ));
         }
         if config
@@ -268,14 +279,21 @@ impl SamplingStore for S3SamplingStore {
             }
         })
     }
-    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+    fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
         Box::pin(async move {
+            if request.page_size() == 0 {
+                return Err(StoreError::new(
+                    StoreErrorKind::unsupported(),
+                    "LIST page size must be positive",
+                ));
+            }
+            let page_size = request.page_size().min(1000);
             let result = self
                 .client
                 .list_objects_v2()
                 .bucket(&self.bucket)
                 .prefix(self.key(request.prefix()))
-                .max_keys(request.page_size().clamp(1, 1000) as i32)
+                .max_keys(page_size as i32)
                 .set_continuation_token(
                     request
                         .continuation()
@@ -310,11 +328,28 @@ impl SamplingStore for S3SamplingStore {
                     .ok_or_else(|| invalid("S3 list key outside sampling namespace"))?;
                 objects.push(ListedObject::builder().key(key).build());
             }
+            if objects.len() > page_size {
+                return Err(invalid("S3 list exceeded the requested page size"));
+            }
+            if objects
+                .windows(2)
+                .any(|pair| pair[0].key() >= pair[1].key())
+            {
+                return Err(invalid("S3 list keys were not strictly increasing"));
+            }
             let truncated = result
                 .is_truncated()
                 .ok_or_else(|| invalid("S3 list omitted IsTruncated"))?;
             let continuation = match (truncated, result.next_continuation_token()) {
-                (true, Some(token)) if !token.is_empty() => Some(ContinuationToken::new(token)),
+                (true, Some(token)) if !token.is_empty() => {
+                    if request
+                        .continuation()
+                        .is_some_and(|previous| previous.as_str() == token)
+                    {
+                        return Err(invalid("S3 list repeated its continuation token"));
+                    }
+                    Some(ContinuationToken::new(token))
+                }
                 (true, _) => {
                     return Err(invalid(
                         "truncated S3 list omitted a nonempty continuation token",

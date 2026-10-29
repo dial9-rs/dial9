@@ -97,8 +97,8 @@ impl SamplingStore for ObservedWrites {
         })
     }
 
-    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
-        self.store.list_page(request)
+    fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+        self.store.list_sorted_page(request)
     }
 
     fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
@@ -299,7 +299,7 @@ fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
         assert!(store.get(roster).await.unwrap().is_some());
         assert!(
             store
-                .list_page(ListRequest::builder().prefix("v3/members/").build())
+                .list_sorted_page(ListRequest::builder().prefix("v3/members/").build())
                 .await
                 .unwrap()
                 .objects()
@@ -395,13 +395,13 @@ fn s3_adapter_enforces_etag_conditions_and_complete_pagination(
             .await
             .unwrap();
         let page = store
-            .list_page(ListRequest::builder().prefix("").page_size(1).build())
+            .list_sorted_page(ListRequest::builder().prefix("").page_size(1).build())
             .await
             .unwrap();
         assert_eq!(page.objects().len(), 1);
         let mut listed = vec![page.objects()[0].key().to_owned()];
         let page = store
-            .list_page(
+            .list_sorted_page(
                 ListRequest::builder()
                     .prefix("")
                     .page_size(1)
@@ -413,7 +413,6 @@ fn s3_adapter_enforces_etag_conditions_and_complete_pagination(
         assert_eq!(page.objects().len(), 1);
         assert!(page.continuation().is_none());
         listed.push(page.objects()[0].key().to_owned());
-        listed.sort();
         assert_eq!(listed, ["a", "b"]);
         let mut keys = client
             .list_objects_v2()
