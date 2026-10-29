@@ -3,6 +3,11 @@
 Proofs, models, reference simulations, review reports and the interactive
 visualization are tracked separately from implementation PR #1093.
 
+The [bounded rotating-window evidence](bounded/README.md) covers the newer
+fixed-phase roster reads, sampled immutable reports, capped LIST reservation,
+and future-boundary control contract. Its applicability and source revisions
+are recorded separately; older directories below remain historical.
+
 The protocol evidence source is `aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7`.
 The public builder uses `num_target_profilers(...)` after naming follow-up
 `8bf28b9c0b82d8c3bedb084a1c877af358d6d29f`, validated by the affected crate tests and docs.

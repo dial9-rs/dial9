@@ -1,0 +1,70 @@
+{
+  "seed": 1093,
+  "trials": 10000,
+  "exact_discrete_ranks": {
+    "rank_space": 8,
+    "heterogeneous_gate_mean": "189/64",
+    "common_gate_mean": "147/64",
+    "wrong_extra_fraction_mean": "147/32",
+    "current_rank_dependent_gate_mean": "91/64",
+    "true_current_rank_example_population": 2,
+    "independent_gate_baseline_same_discrete_space": "7/4",
+    "note": "Continuous proof exact; discrete zero thresholds create a rare guard event. Rust rejects zero boundary as unusable. Small rank-space results deliberately expose that qualification."
+  },
+  "settled_census": {
+    "mean_ratio": 1.000289944674775,
+    "relative_sd": 0.045244148698336296,
+    "empirical_p025_p975": [
+      0.9145833333333333,
+      1.0925727900006825
+    ]
+  },
+  "actual_probability_weighting": {
+    "census_ratio_used_for_admission": 0.7,
+    "startup_p": 0.00021428571428571427,
+    "thinning_q": 0.5,
+    "weighted_population_ratio_mean": 0.9925160000000001,
+    "weighted_work_ratio_mean": 0.995872,
+    "wrong_missing_trim_factor_ratio_mean": 0.49625800000000003,
+    "expected_weighted_population_sd": 30548.8679550214,
+    "unobserved_30pct_trace_loss_expected_ratio": 0.7,
+    "note": "Trace loss is separate from census report loss; unobserved trace loss has no encoded correction."
+  },
+  "scheduled_reads": {
+    "phases_checked": 300,
+    "largest_healthy_opportunity_gap_s": 300,
+    "nested_active_to_quiet_transitions_checked": 18000,
+    "largest_transition_opportunity_gap_s": 300,
+    "negative_independent_active_quiet_phase_gap_s": 359,
+    "negative_independently_redrawn_phase_gap_s": 599,
+    "scope": "Fixed-deadline opportunity check, not network/election liveness."
+  },
+  "skew_fixture": {
+    "lifetime_real_utc_s": [
+      0,
+      60
+    ],
+    "window_label_s": [
+      0,
+      60
+    ],
+    "cases": [
+      {
+        "clock_offset_s": -5,
+        "true_utc_mean": 1.0,
+        "expected_labelled_window_contribution": 0.9166666666666666
+      },
+      {
+        "clock_offset_s": 0,
+        "true_utc_mean": 1.0,
+        "expected_labelled_window_contribution": 1.0
+      },
+      {
+        "clock_offset_s": 5,
+        "true_utc_mean": 1.0,
+        "expected_labelled_window_contribution": 0.9166666666666666
+      }
+    ],
+    "note": "Exact UTC-window mean proof assumes aligned clocks; bounded offsets shift per-process observation intervals."
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "scope": "Finite safety abstraction: two processes/owners, two source windows, CAS versions 0–4, one half-survival trim. No Rust refinement or network/scheduler liveness proof.",
+  "jar_sha256": "d4a12081bb7acd49d6d6158e818d8d69f8eb3f9a1f140cb39d20d50c4ce77f44",
+  "model_sha256": "ba20b2dc728a9f60e641bec5cec3488907264e59897ebe935f598a6e17e49bae",
+  "progress_model_sha256": "fa409d204eda30d84c79ff0c4daecaf37129475259faaa32e9ed5fd228dd3fcf",
+  "checks": [
+    {
+      "control": null,
+      "expected_violation": null,
+      "exit_code": 0,
+      "generated": 2938010,
+      "distinct": 613918
+    },
+    {
+      "control": "RerollCurrent",
+      "expected_violation": "FrozenLottery",
+      "exit_code": 12,
+      "generated": 12373,
+      "distinct": 5158
+    },
+    {
+      "control": "UncappedList",
+      "expected_violation": "BoundedLists",
+      "exit_code": 12,
+      "generated": 4352,
+      "distinct": 1766
+    },
+    {
+      "control": "ShortPageExhaustion",
+      "expected_violation": "NoFalseExhaustion",
+      "exit_code": 12,
+      "generated": 218,
+      "distinct": 134
+    },
+    {
+      "control": "DoubleTrim",
+      "expected_violation": "OnceOnly",
+      "exit_code": 12,
+      "generated": 2073,
+      "distinct": 1037
+    },
+    {
+      "control": "UnfencedResult",
+      "expected_violation": "CASFenced",
+      "exit_code": 12,
+      "generated": 12414,
+      "distinct": 5159
+    },
+    {
+      "control": "UnfencedElection",
+      "expected_violation": "CASFenced",
+      "exit_code": 12,
+      "generated": 232,
+      "distinct": 119
+    },
+    {
+      "control": "ReservationFreshens",
+      "expected_violation": "ReservationIsNotPopulation",
+      "exit_code": 12,
+      "generated": 48,
+      "distinct": 33
+    },
+    {
+      "control": "LateEnable",
+      "expected_violation": "NoReenable",
+      "exit_code": 12,
+      "generated": 12,
+      "distinct": 10
+    }
+  ],
+  "healthy_progress_checks": [
+    {
+      "control": null,
+      "exit_code": 0,
+      "generated": 115,
+      "distinct": 70,
+      "scope": "One live quiet process, fair healthy GET/election completion and timely deadline scheduling; no failures/contenders/Rust refinement."
+    },
+    {
+      "control": "ReporterOnlyReads",
+      "exit_code": 13,
+      "generated": 35,
+      "distinct": 20,
+      "scope": "One live quiet process, fair healthy GET/election completion and timely deadline scheduling; no failures/contenders/Rust refinement."
+    },
+    {
+      "control": "RedrawEachInterval",
+      "exit_code": 13,
+      "generated": 65,
+      "distinct": 35,
+      "scope": "One live quiet process, fair healthy GET/election completion and timely deadline scheduling; no failures/contenders/Rust refinement."
+    }
+  ]
+}

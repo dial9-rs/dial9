@@ -1,0 +1,74 @@
+{
+  "evidence_base": "a45f1b693fcdd8711e400e40caef5aa65e4eeab0",
+  "implementation_base": "22cc577986b530fd05b27eac8c2751130c533aca",
+  "reviewed_initial_wire_controller_milestone": "59806840",
+  "final_implementation_source": null,
+  "final_implementation_source_status": "Pending root integration; no final Rust refinement or test result is claimed by these resources.",
+  "scope": "Separate mathematical/finite-model/cohort reference evidence for the stated contract. No Rust, hash implementation, S3 request-latency/delivery, general election liveness, or instantaneous-population proof.",
+  "runtime": {
+    "python": "3.12.12",
+    "numpy": "2.2.6",
+    "java": "Corretto 17.0.21.0.10"
+  },
+  "performed_checks": [
+    {
+      "command": "python3 docs/design/sampling/bounded/check_statistics.py",
+      "exit_code": 0,
+      "settled_trials": 10000,
+      "weighted_workload_trials": 10000,
+      "nested_phase_transitions_checked": 18000
+    },
+    {
+      "command": "python3 docs/design/sampling/bounded/simulate.py --trials 40 --comparison",
+      "exit_code": 0,
+      "dynamic_cases": 13,
+      "trials_per_case": 40,
+      "comparative_scenarios": 3,
+      "cadences_per_comparison": 2,
+      "per_step_assertions": "integer membership; report opportunity within lifetime; recording support; positive finite gates/weights; cache-refresh member conservation; once-only source reservation; source-aged publication; two logical LIST cap"
+    },
+    {
+      "command": "python3 docs/design/sampling/bounded/check_models.py /path/to/tla2tools.jar",
+      "exit_code": 0,
+      "jar_sha256": "d4a12081bb7acd49d6d6158e818d8d69f8eb3f9a1f140cb39d20d50c4ce77f44",
+      "safe_distinct_states": 613918,
+      "expected_safety_negative_controls": 8,
+      "healthy_quiet_progress_distinct_states": 70,
+      "expected_progress_negative_controls": 2
+    },
+    {
+      "command": "Compile all new Python scripts without writing bytecode; git diff --check",
+      "exit_code": 0
+    }
+  ],
+  "remaining_validation": [
+    "Compare stated contract and request/accounting abstraction to final integrated Rust source.",
+    "Track independent per-run p\u00d7q lineage and CPU work under correlated churn; mutate missing/double q.",
+    "Exercise no birth/resume catch-up and immutable opportunity/cutoff after cache changes.",
+    "Replay backend short-page/retry and uncertain reservation/takeover ledgers; verify population source age is not refreshed."
+  ],
+  "resource_sha256": {
+    "BoundedCensus.tla": "ba20b2dc728a9f60e641bec5cec3488907264e59897ebe935f598a6e17e49bae",
+    "DoubleTrim.log": "586ce44d4756e2167bfb5cc24077263a938e22080cf24df5d8f75f2b64df83ae",
+    "LateEnable.log": "028c74789e108b18a526176605ecd8d214eb62efbf83e07c5281d90cf93c8f67",
+    "QuietProgress.tla": "fa409d204eda30d84c79ff0c4daecaf37129475259faaa32e9ed5fd228dd3fcf",
+    "README.md": "ddf5244b0959c6b995d2996087c6027432aa1539aba42c46daeeaadda95032f1",
+    "RerollCurrent.log": "44c3fac7e0cf8c354db923ba81a4a1effd389d9bfa00fc95717cec081b5e1a69",
+    "ReservationFreshens.log": "2a965ce6bae490bff9f79f5f106bb37cc74a4aeabf3455d48d1038c0e3fbdd87",
+    "ShortPageExhaustion.log": "08b0c00be928030fec6da0b86cc1ace832ecf5091eea911d8c91c9c12666926a",
+    "UncappedList.log": "1f9357b2b3d14c3311a3d5a4c09cb0c8a64192c969e4e021c55b7eefdc9120f2",
+    "UnfencedElection.log": "1437699d0b1cdb8ba8d7f15010e1ef87275ccde96f9dc6f8645079115ad96d00",
+    "UnfencedResult.log": "b61917205e9770542031244f1fd6da4cb6ab43b1d08fad78bf38067d363ccaae",
+    "check_models.py": "fc5f7ce642f2008c52655352f558b8f4e5dcd1d0115533d14ba5788eb2c10a12",
+    "check_statistics.py": "6dd11ed2ee3d95dc74440190553863a98a9cade0d5fccbc81cd5fc1cb7c94d94",
+    "model-results.json": "9d0f41e7c2843dc890b4eb0a50f0a76be5ad7ac3ff4bd212814f5d02c0635b8b",
+    "progress-RedrawEachInterval.log": "7a66eb7e69668b184d504cd9f4e74552e5cad016f854c53c9944ab1c1fc9cfdf",
+    "progress-ReporterOnlyReads.log": "8fd8dde94716d2044446ce36e50ccf208bb854e1268c9de9744bd05a89a62c93",
+    "progress-safe.log": "7a0f299f672df0e927ff1a148a0501254a4da27602b496cdce11efaea301473f",
+    "proof.md": "161cba9947374787a931e5d2f7915d204526f1939ebd578835196ab12501140a",
+    "safe.log": "88911873ee16d0a720ab9e34847d6fa96fa564452dab26de14183ac90679175a",
+    "simulate.py": "2a98053fe1e85772058de77a24ac6a89ce3d27aec92a49002f1ccadbfc5595f6",
+    "simulation-results.json": "6361635f3265dc65a8d1dea102936a21d8660a86b9b0c58958749645373cacd3",
+    "statistical-results.json": "0dc143777a1132f78480c6b2d0334452babe042e9c77d994695992ea6ba7ef75"
+  }
+}

@@ -1,0 +1,256 @@
+TLC2 Version 2026.10.23.135453 (rev: 2ef2af8)
+Warning: Please run the Java VM, which executes TLC with a throughput optimized garbage collector, by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 32 and seed -3648371651329388071 with 1 worker on 64 cores with 1200MB heap and 64MB offheap memory [pid: 20059] (Linux 5.10.270-283.1109.amzn2int.x86_64 amd64, Amazon.com Inc. 17.0.21 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /tmp/dial9-bounded-model-n8xcb3m3/BoundedCensus.tla
+Parsing file /tmp/tlc-4475377306911188428/Integers.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Parsing file /tmp/tlc-4475377306911188428/FiniteSets.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /tmp/tlc-4475377306911188428/TLC.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /tmp/tlc-4475377306911188428/_TLCTrace.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /tmp/tlc-4475377306911188428/Naturals.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /tmp/tlc-4475377306911188428/Sequences.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /tmp/tlc-4475377306911188428/TLCExt.tla (jar:file:/tmp/profiler-sampling-review/profiler-sampling-handoff/formal/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Semantic processing of module Naturals
+Semantic processing of module Integers
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module BoundedCensus
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module BoundedCensus
+Starting... (2026-10-29 20:00:02)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-29 20:00:02.
+Error: Invariant FrozenLottery is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+s = [ window |-> 1,
+  version |-> 0,
+  owner |-> "none",
+  expired |-> TRUE,
+  readVersion |-> [a |-> 0, b |-> 0],
+  holderToken |-> [a |-> 0, b |-> 0],
+  lastReserved |-> -1,
+  reservation |-> [a |-> -1, b |-> -1],
+  reserveVersion |-> [a |-> 0, b |-> 0],
+  listMask |-> [a |-> {}, b |-> {}],
+  listCount |-> (0 :> 0 @@ 1 :> 0),
+  truncated |-> [a |-> FALSE, b |-> FALSE],
+  populationSource |-> -1,
+  control |-> 0,
+  cache |-> [a |-> 0, b |-> 0],
+  frozen |-> [a |-> 0, b |-> 0],
+  snapshot |-> [a |-> 0, b |-> 0],
+  rank |-> [a |-> 0, b |-> 1],
+  rankSnapshot |-> [a |-> 0, b |-> 1],
+  staleResult |-> FALSE,
+  staleElection |-> FALSE,
+  fabricatedEmpty |-> FALSE,
+  fabricatedFresh |-> FALSE,
+  trimPublished |-> FALSE,
+  trimKnown |-> {},
+  applied |-> {},
+  weightPower |-> 0,
+  startup |-> {"a"},
+  profiling |-> {"a"},
+  stopped |-> {} ]
+
+State 2: <Claim("a") line 52, col 3 to line 56, col 62 of module BoundedCensus>
+s = [ window |-> 1,
+  version |-> 1,
+  owner |-> "a",
+  expired |-> FALSE,
+  readVersion |-> [a |-> 0, b |-> 0],
+  holderToken |-> [a |-> 1, b |-> 0],
+  lastReserved |-> -1,
+  reservation |-> [a |-> -1, b |-> -1],
+  reserveVersion |-> [a |-> 0, b |-> 0],
+  listMask |-> [a |-> {}, b |-> {}],
+  listCount |-> (0 :> 0 @@ 1 :> 0),
+  truncated |-> [a |-> FALSE, b |-> FALSE],
+  populationSource |-> -1,
+  control |-> 0,
+  cache |-> [a |-> 0, b |-> 0],
+  frozen |-> [a |-> 0, b |-> 0],
+  snapshot |-> [a |-> 0, b |-> 0],
+  rank |-> [a |-> 0, b |-> 1],
+  rankSnapshot |-> [a |-> 0, b |-> 1],
+  staleResult |-> FALSE,
+  staleElection |-> FALSE,
+  fabricatedEmpty |-> FALSE,
+  fabricatedFresh |-> FALSE,
+  trimPublished |-> FALSE,
+  trimKnown |-> {},
+  applied |-> {},
+  weightPower |-> 0,
+  startup |-> {"a"},
+  profiling |-> {"a"},
+  stopped |-> {} ]
+
+State 3: <Reserve("a") line 59, col 3 to line 68, col 53 of module BoundedCensus>
+s = [ window |-> 1,
+  version |-> 2,
+  owner |-> "a",
+  expired |-> FALSE,
+  readVersion |-> [a |-> 0, b |-> 0],
+  holderToken |-> [a |-> 2, b |-> 0],
+  lastReserved |-> 0,
+  reservation |-> [a |-> 0, b |-> -1],
+  reserveVersion |-> [a |-> 2, b |-> 0],
+  listMask |-> [a |-> {}, b |-> {}],
+  listCount |-> (0 :> 0 @@ 1 :> 0),
+  truncated |-> [a |-> FALSE, b |-> FALSE],
+  populationSource |-> -1,
+  control |-> 0,
+  cache |-> [a |-> 0, b |-> 0],
+  frozen |-> [a |-> 0, b |-> 0],
+  snapshot |-> [a |-> 0, b |-> 0],
+  rank |-> [a |-> 0, b |-> 1],
+  rankSnapshot |-> [a |-> 0, b |-> 1],
+  staleResult |-> FALSE,
+  staleElection |-> FALSE,
+  fabricatedEmpty |-> FALSE,
+  fabricatedFresh |-> FALSE,
+  trimPublished |-> FALSE,
+  trimKnown |-> {},
+  applied |-> {},
+  weightPower |-> 0,
+  startup |-> {"a"},
+  profiling |-> {"a"},
+  stopped |-> {} ]
+
+State 4: <List("a","census",FALSE) line 73, col 3 to line 81, col 65 of module BoundedCensus>
+s = [ window |-> 1,
+  version |-> 2,
+  owner |-> "a",
+  expired |-> FALSE,
+  readVersion |-> [a |-> 0, b |-> 0],
+  holderToken |-> [a |-> 2, b |-> 0],
+  lastReserved |-> 0,
+  reservation |-> [a |-> 0, b |-> -1],
+  reserveVersion |-> [a |-> 2, b |-> 0],
+  listMask |-> [a |-> {"census"}, b |-> {}],
+  listCount |-> (0 :> 1 @@ 1 :> 0),
+  truncated |-> [a |-> FALSE, b |-> FALSE],
+  populationSource |-> -1,
+  control |-> 0,
+  cache |-> [a |-> 0, b |-> 0],
+  frozen |-> [a |-> 0, b |-> 0],
+  snapshot |-> [a |-> 0, b |-> 0],
+  rank |-> [a |-> 0, b |-> 1],
+  rankSnapshot |-> [a |-> 0, b |-> 1],
+  staleResult |-> FALSE,
+  staleElection |-> FALSE,
+  fabricatedEmpty |-> FALSE,
+  fabricatedFresh |-> FALSE,
+  trimPublished |-> FALSE,
+  trimKnown |-> {},
+  applied |-> {},
+  weightPower |-> 0,
+  startup |-> {"a"},
+  profiling |-> {"a"},
+  stopped |-> {} ]
+
+State 5: <List("a","profilers",FALSE) line 73, col 3 to line 81, col 65 of module BoundedCensus>
+s = [ window |-> 1,
+  version |-> 2,
+  owner |-> "a",
+  expired |-> FALSE,
+  readVersion |-> [a |-> 0, b |-> 0],
+  holderToken |-> [a |-> 2, b |-> 0],
+  lastReserved |-> 0,
+  reservation |-> [a |-> 0, b |-> -1],
+  reserveVersion |-> [a |-> 2, b |-> 0],
+  listMask |-> [a |-> {"census", "profilers"}, b |-> {}],
+  listCount |-> (0 :> 2 @@ 1 :> 0),
+  truncated |-> [a |-> FALSE, b |-> FALSE],
+  populationSource |-> -1,
+  control |-> 0,
+  cache |-> [a |-> 0, b |-> 0],
+  frozen |-> [a |-> 0, b |-> 0],
+  snapshot |-> [a |-> 0, b |-> 0],
+  rank |-> [a |-> 0, b |-> 1],
+  rankSnapshot |-> [a |-> 0, b |-> 1],
+  staleResult |-> FALSE,
+  staleElection |-> FALSE,
+  fabricatedEmpty |-> FALSE,
+  fabricatedFresh |-> FALSE,
+  trimPublished |-> FALSE,
+  trimKnown |-> {},
+  applied |-> {},
+  weightPower |-> 0,
+  startup |-> {"a"},
+  profiling |-> {"a"},
+  stopped |-> {} ]
+
+State 6: <Result("a") line 84, col 3 to line 92, col 76 of module BoundedCensus>
+s = [ window |-> 1,
+  version |-> 3,
+  owner |-> "a",
+  expired |-> FALSE,
+  readVersion |-> [a |-> 0, b |-> 0],
+  holderToken |-> [a |-> 3, b |-> 0],
+  lastReserved |-> 0,
+  reservation |-> [a |-> 0, b |-> -1],
+  reserveVersion |-> [a |-> 0, b |-> 0],
+  listMask |-> [a |-> {"census", "profilers"}, b |-> {}],
+  listCount |-> (0 :> 2 @@ 1 :> 0),
+  truncated |-> [a |-> FALSE, b |-> FALSE],
+  populationSource |-> 0,
+  control |-> 1,
+  cache |-> [a |-> 0, b |-> 0],
+  frozen |-> [a |-> 0, b |-> 0],
+  snapshot |-> [a |-> 0, b |-> 0],
+  rank |-> [a |-> 0, b |-> 1],
+  rankSnapshot |-> [a |-> 0, b |-> 1],
+  staleResult |-> FALSE,
+  staleElection |-> FALSE,
+  fabricatedEmpty |-> FALSE,
+  fabricatedFresh |-> FALSE,
+  trimPublished |-> FALSE,
+  trimKnown |-> {},
+  applied |-> {},
+  weightPower |-> 0,
+  startup |-> {"a"},
+  profiling |-> {"a"},
+  stopped |-> {} ]
+
+State 7: <Read("a") line 40, col 3 to line 45, col 45 of module BoundedCensus>
+s = [ window |-> 1,
+  version |-> 3,
+  owner |-> "a",
+  expired |-> FALSE,
+  readVersion |-> [a |-> 3, b |-> 0],
+  holderToken |-> [a |-> 3, b |-> 0],
+  lastReserved |-> 0,
+  reservation |-> [a |-> 0, b |-> -1],
+  reserveVersion |-> [a |-> 0, b |-> 0],
+  listMask |-> [a |-> {"census", "profilers"}, b |-> {}],
+  listCount |-> (0 :> 2 @@ 1 :> 0),
+  truncated |-> [a |-> FALSE, b |-> FALSE],
+  populationSource |-> 0,
+  control |-> 1,
+  cache |-> [a |-> 1, b |-> 0],
+  frozen |-> [a |-> 1, b |-> 0],
+  snapshot |-> [a |-> 0, b |-> 0],
+  rank |-> [a |-> 1, b |-> 1],
+  rankSnapshot |-> [a |-> 0, b |-> 1],
+  staleResult |-> FALSE,
+  staleElection |-> FALSE,
+  fabricatedEmpty |-> FALSE,
+  fabricatedFresh |-> FALSE,
+  trimPublished |-> FALSE,
+  trimKnown |-> {},
+  applied |-> {},
+  weightPower |-> 0,
+  startup |-> {"a"},
+  profiling |-> {"a"},
+  stopped |-> {} ]
+
+12373 states generated, 5158 distinct states found, 3451 states left on queue.
+The depth of the complete state graph search is 7.
+Finished in 00s at (2026-10-29 20:00:02)
+Trace exploration spec path: ./BoundedCensus_TTrace_1793304002.tla
