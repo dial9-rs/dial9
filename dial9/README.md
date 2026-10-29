@@ -231,7 +231,7 @@ Sampling::builder()
 
 `dial9-sampling` uses S3 or another similar object store to allow you to pick a target of number of hosts to enable profiling on. It will be fully managed by dial9 itself.
 
-See the [standalone guide](../dial9-sampling/README.md) and the [application entry-point example](examples/manual_sampling.rs). 
+See the [standalone guide](../dial9-sampling/README.md) and the [application entry-point example](examples/manual_sampling.rs).
 
 ## Why dial9?
 
