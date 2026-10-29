@@ -10,8 +10,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// TODO_REWRITE
-///
 /// Native S3 implementation of the sampler's conditional storage primitives.
 ///
 /// Reuses the recorder's [`S3Config`], including its bucket, prefix and service.
@@ -33,15 +31,7 @@ pub struct S3SamplingStore {
 
 #[bon::bon]
 impl S3SamplingStore {
-    /// TODO_REWRITE
-    ///
-    /// Initializes storage using the trace uploader's configuration.
-    ///
-    /// An optional SDK client preserves custom credential and endpoint setup.
-    /// Construct it inside the storage future. Otherwise initialization uses
-    /// the default AWS configuration chain and the config's attempt timeout.
-    /// An explicit config region is used directly; otherwise `HeadBucket`
-    /// discovers the region, including redirect response headers.
+    /// Initializes the sampling store
     ///
     /// # Errors
     ///
@@ -114,6 +104,7 @@ impl S3SamplingStore {
                 .build(),
         );
         let sampling_prefix = match config.prefix() {
+            // TODO(agent): extract _dial9_sampling into a constant
             Some(prefix) => format!("{prefix}/_dial9_sampling/"),
             None => "_dial9_sampling/".to_owned(),
         };
