@@ -316,5 +316,166 @@
       }
     ],
     "scope": "Public builder name, examples and documentation; protocol and weighting logic are unchanged."
+  },
+  "pr_cleanup": {
+    "source_revision": "84df932e940a9b5640f956377717d7a20f428415",
+    "validated_at": "2026-10-29T16:19:06.396550+00:00",
+    "scope": "Readable sorted Hive-escaped coordination paths; list_page contract; removed retained census/history API; checked no_run docs and rewrite markers; unconditional recorder registration and current scalar trace weights; public lifecycle regressions.",
+    "models_and_simulations_rerun": false,
+    "formal_evidence_source_revision": "aaa8c7208a0d4e6a76608f0d8fc76b4d6bfa42d7",
+    "formal_evidence_limits": "Existing model checks and simulation results remain evidence for their original recorded source and abstractions; this follow-up records Rust validation, not new proof runs or a refinement proof.",
+    "validation_revision_note": "The final commit changes only facade README prose after fb9e4e1d68659acd66f699c730307a6d6f84a031; tested Rust, manifests and compiled examples are unchanged.",
+    "rust": {
+      "workspace_tests_passed": 1744,
+      "workspace_tests_skipped": 4,
+      "stress_seconds": 20,
+      "stress_iterations_passed": 1,
+      "shuttle_suites": {
+        "dial9-sampling": 12,
+        "dial9-core": 39,
+        "dial9-tokio-telemetry": 2,
+        "dial9-utils": 3
+      },
+      "all_feature_doctests_passed": 3,
+      "bare_doctests_passed": 2,
+      "ignored_doctests": 0,
+      "checks": [
+        {
+          "name": "format",
+          "command": [
+            "cargo",
+            "fmt",
+            "--all",
+            "--check"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 1.01
+        },
+        {
+          "name": "workspace-clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "--all-targets",
+            "--all-features"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 3.07
+        },
+        {
+          "name": "workspace-stress",
+          "command": [
+            "cargo",
+            "nextest",
+            "run",
+            "--all-features",
+            "--stress-duration",
+            "20s",
+            "--no-fail-fast"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 1032.4
+        },
+        {
+          "name": "shuttle",
+          "command": [
+            "./scripts/test-shuttle.sh"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 171.98
+        },
+        {
+          "name": "sampler-bare-clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "-p",
+            "dial9-sampling",
+            "--all-targets",
+            "--no-default-features"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 4.79
+        },
+        {
+          "name": "sampler-s3-clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "-p",
+            "dial9-sampling",
+            "--all-targets",
+            "--no-default-features",
+            "--features",
+            "s3"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 4.4
+        },
+        {
+          "name": "sampler-doc-tests",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "dial9-sampling",
+            "--all-features",
+            "--doc"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 14.45
+        },
+        {
+          "name": "sampler-bare-doc-tests",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "dial9-sampling",
+            "--no-default-features",
+            "--doc"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 4.95
+        },
+        {
+          "name": "sampler-rustdoc",
+          "command": [
+            "cargo",
+            "doc",
+            "-p",
+            "dial9-sampling",
+            "--all-features",
+            "--no-deps"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 4.15
+        },
+        {
+          "name": "sampler-bare-rustdoc",
+          "command": [
+            "cargo",
+            "doc",
+            "-p",
+            "dial9-sampling",
+            "--no-default-features",
+            "--no-deps"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 1.9
+        },
+        {
+          "name": "whitespace",
+          "command": [
+            "git",
+            "diff",
+            "--check"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 0.01
+        }
+      ],
+      "limits": "Local Linux validation. GitHub CI status is separate; previous unrelated warnings remain."
+    }
   }
 }

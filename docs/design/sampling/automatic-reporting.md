@@ -12,6 +12,8 @@ Subsequent implementation follow-ups replace hashed coordination paths with
 escaped sorted dimensions and remove retained census observations and
 `population_at`. The recorded models and simulations retain their original
 source revision and have not been rerun for these follow-ups.
+Current implementation follow-up: `84df932e940a9b5640f956377717d7a20f428415`. Its successful Rust validation
+is recorded in `pr_cleanup` in [the validation manifest](automatic/internals/validation.json).
 
 ## 1. User-facing documentation
 
@@ -25,6 +27,8 @@ The S3 integration takes the existing `S3Config`; its bucket, prefix and
 `service_name` isolate services automatically. Callers add environment, cell,
 instance type and other grouping keys. There is no separate `scope` or required
 caller-provided service dimension.
+Enable `s3` for the native backend; recorder registration and scalar trace-weight
+metadata are always available without a separate integration feature.
 
 See the [checked startup example][startup-guide] and
 [complete application example][application-example] for storage initialization,
