@@ -168,11 +168,4 @@ impl SamplingStore for MemoryStore {
                 .build())
         })
     }
-    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
-        Box::pin(async move {
-            self.before().await?;
-            self.objects.lock().expect("store lock").remove(key);
-            Ok(())
-        })
-    }
 }

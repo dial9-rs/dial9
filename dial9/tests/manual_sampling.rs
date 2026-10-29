@@ -62,7 +62,6 @@ fn fake_client(service: s3s::service::S3Service) -> aws_sdk_s3::Client {
 #[derive(Debug)]
 struct ObservedWrites {
     store: Arc<MemoryStore>,
-    member_written: Mutex<Option<oneshot::Sender<String>>>,
     roster_written: Mutex<Option<oneshot::Sender<String>>>,
 }
 
@@ -80,13 +79,10 @@ impl SamplingStore for ObservedWrites {
             let key = request.key().to_owned();
             let outcome = self.store.put(request).await?;
             if matches!(outcome, PutOutcome::Stored { .. }) {
-                let notice = if key.starts_with("v3/members/") {
-                    &self.member_written
-                } else if key.ends_with("/roster.json") {
-                    &self.roster_written
-                } else {
+                if !key.ends_with("/roster.json") {
                     return Ok(outcome);
-                };
+                }
+                let notice = &self.roster_written;
                 if let Some(notice) = notice.lock().unwrap().take()
                     && notice.send(key).is_err()
                 {
@@ -99,10 +95,6 @@ impl SamplingStore for ObservedWrites {
 
     fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
         self.store.list_sorted_page(request)
-    }
-
-    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
-        self.store.delete(key)
     }
 }
 
@@ -251,9 +243,8 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
 }
 
 #[test]
-fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
-    // s3s-fs sidecar filenames exceed NAME_MAX for epoch-qualified membership keys.
-    // MemoryStore checks callback-error cleanup; native requests and uploads are covered separately.
+fn failed_recorder_setup_preserves_roster_without_deleting_observations() {
+    // MemoryStore observes callback-error cleanup; native uploads are covered separately.
     let store = Arc::new(MemoryStore::new());
     let rt = runtime();
     let policy = Sampling::builder()
@@ -264,48 +255,36 @@ fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
     let directory = tempfile::tempdir().unwrap();
     let invalid_parent = directory.path().join("file-as-parent");
     std::fs::write(&invalid_parent, b"not a directory").unwrap();
-    let (member_written, member) = oneshot::channel();
     let (roster_written, roster) = oneshot::channel();
-    let mut written_keys = None;
+    let mut written_roster = None;
+    let mut observed_keys = Vec::new();
     let result = policy
         .with_storage(async {
             Ok(ObservedWrites {
                 store: store.clone(),
-                member_written: Mutex::new(Some(member_written)),
                 roster_written: Mutex::new(Some(roster_written)),
             })
         })
         .start_application(|SamplingStatus { enabled, .. }| {
             assert!(enabled);
-            // Await actual completed writes, so cleanup is checked against
-            // established membership and a persistent roster, without sleeps.
-            written_keys = Some(rt.block_on(async {
-                let member = tokio::time::timeout(Duration::from_secs(5), member)
+            // Await an actual completed roster publication before the callback fails.
+            written_roster = Some(rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), roster)
                     .await
                     .unwrap()
-                    .unwrap();
-                let roster = tokio::time::timeout(Duration::from_secs(5), roster)
-                    .await
                     .unwrap()
-                    .unwrap();
-                (member, roster)
             }));
+            observed_keys.extend(store.objects().into_keys());
             dial9::DiskBuffer::single_file(invalid_parent.join("trace.bin"))
         });
     assert!(result.is_err());
-    let (member, roster) = written_keys.unwrap();
+    let roster = written_roster.unwrap();
     rt.block_on(async {
-        assert!(store.get(member).await.unwrap().is_none());
         assert!(store.get(roster).await.unwrap().is_some());
-        assert!(
-            store
-                .list_sorted_page(ListRequest::builder().prefix("v3/members/").build())
-                .await
-                .unwrap()
-                .objects()
-                .is_empty()
-        );
     });
+    for key in observed_keys {
+        assert!(store.objects().contains_key(&key), "shutdown removed {key}");
+    }
     policy
         .with_storage(async { Ok(store.clone()) })
         .start_application(|SamplingStatus { enabled, .. }| assert!(enabled));

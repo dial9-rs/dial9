@@ -150,8 +150,6 @@ fn kind(error: &StoreError) -> &'static str {
 #[case("list", 403, "unauthorized")]
 #[case("list", 400, "invalid")]
 #[case("list", 500, "unavailable")]
-#[case("delete", 403, "unauthorized")]
-#[case("delete", 500, "unavailable")]
 #[case("put", 403, "unauthorized")]
 #[case("put", 500, "unknown")]
 #[tokio::test(start_paused = true)]
@@ -167,7 +165,6 @@ async fn backend_errors_preserve_meaning(
             .list_sorted_page(ListRequest::builder().prefix("a").build())
             .await
             .unwrap_err(),
-        "delete" => store.delete("a").await.unwrap_err(),
         "put" => store
             .put(PutRequest::builder().key("a").body("data".into()).build())
             .await
@@ -504,7 +501,7 @@ async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_cli
             .await
             .unwrap();
     }
-    let membership_key = "v3/members/environment=production/01M623S6ZY8ND5FEG3ACCRG99H/0000000005977399/575c86b7dbf19363.a.01M623S6ZY8ND5FEG3ACCRG99J";
+    let report_key = "v3/census/environment=production/window=0000000005977399/575c86b7dbf19363.01M623S6ZY8ND5FEG3ACCRG99J.10000000000000000";
     let store = S3SamplingStore::builder()
         .config(
             dial9_destinations_s3::S3Config::builder()
@@ -520,7 +517,7 @@ async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_cli
     store
         .put(
             PutRequest::builder()
-                .key(membership_key)
+                .key(report_key)
                 .body(bytes::Bytes::new())
                 .condition(WriteCondition::unconditional())
                 .build(),
@@ -557,7 +554,7 @@ async fn uploader_config_isolates_services_and_prefixes_and_preserves_custom_cli
         requests[5].uri.split('?').next().unwrap(),
         format!(
             "https://custom.test/shared-traces/_dial9_sampling/service%3Dcheckout/{}",
-            membership_key.replace('=', "%3D")
+            report_key.replace('=', "%3D")
         )
     );
     assert!(requests[5].if_match.is_none());

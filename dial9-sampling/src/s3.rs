@@ -351,26 +351,4 @@ impl SamplingStore for S3SamplingStore {
                 .build())
         })
     }
-    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
-        Box::pin(async move {
-            self.client
-                .delete_object()
-                .bucket(&self.bucket)
-                .key(self.key(key))
-                .send()
-                .await
-                .map_err(|error| {
-                    let kind = if error
-                        .raw_response()
-                        .is_some_and(|r| r.status().as_u16() == 403)
-                    {
-                        StoreErrorKind::unauthorized()
-                    } else {
-                        StoreErrorKind::unavailable()
-                    };
-                    StoreError::new(kind, error)
-                })?;
-            Ok(())
-        })
-    }
 }

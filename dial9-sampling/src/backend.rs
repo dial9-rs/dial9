@@ -19,8 +19,8 @@ pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>>
 /// Continuation cursors must permit complete enumeration.
 /// Versions identify the observed body and may repeat if the body is repeated;
 /// shared roster revisions therefore include a fresh nonce on every write.
-/// Cancellation never proves that a write did not commit. Delete is only for
-/// unique process membership; shared rosters are never deleted.
+/// Cancellation never proves that a write did not commit. Completed reports
+/// remain immutable; storage lifecycle policy owns their expiration.
 /// A precondition failure must mean no attempt in that call committed.
 /// Backends must not hide an uncertain earlier attempt behind a retry's
 /// precondition failure; return an unknown write outcome for reconciliation.
@@ -65,13 +65,6 @@ pub trait SamplingStore: Send + Sync + 'static {
     /// Returns [`StoreError`] if page size is zero, listing fails, or the response
     /// cannot satisfy the namespace, order, page bound or pagination contract.
     fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage>;
-
-    /// Deletes the object at `key`
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] if the deletion fails.
-    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -354,8 +347,5 @@ impl<T: SamplingStore + ?Sized> SamplingStore for std::sync::Arc<T> {
     }
     fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
         (**self).list_sorted_page(request)
-    }
-    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
-        (**self).delete(key)
     }
 }

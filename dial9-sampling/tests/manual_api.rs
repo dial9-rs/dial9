@@ -523,62 +523,13 @@ fn zero_or_invalid_startup_does_not_poll_storage(
 }
 
 #[test]
-fn cold_disabled_recorder_stays_off_when_later_startups_use_the_live_census() {
-    use backend::{
-        ListPage, ListRequest, PutOutcome, PutRequest, SamplingStore, StoreFuture, StoredObject,
-    };
-    use std::sync::Mutex;
-
-    #[derive(Debug)]
-    struct ObservePopulation {
-        inner: Arc<MemoryStore>,
-        ready: Mutex<Option<oneshot::Sender<()>>>,
-    }
-    impl SamplingStore for ObservePopulation {
-        fn get(&self, key: String) -> StoreFuture<'_, Option<StoredObject>> {
-            self.inner.get(key)
-        }
-        fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
-            Box::pin(async move {
-                let has_population = if request.key().ends_with("/roster.json") {
-                    serde_json::from_slice::<serde_json::Value>(request.body()).unwrap()["population"]
-                        .is_object()
-                } else {
-                    assert!(request.key().starts_with("v3/members/"));
-                    false
-                };
-                let outcome = self.inner.put(request).await?;
-                if has_population
-                    && matches!(outcome, PutOutcome::Stored { .. })
-                    && let Some(ready) = self.ready.lock().unwrap().take()
-                {
-                    ready.send(()).unwrap();
-                }
-                Ok(outcome)
-            })
-        }
-        fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
-            self.inner.list_sorted_page(request)
-        }
-        fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
-            self.inner.delete(key)
-        }
-    }
-
+fn cold_disabled_recorder_stays_off_when_a_later_invocation_is_enabled() {
     let store = Arc::new(MemoryStore::new());
-    let sampling = Sampling::builder()
+    Sampling::builder()
         .num_target_profilers(1)
         .if_failed(StartupFailure::disabled())
-        .build();
-    let (ready, population) = oneshot::channel();
-    sampling
-        .clone()
-        .with_storage(async {
-            Ok(ObservePopulation {
-                inner: store.clone(),
-                ready: Mutex::new(Some(ready)),
-            })
-        })
+        .build()
+        .with_storage(async { Ok(store.clone()) })
         .start_application(|status| {
             assert!(!status.enabled);
             let recorder = dial9_core::recorder::recorder(
@@ -587,19 +538,7 @@ fn cold_disabled_recorder_stays_off_when_later_startups_use_the_live_census() {
             .build();
             status.register_recorder(&recorder);
             drop(status);
-            let app = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            // Await a real published census with production defaults. The
-            // watchdog allows the bucket-edge guard and initial leader election.
-            app.block_on(async {
-                tokio::time::timeout(Duration::from_secs(30), population)
-                    .await
-                    .unwrap()
-                    .unwrap();
-            });
-            sampling
+            policy()
                 .with_storage(async { Ok(store.clone()) })
                 .start_application(|SamplingStatus { enabled, .. }| assert!(enabled));
             assert!(!recorder.handle().is_enabled());
@@ -631,9 +570,6 @@ fn maintenance_termination_disables_registered_recorder_after_status_drop() {
         }
         fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
             self.inner.list_sorted_page(request)
-        }
-        fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, ()> {
-            self.inner.delete(key)
         }
     }
 
