@@ -206,7 +206,7 @@ impl Sampling {
             let mut keys = HashSet::new();
             loop {
                 let page = store
-                    .list(
+                    .list_page(
                         ListRequest::builder()
                             .prefix(day_prefix.clone())
                             .maybe_continuation(continuation)

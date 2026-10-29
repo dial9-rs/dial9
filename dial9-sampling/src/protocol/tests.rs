@@ -125,8 +125,8 @@ async fn backend_timestamp_uncertainty_rejects_an_impossible_census_window(
         fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
             self.0.put(request)
         }
-        fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
-            self.0.list(request)
+        fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+            self.0.list_page(request)
         }
         fn delete(&self, key: String) -> StoreFuture<'_, ()> {
             self.0.delete(key)
@@ -552,7 +552,7 @@ impl SamplingStore for Pages {
     fn delete(&self, key: String) -> StoreFuture<'_, ()> {
         self.inner.delete(key)
     }
-    fn list(&self, mut request: ListRequest) -> StoreFuture<'_, ListPage> {
+    fn list_page(&self, mut request: ListRequest) -> StoreFuture<'_, ListPage> {
         Box::pin(async move {
             self.lists.fetch_add(1, Ordering::SeqCst);
             if request.continuation().is_some() && self.fail_second.load(Ordering::SeqCst) {
@@ -566,19 +566,36 @@ impl SamplingStore for Pages {
                     .continuation(crate::backend::ContinuationToken::new("same"))
                     .build());
             }
-            // Small pages force actual pagination. Reverse every page: sort
-            // order is not part of the storage contract (S3 directory buckets).
+            let offset = request.continuation().map_or(0, |token| {
+                token
+                    .as_str()
+                    .strip_prefix("shuffled:")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap()
+            });
             request = ListRequest::builder()
                 .prefix(request.prefix())
-                .page_size(2)
-                .maybe_continuation(request.continuation().cloned())
+                .page_size(usize::MAX)
                 .build();
-            let page = self.inner.list(request).await?;
+            let page = self.inner.list_page(request).await?;
+            assert!(page.continuation().is_none());
+            // Scramble the whole listing before pagination, then repeat one
+            // key on a later page. Neither key order nor uniqueness is promised.
             let mut objects = page.objects().to_vec();
             objects.reverse();
+            if !objects.is_empty() {
+                objects.rotate_left(1);
+                objects.push(objects[0].clone());
+            }
+            let length = objects.len();
+            let page: Vec<_> = objects.into_iter().skip(offset).take(2).collect();
+            let next = offset + page.len();
+            let continuation = (next < length)
+                .then(|| crate::backend::ContinuationToken::new(format!("shuffled:{next}")));
             Ok(ListPage::builder()
-                .objects(objects)
-                .maybe_continuation(page.continuation().cloned())
+                .objects(page)
+                .maybe_continuation(continuation)
                 .build())
         })
     }
@@ -611,7 +628,7 @@ async fn put_member(
 }
 
 #[tokio::test(start_paused = true)]
-async fn unordered_paginated_census_deduplicates_and_carrier_wins_same_bucket() {
+async fn shuffled_cross_page_census_deduplicates_and_carrier_wins_same_bucket() {
     let inner = Arc::new(MemoryStore::new());
     let policy = config(3, "reader");
     let bucket = millis(inner.now()).unwrap() / 10000;
@@ -648,7 +665,7 @@ async fn unordered_paginated_census_deduplicates_and_carrier_wins_same_bucket() 
             .state,
         MemberState::Carrier
     );
-    assert!(store.lists.load(Ordering::SeqCst) >= 5);
+    assert_eq!(store.lists.load(Ordering::SeqCst), 6);
 }
 
 #[rstest::rstest]
@@ -1533,7 +1550,7 @@ async fn failed_pending_census_cannot_publish_or_promote_partial_membership() {
         fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
             self.inner.put(request)
         }
-        fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+        fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
             Box::pin(async move {
                 if request.prefix().contains(&format!("/{}/", self.id)) {
                     return Err(StoreError::new(
@@ -1541,7 +1558,7 @@ async fn failed_pending_census_cannot_publish_or_promote_partial_membership() {
                         "pending LIST unavailable",
                     ));
                 }
-                self.inner.list(request).await
+                self.inner.list_page(request).await
             })
         }
         fn delete(&self, key: String) -> StoreFuture<'_, ()> {

@@ -164,7 +164,7 @@ async fn backend_errors_preserve_meaning(
     let error = match operation {
         "get" => store.get("a".into()).await.unwrap_err(),
         "list" => store
-            .list(ListRequest::builder().prefix("a").build())
+            .list_page(ListRequest::builder().prefix("a").build())
             .await
             .unwrap_err(),
         "delete" => store.delete("a".into()).await.unwrap_err(),
@@ -252,7 +252,7 @@ async fn malformed_list_cannot_become_a_fleet_count(#[case] contents: &str) {
     fixture.body = format!("<ListBucketResult>{contents}</ListBucketResult>");
     let error = store(fixture)
         .await
-        .list(ListRequest::builder().prefix("a").build())
+        .list_page(ListRequest::builder().prefix("a").build())
         .await
         .unwrap_err();
     assert_eq!(kind(&error), "invalid");
@@ -276,7 +276,7 @@ async fn unordered_and_duplicate_list_entries_reach_the_census(
     );
     let page = store(fixture)
         .await
-        .list(ListRequest::builder().prefix("a").build())
+        .list_page(ListRequest::builder().prefix("a").build())
         .await
         .unwrap();
     assert_eq!(

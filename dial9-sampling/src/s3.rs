@@ -268,7 +268,7 @@ impl SamplingStore for S3SamplingStore {
             }
         })
     }
-    fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
         Box::pin(async move {
             let result = self
                 .client

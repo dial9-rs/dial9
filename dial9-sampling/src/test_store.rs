@@ -127,7 +127,7 @@ impl SamplingStore for MemoryStore {
             Ok(PutOutcome::stored(version))
         })
     }
-    fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
         Box::pin(async move {
             self.before().await?;
             let objects = self.objects.lock().expect("store lock");

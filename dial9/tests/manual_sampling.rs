@@ -97,8 +97,8 @@ impl SamplingStore for ObservedWrites {
         })
     }
 
-    fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
-        self.store.list(request)
+    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+        self.store.list_page(request)
     }
 
     fn delete(&self, key: String) -> StoreFuture<'_, ()> {
@@ -299,7 +299,7 @@ fn failed_recorder_setup_withdraws_membership_and_preserves_roster() {
         assert!(store.get(roster).await.unwrap().is_some());
         assert!(
             store
-                .list(ListRequest::builder().prefix("v3/members/").build())
+                .list_page(ListRequest::builder().prefix("v3/members/").build())
                 .await
                 .unwrap()
                 .objects()
@@ -395,13 +395,13 @@ fn s3_adapter_enforces_etag_conditions_and_complete_pagination(
             .await
             .unwrap();
         let page = store
-            .list(ListRequest::builder().prefix("").page_size(1).build())
+            .list_page(ListRequest::builder().prefix("").page_size(1).build())
             .await
             .unwrap();
         assert_eq!(page.objects().len(), 1);
         let mut listed = vec![page.objects()[0].key().to_owned()];
         let page = store
-            .list(
+            .list_page(
                 ListRequest::builder()
                     .prefix("")
                     .page_size(1)

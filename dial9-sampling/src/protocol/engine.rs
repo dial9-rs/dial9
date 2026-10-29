@@ -603,7 +603,7 @@ async fn list_bucket(
     let mut members = Vec::new();
     loop {
         let page = store
-            .list(
+            .list_page(
                 ListRequest::builder()
                     .prefix(&prefix)
                     .page_size(1000)

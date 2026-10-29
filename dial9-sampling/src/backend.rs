@@ -57,13 +57,20 @@ pub trait SamplingStore: Send + Sync + 'static {
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome>;
     /// TODO_REWRITE
     ///
-    /// Lists a page including completed writes, with an opaque continuation cursor.
+    /// Lists one page of keys under the requested prefix, including completed writes.
+    ///
+    /// Keys are relative to the store namespace and must match the requested prefix.
+    /// Order is unspecified within and across pages; duplicate keys may appear.
+    /// Continue with each opaque cursor until [`ListPage::continuation`] returns
+    /// `None` to enumerate the complete listing. A failed or cyclic continuation
+    /// leaves an incomplete listing and must not be used as a complete census.
+    /// Listing does not provide an atomic snapshot of concurrent fleet changes.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] if listing fails or the response cannot satisfy
-    /// the namespace, pagination or modification-time contract.
-    fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage>;
+    /// the namespace or complete-pagination contract.
+    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage>;
     /// TODO_REWRITE
     ///
     /// Deletes a process's unique membership object; deleting an absent object succeeds.
@@ -455,8 +462,8 @@ impl<T: SamplingStore + ?Sized> SamplingStore for std::sync::Arc<T> {
     fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
         (**self).put(request)
     }
-    fn list(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
-        (**self).list(request)
+    fn list_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+        (**self).list_page(request)
     }
     fn delete(&self, key: String) -> StoreFuture<'_, ()> {
         (**self).delete(key)
