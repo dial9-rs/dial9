@@ -15,7 +15,7 @@ default = []
 s3 = ["dep:aws-config", "dep:aws-sdk-s3", "dep:dial9-destinations-s3"]
 
 [dependencies]
-dial9-trace-format = { workspace = true }
+dial9-utils = { workspace = true }
 bon = "3"
 dial9-core = { workspace = true }
 dial9-destinations-s3 = { workspace = true, optional = true }

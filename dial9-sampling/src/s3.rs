@@ -4,7 +4,7 @@ use crate::backend::{
     StoreError, StoreErrorKind, StoreFuture, StoredObject, VersionToken, WriteCondition,
 };
 use dial9_destinations_s3::S3Config;
-use dial9_trace_format::object_key::hive_escape;
+use dial9_utils::object_key::hive_escape;
 use std::{
     io,
     time::{Duration, SystemTime, UNIX_EPOCH},

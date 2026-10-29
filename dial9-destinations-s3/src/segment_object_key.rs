@@ -1,6 +1,6 @@
 //! Canonical S3 object keys for trace segments.
 
-use dial9_trace_format::object_key::hive_escape;
+use dial9_utils::object_key::hive_escape;
 
 /// Format the canonical Hive-style segment object key.
 ///

@@ -27,10 +27,6 @@ pub mod de;
 pub mod decoder;
 pub mod encoder;
 pub(crate) mod leb128;
-/// Shared storage-key encoding for sibling crates.
-/// TODO_REWRITE
-#[doc(hidden)]
-pub mod object_key;
 pub mod schema;
 pub mod types;
 
