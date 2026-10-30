@@ -10,6 +10,31 @@ reviewed here is `0412753a631cb58933b6756510ee2e0a2bd66cba`. Its Rust test
 receipts are recorded separately in `validation.json`. These resources validate
 the stated contract; they are not a refinement proof of that implementation.
 
+## Implementation validation
+
+The final-source receipts in [validation.json](validation.json) and the
+[compact log](implementation-validation.log) distinguish implementation tests
+from these independent reference experiments. A fresh-target all-feature
+workspace stress run passed **1,770 tests**, with four skips; its one full
+iteration took 27.888 seconds, exceeding the requested 20-second duration.
+All 153 sampler tests and four independent paused shutdown regressions passed.
+Formatting, workspace/feature Clippy, all four Shuttle suites (56 tests), sampler
+doctests/rustdoc with and without S3, and facade doctests passed; no sampler
+doctest was ignored. [Latest-source CI](https://github.com/dial9-rs/dial9/actions/runs/41068269269) completed with 28 successes,
+one skip and three neutral checks, with no pending or failed checks. The
+path-filtered security audit did not rerun on this final lifecycle-only commit;
+earlier findings in unchanged base dependencies remain a separate limitation.
+
+The initial full-workspace run passed 1,768 tests and failed two telemetry gzip
+tests. Those test and dependency source trees are unchanged by the PR, and both
+tests passed the clean full-workspace rerun. Focused stress also passed 16
+executions on the final source and 16 on the previous implementation base; the
+baseline telemetry suite passed 354 executions. These observations do not
+establish that the original failure was pre-existing. A later compile-only
+failure from contaminated shared build artifacts was resolved by the fresh
+build at the same source SHA, without source changes. Both earlier failed
+receipts are preserved.
+
 ## Contract exercised
 
 - Completed 60-second windows estimate mean concurrent **live sampling

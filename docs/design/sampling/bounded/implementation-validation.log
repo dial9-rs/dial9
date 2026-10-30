@@ -1,0 +1,175 @@
+CHECK format
+COMMAND cargo fmt --all --check
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+CHECK workspace-clippy
+COMMAND cargo clippy --all-targets --all-features
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 b4e9f48f48df9ab4e240bcb163cff8dc651538bb895cd4723d1e38b13235219f
+warning: redundant reference in `assert!` argument
+warning: `dial9-tokio-telemetry` (test "background_symbolization") generated 1 warning (run `cargo clippy --fix --test "background_symbolization" -p dial9-tokio-telemetry -- ` to apply 1 suggestion)
+
+CHECK workspace-stress
+COMMAND cargo nextest run --all-features --stress-duration 20s --no-fail-fast
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 100
+FULL LOG SHA256 5917de33e0a48148e29998ff41753805100cca92d52da667307cd307d7f83239
+ Stress test [  42.644s] iteration 1: 1770 tests run: 1768 passed, 2 failed, 4 skipped
+     Summary [  42.644s] 1 stress run iteration: 0 passed, 1 failed
+
+CHECK shuttle
+COMMAND ./scripts/test-shuttle.sh
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 8363366a6ecaf2f9d85a527d36fd5fed4a0bb1daff5389beb2363c9f037e5b9e
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: `dial9-core` (lib) generated 3 warnings
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.03s
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: `dial9-core` (lib test) generated 3 warnings
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 250 filtered out; finished in 28.83s
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: `dial9-core` (lib) generated 3 warnings
+warning: unused import: `dial9_core::shared_state::SharedState`
+warning: `dial9-tokio-telemetry` (lib test) generated 1 warning (run `cargo fix --lib -p dial9-tokio-telemetry --tests` to apply 1 suggestion)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 22.41s
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+warning: `dial9-core` (lib) generated 3 warnings
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.29s
+
+CHECK sampler-bare-clippy
+COMMAND cargo clippy -p dial9-sampling --all-targets --no-default-features
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 0fcd589577244c66c62059c8441843c48b94066e1cabb42a7766936b9ae5f816
+
+CHECK sampler-s3-clippy
+COMMAND cargo clippy -p dial9-sampling --all-targets --no-default-features --features s3
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 26abeee58f0407952d11d9c55be7818934b8fbb94450b50a00e0a2fc6f962681
+
+CHECK sampler-doc-tests
+COMMAND cargo test -p dial9-sampling --all-features --doc
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 3f145e9981c93b673ea09146c3da8dda73c4a2e0f3d8264ce2fba88a0f6b9b51
+   Doc-tests dial9_sampling
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+CHECK sampler-bare-doc-tests
+COMMAND cargo test -p dial9-sampling --no-default-features --doc
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 4bb6a04d55e1af6d48a56daa31dc5c7c0d4f6a1266fafce4a5fc068da82d1188
+   Doc-tests dial9_sampling
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+CHECK sampler-rustdoc
+COMMAND cargo doc -p dial9-sampling --all-features --no-deps
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 3404a2992fcc74da4aaea0670072cedd511b995723d0117694305899003c6976
+
+CHECK sampler-bare-rustdoc
+COMMAND cargo doc -p dial9-sampling --no-default-features --no-deps
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 db975af5d0b8e4916a89fc50ed97b0eca8bb5fd890bebf2db14f2e0701c2595c
+
+CHECK facade-doc-tests
+COMMAND cargo test -p dial9 --all-features --doc
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 975046e9a08d4a6d01495b04472e4986ff1b01d992d9829569dcdd64d460fa51
+   Doc-tests dial9
+test result: ok. 21 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+CHECK whitespace
+COMMAND git diff --check 22cc5779..HEAD
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+FULL LOG SHA256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+CHECK workspace-stress-rerun
+COMMAND cargo nextest run --all-features --stress-duration 20s --no-fail-fast
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 101
+FULL LOG SHA256 f28ed639cac828597545dc09d2005133a0156a23c942d3609accff8e4263aac7
+error[E0046]: not all trait items implemented, missing: `delete`
+error[E0046]: not all trait items implemented, missing: `delete`
+error[E0046]: not all trait items implemented, missing: `delete`
+error[E0046]: not all trait items implemented, missing: `delete`
+error: could not compile `dial9` (test "manual_sampling") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `dial9-sampling` (test "manual_api") due to 2 previous errors
+
+CHECK telemetry comparison
+COMMAND mise exec -- cargo nextest run --all-features -E 'binary(writeback_no_trailing_data) | binary(writeback_no_leaked_gz)' --stress-duration 20s --no-fail-fast
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+PASSED EXECUTIONS 16
+FULL LOG SHA256 c36ce9c6f2795b4cd00c58b74d79d651b902d65d283ff3d1bdb28c807254e737
+
+CHECK telemetry comparison
+COMMAND mise exec -- cargo nextest run -p dial9-tokio-telemetry --all-features -E 'binary(writeback_no_trailing_data) | binary(writeback_no_leaked_gz)' --stress-duration 20s --no-fail-fast
+SOURCE 22cc577986b530fd05b27eac8c2751130c533aca
+EXIT 0
+PASSED EXECUTIONS 16
+FULL LOG SHA256 7c7168306e35c5b50a7cab2ffe641ad8c141c1e5136414f43e960767ff8034d4
+
+CHECK telemetry comparison
+COMMAND mise exec -- cargo nextest run -p dial9-tokio-telemetry --all-features --stress-duration 20s --no-fail-fast
+SOURCE 22cc577986b530fd05b27eac8c2751130c533aca
+EXIT 0
+PASSED EXECUTIONS 354
+FULL LOG SHA256 2b9357cfd84faf0cce631c3dd22271eaaa992a491980c26797b59c52467d2d98
+
+CHECK independent paused graceful-exit regression
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+FULL LOG SHA256 4f18bd588a147def753c3f3852796cffbcadb08534c4e1f11f96427cdf139fa3
+Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+────────────
+ Nextest run ID 8cf1cb99-059f-481d-a5c7-990c98cd92a8 with nextest profile: default
+    Starting 4 tests across 3 binaries (149 tests skipped)
+        PASS [   0.009s] (1/4) dial9-sampling protocol::engine::tests::graceful_shutdown_drains_captured_observations_within_one_shared_deadline::case_1
+        PASS [   0.011s] (2/4) dial9-sampling protocol::engine::tests::forced_shutdown_joins_pending_report_and_controller_requests::case_1
+        PASS [   0.011s] (3/4) dial9-sampling protocol::engine::tests::graceful_shutdown_drains_captured_observations_within_one_shared_deadline::case_2
+        PASS [   0.013s] (4/4) dial9-sampling protocol::engine::tests::forced_shutdown_joins_pending_report_and_controller_requests::case_2
+────────────
+     Summary [   0.013s] 4 tests run: 4 passed, 149 skipped
+CHECK fresh-target workspace stress
+COMMAND mise exec -- cargo nextest run --all-features --stress-duration 20s --no-fail-fast
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+EXIT 0
+PASSED 1770; FAILED 0; SKIPPED 4
+REQUESTED STRESS 20s; ACTUAL ITERATION 27.888s; ITERATIONS 1
+FRESH TARGET true; BUILD JOBS 8; TRACKED SOURCE CLEAN true
+FULL LOG SHA256 ef09f32e15c253d443b7523ca521478ecf93a3fac5d3fd0992761d894e0ef08f
+RECEIPT SHA256 db8a90bc72c60c3381abcb1665d0f71080fb19721c1429408f3575932bbbe34f
+ Stress test [  27.888s] iteration 1: 1770 tests run: 1770 passed, 4 skipped
+     Summary [  27.888s] 1 stress run iteration: 1 passed
+CHECK terminal GitHub CI
+SOURCE 0412753a631cb58933b6756510ee2e0a2bd66cba
+OBSERVED COMPLETE UTC 2026-10-30T14:22:46Z
+PR 1093 OPEN
+ROLLUP SUCCESS 28; SKIPPED 1; NEUTRAL 3; PENDING OR FAILED 0
+WORKFLOW 41068269269 COMPLETED SUCCESS
+WORKFLOW URL https://github.com/dial9-rs/dial9/actions/runs/41068269269
+STATUS SNAPSHOT SHA256 969453a3dfc716d3e19d29b0601fed2142cb99607f4481ff9753b88f7db563dc
+WORKFLOW SNAPSHOT SHA256 9f2e6ba48f5bb0b50a3228fc3d58bede55ced6d3b1c4394f2512c486b15287d0
+SECURITY AUDIT Not rerun on this lifecycle-only final commit; prior unchanged-dependency findings remain separate.

@@ -3,7 +3,7 @@
   "implementation_base": "22cc577986b530fd05b27eac8c2751130c533aca",
   "reviewed_initial_wire_controller_milestone": "59806840",
   "final_implementation_source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
-  "final_implementation_source_status": "Integrated source inspected. Focused sampler and independent graceful-exit checks passed; full workspace stress has two unresolved telemetry gzip failures and is not claimed green. No Rust/network refinement proof is claimed.",
+  "final_implementation_source_status": "Integrated source inspected. A fresh-target all-feature workspace stress run passed all 1,770 tests with four skips; formatting, workspace/feature Clippy, all Shuttle suites, feature combinations and documentation checks passed. All 153 sampler tests and four independent exact-source shutdown regressions passed. Initial telemetry gzip failures remain recorded but did not recur in the clean full run or focused comparisons; no definitive pre-existing-failure attribution is claimed. The shared-target compile-only failure was resolved without source changes. Latest-source CI completed successfully: 28 successes, one skip and three neutral checks, with no pending or failed checks. Historical audit findings in unchanged dependencies remain a separate qualification. No Rust/network refinement proof is claimed.",
   "scope": "Separate mathematical/finite-model/cohort reference evidence for the stated contract. No Rust, hash implementation, S3 request-latency/delivery, general election liveness, or instantaneous-population proof.",
   "runtime": {
     "python": "3.12.12",
@@ -87,7 +87,7 @@
     "DoubleTrim.log": "586ce44d4756e2167bfb5cc24077263a938e22080cf24df5d8f75f2b64df83ae",
     "LateEnable.log": "028c74789e108b18a526176605ecd8d214eb62efbf83e07c5281d90cf93c8f67",
     "QuietProgress.tla": "fa409d204eda30d84c79ff0c4daecaf37129475259faaa32e9ed5fd228dd3fcf",
-    "README.md": "e9f8702151c102ff2bb8087c55c32d90519a837cd7915940a2f25e708484f2bb",
+    "README.md": "0a57877f74fa700613262310a2ad83ba7f7a5df94c5d1371225a68d90b34221b",
     "RerollCurrent.log": "44c3fac7e0cf8c354db923ba81a4a1effd389d9bfa00fc95717cec081b5e1a69",
     "ReservationFreshens.log": "2a965ce6bae490bff9f79f5f106bb37cc74a4aeabf3455d48d1038c0e3fbdd87",
     "ShortPageExhaustion.log": "08b0c00be928030fec6da0b86cc1ace832ecf5091eea911d8c91c9c12666926a",
@@ -95,19 +95,20 @@
     "UnfencedElection.log": "1437699d0b1cdb8ba8d7f15010e1ef87275ccde96f9dc6f8645079115ad96d00",
     "UnfencedResult.log": "b61917205e9770542031244f1fd6da4cb6ab43b1d08fad78bf38067d363ccaae",
     "check_models.py": "fc5f7ce642f2008c52655352f558b8f4e5dcd1d0115533d14ba5788eb2c10a12",
+    "check_report_lifetime.py": "a0dc91f415438e1039105496f29fc74a4380ce9e88ea310f230f54a6d71afafc",
     "check_statistics.py": "6dd11ed2ee3d95dc74440190553863a98a9cade0d5fccbc81cd5fc1cb7c94d94",
+    "check_weight_lineage.py": "a2a5d5c18a59c51d36a0bfa2a1ca20e5b13a3b3d686aaf2d167957333a18bbe7",
+    "implementation-validation.log": "a7acb25fc2eedf32cf12864cd8b095882378ad72c224c731e23f98882a5d7963",
     "model-results.json": "9d0f41e7c2843dc890b4eb0a50f0a76be5ad7ac3ff4bd212814f5d02c0635b8b",
     "progress-RedrawEachInterval.log": "7a66eb7e69668b184d504cd9f4e74552e5cad016f854c53c9944ab1c1fc9cfdf",
     "progress-ReporterOnlyReads.log": "8fd8dde94716d2044446ce36e50ccf208bb854e1268c9de9744bd05a89a62c93",
     "progress-safe.log": "7a0f299f672df0e927ff1a148a0501254a4da27602b496cdce11efaea301473f",
     "proof.md": "a8dd80a41505fc71d10def65d5d15039e849369a349a647f1ec0511e6c285dbb",
+    "report-lifetime-results.json": "38e96e8969e732e41410bf368e5b252923248c43a75cb6d1df4bdcf39122f09d",
     "safe.log": "88911873ee16d0a720ab9e34847d6fa96fa564452dab26de14183ac90679175a",
     "simulate.py": "2a98053fe1e85772058de77a24ac6a89ce3d27aec92a49002f1ccadbfc5595f6",
     "simulation-results.json": "6361635f3265dc65a8d1dea102936a21d8660a86b9b0c58958749645373cacd3",
     "statistical-results.json": "0dc143777a1132f78480c6b2d0334452babe042e9c77d994695992ea6ba7ef75",
-    "check_report_lifetime.py": "a0dc91f415438e1039105496f29fc74a4380ce9e88ea310f230f54a6d71afafc",
-    "check_weight_lineage.py": "a2a5d5c18a59c51d36a0bfa2a1ca20e5b13a3b3d686aaf2d167957333a18bbe7",
-    "report-lifetime-results.json": "38e96e8969e732e41410bf368e5b252923248c43a75cb6d1df4bdcf39122f09d",
     "weight-lineage-results.json": "42c7ef47e056a8aa493016d415056e59c1781514d1e85701f7f861dbae3cdc52",
     "workload-skew-results.json": "a5c3f282011e27f12fb2a226a050e8eb35d6a82889b25cda85fea3ca64971375",
     "workspace-stress-failure.log": "0e3f51ca63fda409d158ef2ff406a379ec1f888acaa33e31a61d0170a4d67a60"
@@ -135,14 +136,14 @@
     },
     {
       "kind": "Independent paused graceful-exit regression rerun",
-      "source": "9c225b54",
-      "integrated_equivalent_lifecycle_patch": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+      "source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
       "result": "4/4 passed",
       "cases": [
         "graceful captured-job drain, two latency paths",
         "forced cleanup abort/join, two pending request paths"
       ],
-      "qualification": "Independent graceful-exit source is equivalent to the integrated lifecycle patch; the integrated workspace receipt is separate."
+      "qualification": "Independent rerun against the exact integrated source; paused-time regressions cover the bounded successful drain and forced abort/join paths, not arbitrary network delivery.",
+      "log_sha256": "4f18bd588a147def753c3f3852796cffbcadb08534c4e1f11f96427cdf139fa3"
     },
     {
       "kind": "Sampler portion of integrated all-feature workspace stress",
@@ -158,16 +159,22 @@
       "source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
       "checks": [
         {
+          "name": "format",
           "command": "cargo fmt --all --check",
-          "exit_code": 0
+          "exit_code": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         },
         {
+          "name": "workspace-clippy",
           "command": "cargo clippy --all-targets --all-features",
-          "exit_code": 0
+          "exit_code": 0,
+          "log_sha256": "b4e9f48f48df9ab4e240bcb163cff8dc651538bb895cd4723d1e38b13235219f"
         },
         {
+          "name": "workspace-stress",
           "command": "cargo nextest run --all-features --stress-duration 20s --no-fail-fast",
           "exit_code": 100,
+          "log_sha256": "5917de33e0a48148e29998ff41753805100cca92d52da667307cd307d7f83239",
           "passed": 1768,
           "failed": 2,
           "skipped": 4,
@@ -177,10 +184,368 @@
           ],
           "failure_excerpt": "workspace-stress-failure.log",
           "full_log_sha256": "5917de33e0a48148e29998ff41753805100cca92d52da667307cd307d7f83239",
-          "status": "Unresolved; coordinator is comparing exact current and baseline revisions. No claim that the failures are pre-existing or that the full suite passed."
+          "status": "Observed initial workspace failure; both failures were not reproduced by the exact-source fresh-target full-workspace rerun or by current/baseline focused comparisons. Unchanged source and successful reruns do not establish that the original failure was pre-existing. The original failed receipt is preserved."
+        },
+        {
+          "name": "shuttle",
+          "command": "./scripts/test-shuttle.sh",
+          "exit_code": 0,
+          "log_sha256": "8363366a6ecaf2f9d85a527d36fd5fed4a0bb1daff5389beb2363c9f037e5b9e",
+          "passed_by_crate": {
+            "dial9-sampling": 12,
+            "dial9-core": 39,
+            "dial9-tokio-telemetry": 2,
+            "dial9-utils": 3
+          },
+          "qualification": "Pre-existing Debug and unused-import warnings were reported; all four suites passed."
+        },
+        {
+          "name": "sampler-bare-clippy",
+          "command": "cargo clippy -p dial9-sampling --all-targets --no-default-features",
+          "exit_code": 0,
+          "log_sha256": "0fcd589577244c66c62059c8441843c48b94066e1cabb42a7766936b9ae5f816"
+        },
+        {
+          "name": "sampler-s3-clippy",
+          "command": "cargo clippy -p dial9-sampling --all-targets --no-default-features --features s3",
+          "exit_code": 0,
+          "log_sha256": "26abeee58f0407952d11d9c55be7818934b8fbb94450b50a00e0a2fc6f962681"
+        },
+        {
+          "name": "sampler-doc-tests",
+          "command": "cargo test -p dial9-sampling --all-features --doc",
+          "exit_code": 0,
+          "log_sha256": "3f145e9981c93b673ea09146c3da8dda73c4a2e0f3d8264ce2fba88a0f6b9b51",
+          "passed": 2,
+          "ignored": 0
+        },
+        {
+          "name": "sampler-bare-doc-tests",
+          "command": "cargo test -p dial9-sampling --no-default-features --doc",
+          "exit_code": 0,
+          "log_sha256": "4bb6a04d55e1af6d48a56daa31dc5c7c0d4f6a1266fafce4a5fc068da82d1188",
+          "passed": 2,
+          "ignored": 0
+        },
+        {
+          "name": "sampler-rustdoc",
+          "command": "cargo doc -p dial9-sampling --all-features --no-deps",
+          "exit_code": 0,
+          "log_sha256": "3404a2992fcc74da4aaea0670072cedd511b995723d0117694305899003c6976"
+        },
+        {
+          "name": "sampler-bare-rustdoc",
+          "command": "cargo doc -p dial9-sampling --no-default-features --no-deps",
+          "exit_code": 0,
+          "log_sha256": "db975af5d0b8e4916a89fc50ed97b0eca8bb5fd890bebf2db14f2e0701c2595c"
+        },
+        {
+          "name": "facade-doc-tests",
+          "command": "cargo test -p dial9 --all-features --doc",
+          "exit_code": 0,
+          "log_sha256": "975046e9a08d4a6d01495b04472e4986ff1b01d992d9829569dcdd64d460fa51",
+          "passed": 22,
+          "ignored": 2,
+          "qualification": "Two pre-existing ignored facade examples are outside the sampler. Sampler examples have no ignored tests."
+        },
+        {
+          "name": "whitespace",
+          "command": "git diff --check 22cc5779..HEAD",
+          "exit_code": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         }
       ],
-      "qualification": "Implementation tests are distinct from reference-model evidence; subsequent verification receipts must preserve this original failed result."
+      "qualification": "Implementation checks are distinct from reference-model evidence. Later receipts preserve the initial failed workspace result."
+    },
+    {
+      "kind": "Independent telemetry failure comparison",
+      "runs": [
+        {
+          "source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+          "command": "mise exec -- cargo nextest run --all-features -E 'binary(writeback_no_trailing_data) | binary(writeback_no_leaked_gz)' --stress-duration 20s --no-fail-fast",
+          "exit_code": 0,
+          "test_executions_passed": 16,
+          "started_utc": "2026-10-30T14:01:10Z",
+          "finished_utc": "2026-10-30T14:01:38Z",
+          "log_sha256": "c36ce9c6f2795b4cd00c58b74d79d651b902d65d283ff3d1bdb28c807254e737"
+        },
+        {
+          "source": "22cc577986b530fd05b27eac8c2751130c533aca",
+          "command": "mise exec -- cargo nextest run -p dial9-tokio-telemetry --all-features -E 'binary(writeback_no_trailing_data) | binary(writeback_no_leaked_gz)' --stress-duration 20s --no-fail-fast",
+          "exit_code": 0,
+          "test_executions_passed": 16,
+          "started_utc": "2026-10-30T14:04:49Z",
+          "finished_utc": "2026-10-30T14:06:08Z",
+          "log_sha256": "7c7168306e35c5b50a7cab2ffe641ad8c141c1e5136414f43e960767ff8034d4"
+        },
+        {
+          "source": "22cc577986b530fd05b27eac8c2751130c533aca",
+          "command": "mise exec -- cargo nextest run -p dial9-tokio-telemetry --all-features --stress-duration 20s --no-fail-fast",
+          "exit_code": 0,
+          "test_executions_passed": 354,
+          "started_utc": "2026-10-30T14:07:59Z",
+          "finished_utc": "2026-10-30T14:08:31Z",
+          "log_sha256": "2b9357cfd84faf0cce631c3dd22271eaaa992a491980c26797b59c52467d2d98"
+        }
+      ],
+      "unchanged_git_objects": {
+        "dial9-core": {
+          "80866154e8cb31906851309df27ba2d8361efada": "b418b722bdb458fd93a9b1b874db8b37086727aa",
+          "22cc577986b530fd05b27eac8c2751130c533aca": "b418b722bdb458fd93a9b1b874db8b37086727aa",
+          "0412753a631cb58933b6756510ee2e0a2bd66cba": "b418b722bdb458fd93a9b1b874db8b37086727aa"
+        },
+        "dial9-tokio-telemetry": {
+          "80866154e8cb31906851309df27ba2d8361efada": "2f798d472e5729af822200fe2c60591d9359ac72",
+          "22cc577986b530fd05b27eac8c2751130c533aca": "2f798d472e5729af822200fe2c60591d9359ac72",
+          "0412753a631cb58933b6756510ee2e0a2bd66cba": "2f798d472e5729af822200fe2c60591d9359ac72"
+        },
+        "perf-self-profile": {
+          "80866154e8cb31906851309df27ba2d8361efada": "5ae21bc4768e7fa21849078511fa243a258a573c",
+          "22cc577986b530fd05b27eac8c2751130c533aca": "5ae21bc4768e7fa21849078511fa243a258a573c",
+          "0412753a631cb58933b6756510ee2e0a2bd66cba": "5ae21bc4768e7fa21849078511fa243a258a573c"
+        },
+        "dial9-tokio-telemetry/tests/writeback_no_trailing_data.rs": {
+          "80866154e8cb31906851309df27ba2d8361efada": "d63318235f0f01061c06401b1b1af360dccb8b79",
+          "22cc577986b530fd05b27eac8c2751130c533aca": "d63318235f0f01061c06401b1b1af360dccb8b79",
+          "0412753a631cb58933b6756510ee2e0a2bd66cba": "d63318235f0f01061c06401b1b1af360dccb8b79"
+        },
+        "dial9-tokio-telemetry/tests/writeback_no_leaked_gz.rs": {
+          "80866154e8cb31906851309df27ba2d8361efada": "329cb92c8e0713cc448beae3492872504030c9ce",
+          "22cc577986b530fd05b27eac8c2751130c533aca": "329cb92c8e0713cc448beae3492872504030c9ce",
+          "0412753a631cb58933b6756510ee2e0a2bd66cba": "329cb92c8e0713cc448beae3492872504030c9ce"
+        }
+      },
+      "qualification": "Core, telemetry, perf-self-profile and both failed test sources are identical at PR base, previous implementation base, and final source. Focused current and baseline tests and the baseline telemetry package passed. The original full-workspace failure was not reproduced on the baseline; no stronger attribution is claimed."
+    },
+    {
+      "kind": "Invalid shared-target workspace rerun",
+      "source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+      "command": "cargo nextest run --all-features --stress-duration 20s --no-fail-fast",
+      "exit_code": 101,
+      "log_sha256": "f28ed639cac828597545dc09d2005133a0156a23c942d3609accff8e4263aac7",
+      "failure_stage": "compile before test execution",
+      "compiler_error": "E0046: stale SamplingStore requires removed delete method",
+      "classification": "Environmental invalid validation, not a test failure or implementation defect. Baseline comparisons explicitly shared the PR Cargo target directory; stale baseline sampler artifacts were linked into final-source tests. The same clean final source compiled and passed the full suite using a fresh target without copied or linked artifacts.",
+      "isolated_rerun_status": "Resolved by the passing fresh-target full-workspace run at the same source SHA, with no source changes.",
+      "diagnostic_sha256": "46e879f9fa1ff9abcd13213f69a4ce30b0e6101f28f1a79a6dc8a724b282e698",
+      "diagnostic": {
+        "baseline_sha": "22cc577986b530fd05b27eac8c2751130c533aca",
+        "final_trait_source_sha256": "844cc1cc07c5c285acdd22a70335bf6b0a3e7551ed8280cd57eabc4cfa01b975",
+        "final_trait_has_delete": false,
+        "baseline_trait_has_delete": true,
+        "baseline_trait_source_sha256": "8393d13d0e0b155638349242a0718930f45093da7afcc8bbd87b6ac73cfd885f",
+        "artifact_sha256": "b835ee5a4558a835a0e16b9dd885b1bbad4292c32ec22e6d7b2b3f5928437ab8",
+        "artifact_mtime_utc": "2026-10-30T14:02:11.156703+00:00",
+        "artifact_contains_baseline_source_path": true,
+        "artifact_contains_final_source_path": false,
+        "target_directory_is_symlink": false,
+        "qualification": "The evidence identifies shared artifact contamination; it does not assert a deeper Cargo fingerprint implementation cause."
+      }
+    },
+    {
+      "kind": "Fresh-target integrated full-workspace stress",
+      "source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+      "command": "mise exec -- cargo nextest run --all-features --stress-duration 20s --no-fail-fast",
+      "exit_code": 0,
+      "passed": 1770,
+      "failed": 0,
+      "skipped": 4,
+      "stress_iterations": 1,
+      "requested_stress_duration_s": 20,
+      "stress_iteration_seconds": 27.888,
+      "total_build_and_run_seconds": 253.72,
+      "target_initially_absent": true,
+      "build_jobs": 8,
+      "source_clean_after_run": true,
+      "started_utc": "2026-10-30T14:13:12.843951+00:00",
+      "finished_utc": "2026-10-30T14:17:26.560289+00:00",
+      "log_sha256": "ef09f32e15c253d443b7523ca521478ecf93a3fac5d3fd0992761d894e0ef08f",
+      "receipt_sha256": "db8a90bc72c60c3381abcb1665d0f71080fb19721c1429408f3575932bbbe34f",
+      "qualification": "One full iteration exceeded the requested 20-second stress duration. Both earlier telemetry gzip failures passed; the initial observed failure remains recorded rather than attributed conclusively."
+    },
+    {
+      "kind": "Terminal GitHub CI receipt",
+      "source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+      "pr_number": 1093,
+      "pr_state": "OPEN",
+      "observed_complete_utc": "2026-10-30T14:22:46Z",
+      "status_rollup": {
+        "SUCCESS": 28,
+        "SKIPPED": 1,
+        "NEUTRAL": 3
+      },
+      "success_check_runs": 27,
+      "success_netlify_status_contexts": 1,
+      "pending_or_failed": 0,
+      "workflow_id": 41068269269,
+      "workflow_status": "completed",
+      "workflow_conclusion": "success",
+      "workflow_url": "https://github.com/dial9-rs/dial9/actions/runs/41068269269",
+      "status_snapshot_sha256": "969453a3dfc716d3e19d29b0601fed2142cb99607f4481ff9753b88f7db563dc",
+      "workflow_snapshot_sha256": "9f2e6ba48f5bb0b50a3228fc3d58bede55ced6d3b1c4394f2512c486b15287d0",
+      "checks": [
+        {
+          "name": "PR gate",
+          "conclusion": "SUCCESS",
+          "workflow": "Benchmarks (PR)"
+        },
+        {
+          "name": "Release publication gate",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Cargo fmt",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Cargo clippy",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Build (ubuntu-latest, 1.94.1)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Build (macos-latest, 1.94.1)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Build (ubuntu-24.04-arm, 1.94.1)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Min versions test (Tokio 1.51.0)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Min versions test (Tokio 1.54.1)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "FreeBSD 15.1",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Windows CLI check",
+          "conclusion": "SKIPPED",
+          "workflow": "CI"
+        },
+        {
+          "name": "Android aarch64 build",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Nightly build gate",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Feature combinations",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Build without tokio_unstable",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Check docs.rs",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Trace Integrity & Analysis",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "UI (tsc, vitest, vite build)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "AddressSanitizer (perf-self-profile)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "ECS simulation (ctimer fallback)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Missing frame pointers are detected",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Shuttle tests",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Semver checks",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Cargo package",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Doc tests (dial9)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Build (ubuntu-latest, nightly)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Build (macos-latest, nightly)",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "CI Pass",
+          "conclusion": "SUCCESS",
+          "workflow": "CI"
+        },
+        {
+          "name": "Header rules",
+          "conclusion": "NEUTRAL",
+          "workflow": ""
+        },
+        {
+          "name": "Pages changed",
+          "conclusion": "NEUTRAL",
+          "workflow": ""
+        },
+        {
+          "name": "Redirect rules",
+          "conclusion": "NEUTRAL",
+          "workflow": ""
+        },
+        {
+          "name": "deploy/netlify",
+          "conclusion": "SUCCESS",
+          "workflow": null
+        }
+      ],
+      "qualification": "Terminal checks present at the exact final source. The path-filtered security audit did not rerun on this lifecycle-only commit; historical findings in unchanged base dependencies are not erased by this CI receipt."
     }
   ]
 }
