@@ -39,20 +39,45 @@
     {
       "command": "Compile all new Python scripts without writing bytecode; git diff --check",
       "exit_code": 0
+    },
+    {
+      "command": "python3 docs/design/sampling/bounded/check_weight_lineage.py",
+      "exit_code": 0,
+      "exact_fraction_branches": 72,
+      "time_slices": 5,
+      "per_unit_assertions": "Expected weighted CPU equals each live unit's actual CPU under heterogeneous positive startup probabilities, two adaptive trims, source-born eligibility, differing exogenous lifetimes and changing work.",
+      "negative_controls": 3,
+      "mutations": [
+        "missing first 1/q",
+        "duplicate first 1/q",
+        "replace actual weights with exact current population / profilers"
+      ]
+    },
+    {
+      "command": "python3 docs/design/sampling/bounded/check_report_lifetime.py",
+      "exit_code": 0,
+      "seed": 1093,
+      "opportunities": 200000,
+      "exact_cases": 7,
+      "reference_normal_exit_budget_s": 9,
+      "immediate_cancel_census_bias": "1/12",
+      "immediate_cancel_profiler_bias": "1/24",
+      "structural_assertions": "Half-open lifetime, birth after opportunity has no catch-up, only captured reports drain, half-window lifetime retains mean 1/2.",
+      "scope": "Healthy bounded successful report paths only; crash and failed-delivery controls explicitly retain loss."
     }
   ],
   "remaining_validation": [
-    "Compare stated contract and request/accounting abstraction to final integrated Rust source.",
-    "Track independent per-run p\u00d7q lineage and CPU work under correlated churn; mutate missing/double q.",
-    "Exercise no birth/resume catch-up and immutable opportunity/cutoff after cache changes.",
-    "Replay backend short-page/retry and uncertain reservation/takeover ledgers; verify population source age is not refreshed."
+    "Compare stated contract, request accounting, and normal-exit drain reference to final integrated Rust source.",
+    "Exercise immutable per-run opportunity/cutoff through cache changes and long suspension without birth/resume catch-up.",
+    "Replay backend short-page/native-retry and uncertain reservation/takeover request ledgers; verify population source age is not refreshed.",
+    "Namespace isolation and incompatible-schema classification are backed by direct Rust regressions, not by the abstract finite models."
   ],
   "resource_sha256": {
     "BoundedCensus.tla": "ba20b2dc728a9f60e641bec5cec3488907264e59897ebe935f598a6e17e49bae",
     "DoubleTrim.log": "586ce44d4756e2167bfb5cc24077263a938e22080cf24df5d8f75f2b64df83ae",
     "LateEnable.log": "028c74789e108b18a526176605ecd8d214eb62efbf83e07c5281d90cf93c8f67",
     "QuietProgress.tla": "fa409d204eda30d84c79ff0c4daecaf37129475259faaa32e9ed5fd228dd3fcf",
-    "README.md": "ddf5244b0959c6b995d2996087c6027432aa1539aba42c46daeeaadda95032f1",
+    "README.md": "c5afc92036eaeeebb7ba0b4e7f6e2224e7d91075ffd3bb634a3073b6b7f87f8f",
     "RerollCurrent.log": "44c3fac7e0cf8c354db923ba81a4a1effd389d9bfa00fc95717cec081b5e1a69",
     "ReservationFreshens.log": "2a965ce6bae490bff9f79f5f106bb37cc74a4aeabf3455d48d1038c0e3fbdd87",
     "ShortPageExhaustion.log": "08b0c00be928030fec6da0b86cc1ace832ecf5091eea911d8c91c9c12666926a",
@@ -65,10 +90,14 @@
     "progress-RedrawEachInterval.log": "7a66eb7e69668b184d504cd9f4e74552e5cad016f854c53c9944ab1c1fc9cfdf",
     "progress-ReporterOnlyReads.log": "8fd8dde94716d2044446ce36e50ccf208bb854e1268c9de9744bd05a89a62c93",
     "progress-safe.log": "7a0f299f672df0e927ff1a148a0501254a4da27602b496cdce11efaea301473f",
-    "proof.md": "161cba9947374787a931e5d2f7915d204526f1939ebd578835196ab12501140a",
+    "proof.md": "8dc4aa4e7d879ace4c32816f8c647fcb255196c5a16d2b23c59a04f396f2e320",
     "safe.log": "88911873ee16d0a720ab9e34847d6fa96fa564452dab26de14183ac90679175a",
     "simulate.py": "2a98053fe1e85772058de77a24ac6a89ce3d27aec92a49002f1ccadbfc5595f6",
     "simulation-results.json": "6361635f3265dc65a8d1dea102936a21d8660a86b9b0c58958749645373cacd3",
-    "statistical-results.json": "0dc143777a1132f78480c6b2d0334452babe042e9c77d994695992ea6ba7ef75"
+    "statistical-results.json": "0dc143777a1132f78480c6b2d0334452babe042e9c77d994695992ea6ba7ef75",
+    "check_report_lifetime.py": "a0dc91f415438e1039105496f29fc74a4380ce9e88ea310f230f54a6d71afafc",
+    "check_weight_lineage.py": "674016f3438b5063977e1eeec1d5a61af9cc024e2f5390d077a482c0bcc0c16d",
+    "report-lifetime-results.json": "38e96e8969e732e41410bf368e5b252923248c43a75cb6d1df4bdcf39122f09d",
+    "weight-lineage-results.json": "42c7ef47e056a8aa493016d415056e59c1781514d1e85701f7f861dbae3cdc52"
   }
 }

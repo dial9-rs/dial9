@@ -33,6 +33,10 @@ resources validate the stated model contract, not arbitrary later code.
 - Reporting requests have 3-second operation deadlines, at most two identical
   PUT attempts, 2-second dispatch grace, end+11-second submission deadline,
   and end+22-second closure under the default 5-second skew setting.
+  Normal application exit stops new observations and control work, then drains
+  already captured immutable reports within one shared 9-second cleanup budget.
+  This reference rule is pending final Rust integration; it does not guarantee
+  delivery after crashes, backend failure, or a late server commit.
 - Profiler PUT instants remain uniform and independent of fixed control GETs.
   A trim reserves the first UTC boundary strictly after the pre-publication
   time+81s: 75s for propagation (`60s active cadence + 2*5s skew + 3s GET
@@ -104,6 +108,29 @@ The weighting experiment with a 30%-low census and `q=0.5` expands to about
 0.993× population / 0.996× workload truth; omitting `1/q` gives about 0.496×.
 It tests probabilities actually used, not substitution of a census ratio.
 
+[Exact workload lineage](weight-lineage-results.json) independently enumerates
+72 rational-probability branches for four processes with unequal startup
+probabilities, two adaptive trims, source-cohort exemptions, differing lifetimes,
+and changing CPU work. At every one of five time slices, each live process's
+expected weighted work equals its actual work. At 200 seconds, workload truth
+and correct expansion are both 21; omitting the first `1/q` gives `56/3`,
+applying it twice gives `224/9`, and replacing the weights with an exactly
+correct current population divided by profiler count gives `185/12`.
+These are expectation identities, not a claim that one small sampled
+flamegraph closely matches its fleet.
+
+[Report lifetime checks](report-lifetime-results.json) expose delivery bias
+separately from sampling variance. For a 60-second lifetime and healthy
+2.5-second operations, immediate exit cancellation loses the last `5/60` of
+census observations and `2.5/60` of profiler observations. Draining captured
+jobs for at most nine seconds removes that loss in the explicit successful
+paths, including one failed PUT followed by a successful retry. The exact
+integration is checked by 200,000 seeded opportunities with independent rank
+eligibility. A half-window lifetime still contributes one half; drain neither
+creates a catch-up opportunity nor counts the process as alive after exit.
+The crash and failed-delivery controls retain their bias. A Gaussian error
+band cannot describe this systematic censorship.
+
 [Proof](proof.md) distinguishes the exact continuous-rank theorem from the
 implemented integer-rank zero-boundary guard. Skew shifts the real observation
 interval; missed dispatch/delivery, disabled support, and within-segment
@@ -123,19 +150,30 @@ contender. Reporter-only reads and repeated phase redraws violate its progress
 properties. This proves only the explicitly assumed finite healthy path, not
 production election or network liveness.
 
-## Remaining adversarial checks
+## Simulation invariants and remaining checks
 
 The cohort simulator asserts integer membership, report opportunities within
 lifetimes, recording support, positive finite gates/weights, conserved members
 on cache updates, once-only source reservation, and source-aged publication
 on every step. Its stochastic accuracy results do not replace structural tests.
-Further checks should track each selected run's probability lineage and CPU
-work under correlated churn (mutations: missing or doubled `1/q`); freeze the
-cutoff and opportunity through roster arrival and process suspension
-(mutations: current-window reroll or catch-up); and replay takeover,
-short-page/retry request ledgers and uncertain CAS without refreshing source
-age. The finite models cover abstractions of those protocol rules; direct
-Rust/backend correspondence still needs the final implementation revision.
+The most useful adversarial invariants distinguish illegal behavior from
+legitimate sampling error:
+
+| Invariant | Current independent evidence | Mutation or next probe |
+| --- | --- | --- |
+| Namespace construction cannot place another channel, pool, or caller dimension inside a source-window prefix. | Direct Rust namespace regression; the models treat keys as abstract identities. | Give a caller dimension the reserved name `window`; assert prefix isolation through escaped sorted keys. |
+| Known incompatible wire schema prevents participation even if its body cannot deserialize as the current format. | Direct Rust previous/future-schema regressions; no wire-format model proof. | Treat schema 4 as transport failure and incorrectly enter the uncoordinated fallback. |
+| A report describes presence and recording at its captured instant; normal exit cannot erase a bounded successful captured job. | Exact and seeded report-lifetime reference. | Cancel immediately, or re-evaluate recording after shutdown; keep crash/failure cases separate. |
+| Actual `1/p × product(1/q)` conserves each supported process's exogenous work in expectation. | Exact adaptive lineage oracle, including source-born exemptions. | Missing or duplicate `1/q`; substitute population/profiler-count; use unequal CPU and lifetimes to expose cancellation. |
+| Current rank, cutoff, and observation instant remain frozen despite roster refresh, elections, retry, birth, or resume. | Finite reroll control and lifetime reference; cohort step assertions. | Trace per-run opportunity/cutoff through delayed cache arrivals and suspension without catch-up. |
+| Reservation, result publication, and population source age remain distinct through takeover and uncertainty. | Finite fenced-CAS/reservation controls; cohort step assertions. | Replay an uncertain reservation followed by takeover; reject a second LIST or freshened old observation. |
+| Every source obeys the LIST/key cap; incomplete or invalid prefixes never become a numerical population. | Finite cap/short-page controls and cohort step assertions. | Replay sorted short pages, repeated cursors/identities, malformed keys and exhausted native retry attempts. |
+| Quiet scheduled opportunities remain at most 300 seconds apart under healthy timing. | Exact nested-phase checks and fair finite quiet-progress model. | Independent phase redraw or active/quiet phases; keep GET failures and scheduler suspension outside the healthy bound. |
+
+Direct Rust/backend correspondence, exact request ledgers under uncertain
+remote completion, and long suspension still need review against the final
+implementation revision. A default-disabled cohort has no profiling support;
+conservation must report that limitation rather than invent a weight.
 
 ## Reproduce
 
@@ -144,6 +182,8 @@ local `tla2tools.jar` run TLC:
 
 ```sh
 python3 docs/design/sampling/bounded/check_statistics.py
+python3 docs/design/sampling/bounded/check_weight_lineage.py
+python3 docs/design/sampling/bounded/check_report_lifetime.py
 python3 docs/design/sampling/bounded/simulate.py --trials 40 --comparison
 python3 docs/design/sampling/bounded/check_models.py /path/to/tla2tools.jar
 ```

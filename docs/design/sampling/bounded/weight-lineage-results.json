@@ -1,0 +1,128 @@
+{
+  "scope": "Exact independent probability oracle; aligned time slices, positive support, independent conditional coins, exogenous lifetimes/workloads, and complete trace delivery. No network/Rust refinement or finite-sample closeness claim.",
+  "units": [
+    {
+      "name": "a",
+      "born": 0,
+      "dies": 300,
+      "startup_p": "1/2"
+    },
+    {
+      "name": "b",
+      "born": 0,
+      "dies": 170,
+      "startup_p": "1/3"
+    },
+    {
+      "name": "c",
+      "born": 80,
+      "dies": 260,
+      "startup_p": "2/3"
+    },
+    {
+      "name": "d",
+      "born": 190,
+      "dies": 330,
+      "startup_p": "1/4"
+    }
+  ],
+  "adaptive_trims": [
+    {
+      "effective_second": 120,
+      "source_window": 0
+    },
+    {
+      "effective_second": 240,
+      "source_window": 2
+    }
+  ],
+  "branch_probability_mass": "1",
+  "final_branch_count": 72,
+  "snapshots": [
+    {
+      "time_slice_seconds": 110,
+      "true_live_processes": 3,
+      "true_cpu_work": 12,
+      "exact_means": {
+        "actual": "12",
+        "missing_first_q": "12",
+        "double_first_q": "12",
+        "roster_count_substitution": "137/12"
+      },
+      "exact_per_unit_actual_cpu_work": {
+        "a": "4",
+        "b": "3",
+        "c": "5",
+        "d": "0"
+      }
+    },
+    {
+      "time_slice_seconds": 130,
+      "true_live_processes": 3,
+      "true_cpu_work": 12,
+      "exact_means": {
+        "actual": "12",
+        "missing_first_q": "229/24",
+        "double_first_q": "146/9",
+        "roster_count_substitution": "533/48"
+      },
+      "exact_per_unit_actual_cpu_work": {
+        "a": "4",
+        "b": "3",
+        "c": "5",
+        "d": "0"
+      }
+    },
+    {
+      "time_slice_seconds": 200,
+      "true_live_processes": 3,
+      "true_cpu_work": 21,
+      "exact_means": {
+        "actual": "21",
+        "missing_first_q": "56/3",
+        "double_first_q": "224/9",
+        "roster_count_substitution": "185/12"
+      },
+      "exact_per_unit_actual_cpu_work": {
+        "a": "7",
+        "b": "0",
+        "c": "5",
+        "d": "9"
+      }
+    },
+    {
+      "time_slice_seconds": 250,
+      "true_live_processes": 3,
+      "true_cpu_work": 18,
+      "exact_means": {
+        "actual": "18",
+        "missing_first_q": "47/3",
+        "double_first_q": "197/9",
+        "roster_count_substitution": "85/9"
+      },
+      "exact_per_unit_actual_cpu_work": {
+        "a": "7",
+        "b": "0",
+        "c": "2",
+        "d": "9"
+      }
+    },
+    {
+      "time_slice_seconds": 310,
+      "true_live_processes": 1,
+      "true_cpu_work": 9,
+      "exact_means": {
+        "actual": "9",
+        "missing_first_q": "9",
+        "double_first_q": "9",
+        "roster_count_substitution": "9/4"
+      },
+      "exact_per_unit_actual_cpu_work": {
+        "a": "0",
+        "b": "0",
+        "c": "0",
+        "d": "9"
+      }
+    }
+  ]
+}

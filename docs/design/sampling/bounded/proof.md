@@ -96,6 +96,14 @@ Client deadlines, closure margins, and bounded skew do not prove that crashed,
 paused, blocked, or uncertain writes arrive. Unobserved delivery/dispatch loss
 can bias counts downward. A 30% independent report-loss experiment converges
 near 70% of the true population; that bias is not Gaussian sampling error.
+Normal callback exit is a preventable source of such bias: immediate
+cancellation of a healthy report path lasting `d` seconds censors the last
+`d/H` of a full-window lifetime. The report-lifetime oracle integrates this
+exactly. The specified normal-exit drain stops new observations while allowing
+already captured immutable jobs to finish within one shared nine-second
+budget. It preserves complete delivery for the explicit successful bounded
+paths; it does not extend the recorded lifetime or guarantee delivery after
+crashes, operation failures, hangs, or late server commits.
 Immutable stable prefixes avoid requiring a multi-page atomic snapshot under
 the complete-delivery assumption. Truncation, malformed keys, repeated
 identities/cursors, zero boundary, and budget exhaustion degrade observations.
@@ -125,6 +133,14 @@ This assumes that the workload/lifetime being estimated does not change in
 response to the run's profiling coin. Informative departures or trace loss
 need their own observation model; count simulations do not prove workload
 conservation in those cases.
+The independent exact lineage oracle enumerates heterogeneous startup
+probabilities and two trim decisions that adapt to previous selected cohorts.
+It checks the identity for each process at five slices, including departures,
+changing work, and a source-born exemption. Its three negative controls remove
+or duplicate the first `1/q`, or replace actual probabilities with an exactly
+correct fleet population divided by the current profiler count. All violate
+work conservation; an accurate population estimate cannot replace the
+probability lineage.
 An eligible run applies a token at most once. A missed activation is skipped,
 not applied retrospectively; such a run retains its actual untrimmed weight.
 There is no replacement by `N_hat / observed_profiler_count`.

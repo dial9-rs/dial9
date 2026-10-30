@@ -1,0 +1,98 @@
+{
+  "scope": "Independent opportunity/delivery reference, not a Rust scheduler or S3 refinement.",
+  "seed": 1093,
+  "trials": 200000,
+  "window_and_lifetime_s": [
+    0,
+    60
+  ],
+  "recorded_cutoff": "1/4",
+  "submission_deadline_s": "71",
+  "shared_normal_exit_drain_s": "9",
+  "cases": [
+    {
+      "case": "census_immediate_cancel",
+      "successful_report_path_s": "5",
+      "post_exit_drain_s": "0",
+      "backend_path_succeeds": true,
+      "exact_mean_population_contribution": "11/12",
+      "systematic_bias_fraction": "1/12",
+      "seeded_weighted_contribution": 0.9134,
+      "standard_error": 0.0037592478562133206
+    },
+    {
+      "case": "profiler_immediate_cancel",
+      "successful_report_path_s": "5/2",
+      "post_exit_drain_s": "0",
+      "backend_path_succeeds": true,
+      "exact_mean_population_contribution": "23/24",
+      "systematic_bias_fraction": "1/24",
+      "seeded_weighted_contribution": 0.9542,
+      "standard_error": 0.0038176763584381766
+    },
+    {
+      "case": "census_normal_exit_drain",
+      "successful_report_path_s": "5",
+      "post_exit_drain_s": "9",
+      "backend_path_succeeds": true,
+      "exact_mean_population_contribution": "1",
+      "systematic_bias_fraction": "0",
+      "seeded_weighted_contribution": 0.99454,
+      "standard_error": 0.003872983346207417
+    },
+    {
+      "case": "profiler_normal_exit_drain",
+      "successful_report_path_s": "5/2",
+      "post_exit_drain_s": "9",
+      "backend_path_succeeds": true,
+      "exact_mean_population_contribution": "1",
+      "systematic_bias_fraction": "0",
+      "seeded_weighted_contribution": 0.99454,
+      "standard_error": 0.003872983346207417
+    },
+    {
+      "case": "census_one_failed_put_then_success",
+      "successful_report_path_s": "15/2",
+      "post_exit_drain_s": "9",
+      "backend_path_succeeds": true,
+      "exact_mean_population_contribution": "1",
+      "systematic_bias_fraction": "0",
+      "seeded_weighted_contribution": 0.99454,
+      "standard_error": 0.003872983346207417
+    },
+    {
+      "case": "census_crash_no_post_exit_delivery",
+      "successful_report_path_s": "5",
+      "post_exit_drain_s": "0",
+      "backend_path_succeeds": true,
+      "exact_mean_population_contribution": "11/12",
+      "systematic_bias_fraction": "1/12",
+      "seeded_weighted_contribution": 0.9134,
+      "standard_error": 0.0037592478562133206
+    },
+    {
+      "case": "census_both_puts_fail",
+      "successful_report_path_s": "15/2",
+      "post_exit_drain_s": "9",
+      "backend_path_succeeds": false,
+      "exact_mean_population_contribution": "0",
+      "systematic_bias_fraction": "1",
+      "seeded_weighted_contribution": 0.0,
+      "standard_error": 0.0
+    }
+  ],
+  "structural_checks": [
+    "Birth after the frozen opportunity creates no catch-up report.",
+    "Departure at the opportunity is outside the half-open lifetime.",
+    "Drain completes already captured reports without new post-exit observations.",
+    "Half-window lifetime contributes 1/2 even with a successful drain."
+  ],
+  "qualifications": [
+    "Healthy census path is GET 2.5s then PUT 2.5s; profiler path is PUT 2.5s.",
+    "The retry path adds one failed 2.5s PUT and a successful 2.5s PUT.",
+    "The 9s budget is shared by concurrent captured jobs, not renewed per job.",
+    "No bound is claimed for crashes, suspension, failed delivery, backend hangs, or late server commits after client deadlines.",
+    "Operation and closure margins do not turn systematic delivery censorship into Gaussian sampling error.",
+    "Changing recording or presence after capture must not change the immutable report's captured state."
+  ]
+}
