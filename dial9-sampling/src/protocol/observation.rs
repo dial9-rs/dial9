@@ -117,7 +117,7 @@ impl ObservationDriver {
             return Ok(());
         }
         let state = self.cache.borrow().clone();
-        if state.compatible
+        if state.compatible()
             && let Some(observed) = &state.observed
         {
             if let Some(control) = observed.roster.applicable(window)
@@ -206,12 +206,8 @@ impl ObservationDriver {
                 )
                 .await;
                 match read.and_then(|object| object.map(|o| decode(o, &config)).transpose()) {
-                    Ok(observed) => publish_cache(&cache, observed, true),
+                    Ok(observed) => publish_cache(&cache, observed),
                     Err(error) => {
-                        if matches!(error.kind(), StoreErrorKind::Unsupported {}) {
-                            publish_cache(&cache, None, false);
-                            return Err(error);
-                        }
                         rate_limited!(Duration::from_secs(60), {
                             tracing::warn!(%error, "sampling report control read failed");
                         });
@@ -221,7 +217,7 @@ impl ObservationDriver {
             if channel == "control" {
                 return Ok(());
             }
-            if !cache.borrow().compatible {
+            if !cache.borrow().compatible() {
                 return Ok(());
             }
             // Eligibility and recording were captured at the independent observation instant.
@@ -325,7 +321,7 @@ impl ObservationDriver {
                     self.launch("control", now / timing.width, 0, Cutoff(None))?;
                 }
             }
-            let compatible = self.cache.borrow().compatible;
+            let compatible = self.cache.borrow().compatible();
             let plan = self.plan.as_mut().expect("window prepared");
             let census = if !plan.census_done && now >= plan.census_at {
                 plan.census_done = true;

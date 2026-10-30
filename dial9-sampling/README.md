@@ -66,11 +66,29 @@ Sampling::builder()
 # fn main() {}
 ```
 
-For more details see the [complete runnable example](../dial9/examples/manual_sampling.rs).
+For more details see the [complete runnable example](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/manual_sampling.rs).
 
-## Configuration details
+## Configuration options
 
-TODO: HUMAN
+There are two key options to decide on:
+1. How many profilers to run via [`num_target_profilers`]. Most services will want to run profiling in 4-20 hosts.
+2. What to do if you can't decide ([`if_failed`]), for example if S3 is down or times out. If your service is always ~100 hosts, you could safely use a startup probability with [`StartupFailure::assume_population`]. If it is 100k hosts, then [`StartupFailure::disabled`] may be a more sound choice.
+
+There are a few other options that are more relevant for a subset of services:
+1. What "dimensions" to use for profiling ([`add_dimension`]). Each set of K/V dimension pairs creates a "pool" of nodes. So for example, if you were running on two different instance types and wanted to ensure you had some profiling from each, you could add `instance_type` as a dimension.
+2. How long to wait before hitting the fallback ([`startup_timeout`]). The startup timeout defaults to 1000ms; if your service is not latency sensitive at startup, changing to 5000ms decreases the probability of spurious timeouts.
+
+Storage is configured with [`S3SamplingStore::builder`], which reuses the uploader's [`S3Config`].
+
+[`num_target_profilers`]: https://docs.rs/dial9-sampling/latest/dial9_sampling/struct.SamplingBuilder.html#method.num_target_profilers
+[`if_failed`]: https://docs.rs/dial9-sampling/latest/dial9_sampling/struct.SamplingBuilder.html#method.if_failed
+[`add_dimension`]: https://docs.rs/dial9-sampling/latest/dial9_sampling/struct.SamplingBuilder.html#method.add_dimension
+[`startup_timeout`]: https://docs.rs/dial9-sampling/latest/dial9_sampling/struct.SamplingBuilder.html#method.startup_timeout
+[`StartupFailure::assume_population`]: https://docs.rs/dial9-sampling/latest/dial9_sampling/enum.StartupFailure.html#method.assume_population
+[`StartupFailure::disabled`]: https://docs.rs/dial9-sampling/latest/dial9_sampling/enum.StartupFailure.html#method.disabled
+[`S3SamplingStore::builder`]: https://docs.rs/dial9-sampling/latest/dial9_sampling/s3/struct.S3SamplingStore.html#method.builder
+[`S3Config`]: https://docs.rs/dial9-destinations-s3/latest/dial9_destinations_s3/struct.S3Config.html
+
 
 ## Implementation details
 

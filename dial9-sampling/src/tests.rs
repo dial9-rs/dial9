@@ -573,3 +573,109 @@ async fn completed_census_supplies_population_for_later_startup() {
         .await;
     cold.shutdown(Duration::from_secs(1)).await;
 }
+
+fn population_lag(store: &MemoryStore) -> u64 {
+    let window = store.now().duration_since(UNIX_EPOCH).unwrap().as_secs() / 60;
+    window - roster(store)["population"]["window"].as_u64().unwrap()
+}
+
+/// Replaces a running fleet one process per minute, as a rolling deploy does.
+#[rstest::rstest]
+#[case::same_target(4, 4)]
+#[case::raised_target(4, 8)]
+#[case::lowered_target(8, 2)]
+#[tokio::test(start_paused = true)]
+async fn rolling_deploy_keeps_one_coordinated_roster_across_target_changes(
+    #[case] old_target: u32,
+    #[case] new_target: u32,
+) {
+    const FLEET: u128 = 12;
+    let store = Arc::new(MemoryStore::at(
+        UNIX_EPOCH + Duration::from_secs(WINDOW * 60),
+    ));
+    let mut fleet = std::collections::VecDeque::new();
+    for run in 1..=FLEET {
+        let prepared = prepare(&config(run, old_target), store.clone(), store.clone()).await;
+        fleet.push_back(prepared.into_session().expect("maintenance"));
+    }
+    tick(240).await;
+    assert!(population_lag(&store) <= 2);
+    for run in 1..=FLEET {
+        fleet
+            .pop_front()
+            .unwrap()
+            .shutdown(Duration::from_secs(9))
+            .await;
+        let config = config(1000 + run, new_target);
+        let prepared = prepare(&config, store.clone(), store.clone()).await;
+        assert_ne!(
+            prepared.reason,
+            protocol::DecisionReason::IncompatiblePolicy,
+            "a target change must not lock new processes out"
+        );
+        fleet.push_back(prepared.into_session().expect("maintenance"));
+        tick(60).await;
+        // A departing leader hands off at once, so population never goes stale.
+        assert!(
+            population_lag(&store) <= 2,
+            "stale population after replacing process {run}: {}",
+            roster(&store)
+        );
+        let estimate = roster(&store)["population"]["estimate"].as_f64().unwrap();
+        assert!(
+            (10.0..=14.0).contains(&estimate),
+            "estimate {estimate} for a fleet of {FLEET}"
+        );
+    }
+    let holder: ulid::Ulid = roster(&store)["holder"].as_str().unwrap().parse().unwrap();
+    assert!(u128::from(holder) > FLEET, "new configuration leads");
+    for session in fleet {
+        session.shutdown(Duration::from_secs(9)).await;
+    }
+}
+
+/// An older release that uses a different roster schema keeps its lease while
+/// any of its processes renew it; the new release claims the pool after that.
+#[tokio::test(start_paused = true)]
+async fn rolling_deploy_across_a_schema_change_claims_the_pool_once_the_old_fleet_exits() {
+    let store = Arc::new(MemoryStore::at(
+        UNIX_EPOCH + Duration::from_secs(WINDOW * 60),
+    ));
+    let old_roster = json!({"policy": {"schema": 1}, "holder": "old-release"});
+    let mut fleet = Vec::new();
+    for run in 1..=6 {
+        // The old leader renews every minute while its fleet drains.
+        publish(&store, &old_roster).await;
+        let prepared = prepare(&config(run, 4), store.clone(), store.clone()).await;
+        assert_eq!(
+            prepared.reason,
+            protocol::DecisionReason::IncompatiblePolicy
+        );
+        assert!(!prepared.enabled, "configured fallback applies");
+        fleet.push(prepared.into_session().expect("maintenance"));
+        tick(60).await;
+        assert_eq!(roster(&store)["holder"], "old-release");
+    }
+    assert!(
+        store
+            .objects()
+            .iter()
+            .all(|(key, _)| key.ends_with("/roster.json")),
+        "no reports under the old release's lease"
+    );
+    // Old fleet gone: the 186s lease lapses and a new process claims within a poll.
+    tick(190).await;
+    let holder: ulid::Ulid = roster(&store)["holder"].as_str().unwrap().parse().unwrap();
+    assert!((1..=6).contains(&u128::from(holder)));
+    tick(180).await;
+    assert!(population_lag(&store) <= 2, "{}", roster(&store));
+    let started = prepare(&config(7, 4), store.clone(), store.clone()).await;
+    assert!(matches!(
+        started.reason,
+        protocol::DecisionReason::Roster | protocol::DecisionReason::OutsideCutoff
+    ));
+    fleet.push(started.into_session().unwrap());
+    for session in fleet {
+        session.shutdown(Duration::from_secs(9)).await;
+    }
+}

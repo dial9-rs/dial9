@@ -139,14 +139,15 @@ fn serialize(value: &impl Serialize) -> Bytes {
     Bytes::from(serde_json::to_vec(value).expect("sampling record serializes"))
 }
 
-const SCHEMA: u32 = 5;
+const SCHEMA: u32 = 6;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+// Processes with different targets share one roster during rolling deploys:
+// each admits itself with its own target, and the leader's target governs
+// reporting budgets and thinning.
 struct Policy {
     schema: u32,
     pool: String,
-    target: u32,
-    max_overshoot: u32,
     poll_ms: u64,
     window_ms: u64,
     skew_ms: u64,
@@ -156,8 +157,6 @@ impl Policy {
         Self {
             schema: SCHEMA,
             pool: config.pool_path(),
-            target: config.target(),
-            max_overshoot: config.overshoot(),
             poll_ms: config.settings.poll_interval.as_millis() as u64,
             window_ms: config.settings.bucket_width.as_millis() as u64,
             skew_ms: config.settings.max_clock_skew.as_millis() as u64,
@@ -266,6 +265,8 @@ struct Roster {
     trim: Option<Trim>,
     // Reserve each completed source before LIST. Takeover never repeats that work.
     last_window: Option<u64>,
+    // A cleanly exiting leader gives up its lease so another process claims it at once.
+    released: bool,
 }
 impl Roster {
     fn initial(config: &Config, invocation_id: &str) -> Self {
@@ -279,15 +280,17 @@ impl Roster {
             population: None,
             trim: None,
             last_window: None,
+            released: false,
         }
     }
-    fn validate(&self, config: &Config) -> Result<(), StoreError> {
-        if self.policy != Policy::new(config) {
-            return Err(StoreError::new(
-                StoreErrorKind::unsupported(),
-                "incompatible sampling roster policy",
-            ));
-        }
+    // A fresh roster's epoch starts at its creation time, so caches holding a
+    // replaced roster (deleted, or superseded by another policy) accept it.
+    fn created(config: &Config, invocation_id: &str, now_ms: u64) -> Self {
+        let mut roster = Self::initial(config, invocation_id);
+        roster.epoch = now_ms;
+        roster
+    }
+    fn validate(&self) -> Result<(), StoreError> {
         if self.holder.parse::<ulid::Ulid>().is_err()
             || self.revision.parse::<ulid::Ulid>().is_err()
             || !self.control.valid()
@@ -347,7 +350,31 @@ struct Observed {
     version: VersionToken,
     modified_at: SystemTime,
 }
-fn decode(object: StoredObject, config: &Config) -> Result<Observed, StoreError> {
+/// A roster written under another schema or policy. Only its lease is understood.
+#[derive(Clone)]
+struct Foreign {
+    version: VersionToken,
+    modified_at: SystemTime,
+}
+#[derive(Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "short-lived read result; boxing adds an allocation per roster read"
+)]
+enum Decoded {
+    Roster(Observed),
+    Foreign(Foreign),
+}
+impl Decoded {
+    #[cfg(all(test, not(shuttle)))]
+    fn roster(self) -> Option<Observed> {
+        match self {
+            Self::Roster(observed) => Some(observed),
+            Self::Foreign(_) => None,
+        }
+    }
+}
+fn decode(object: StoredObject, config: &Config) -> Result<Decoded, StoreError> {
     #[derive(Deserialize)]
     struct PolicySchema {
         schema: u32,
@@ -358,19 +385,25 @@ fn decode(object: StoredObject, config: &Config) -> Result<Observed, StoreError>
     }
     // Another schema may have an entirely different body and policy layout.
     let header: Header = serde_json::from_slice(object.body()).map_err(invalid)?;
+    let foreign = || {
+        Decoded::Foreign(Foreign {
+            version: object.version().clone(),
+            modified_at: object.modified_at(),
+        })
+    };
     if header.policy.schema != SCHEMA {
-        return Err(StoreError::new(
-            StoreErrorKind::unsupported(),
-            "incompatible sampling roster schema",
-        ));
+        return Ok(foreign());
     }
     let roster: Roster = serde_json::from_slice(object.body()).map_err(invalid)?;
-    roster.validate(config)?;
-    Ok(Observed {
+    if roster.policy != Policy::new(config) {
+        return Ok(foreign());
+    }
+    roster.validate()?;
+    Ok(Decoded::Roster(Observed {
         roster,
         version: object.version().clone(),
         modified_at: object.modified_at(),
-    })
+    }))
 }
 fn expired(
     observed: &Observed,
@@ -378,13 +411,35 @@ fn expired(
     store: &dyn SamplingStore,
     now: SystemTime,
 ) -> bool {
+    lease_expired(observed.modified_at, config, store, now)
+}
+/// Another process may claim the roster: its lease was released or has lapsed.
+fn claimable(
+    observed: &Observed,
+    config: &Config,
+    store: &dyn SamplingStore,
+    now: SystemTime,
+) -> bool {
+    observed.roster.released || expired(observed, config, store, now)
+}
+fn lease_expired(
+    modified_at: SystemTime,
+    config: &Config,
+    store: &dyn SamplingStore,
+    now: SystemTime,
+) -> bool {
+    lease_deadline(modified_at, config, store).is_some_and(|deadline| now > deadline)
+}
+fn lease_deadline(
+    modified_at: SystemTime,
+    config: &Config,
+    store: &dyn SamplingStore,
+) -> Option<SystemTime> {
     // Server LastModified determines lease age. Precision/skew margins only delay takeover.
-    observed
-        .modified_at
+    modified_at
         .checked_add(config.settings.poll_interval.saturating_mul(3))
         .and_then(|t| t.checked_add(config.settings.max_clock_skew))
         .and_then(|t| t.checked_add(store.modification_time_uncertainty()))
-        .is_some_and(|deadline| now > deadline)
 }
 
 pub(crate) async fn prepare_using(
@@ -418,6 +473,7 @@ pub(crate) async fn prepare_using(
             .await,
         )
     };
+    let mut foreign = None;
     let (recording, reason, observed) = match result {
         None | Some(Err(_)) => (fallback, DecisionReason::Timeout, None),
         Some(Ok(Err(error))) => (
@@ -427,7 +483,9 @@ pub(crate) async fn prepare_using(
         ),
         Some(Ok(Ok(None))) => (fallback, DecisionReason::MissingRoster, None),
         Some(Ok(Ok(Some(object)))) => match decode(object, &config) {
-            Err(error) if matches!(error.kind(), StoreErrorKind::Unsupported {}) => {
+            // Claim the roster once the other policy's lease lapses.
+            Ok(Decoded::Foreign(other)) => {
+                foreign = Some(other);
                 (fallback, DecisionReason::IncompatiblePolicy, None)
             }
             Err(error) => (
@@ -435,7 +493,7 @@ pub(crate) async fn prepare_using(
                 DecisionReason::store_failure(error.to_string()),
                 None,
             ),
-            Ok(observed) => match millis(clock.now()) {
+            Ok(Decoded::Roster(observed)) => match millis(clock.now()) {
                 Err(error) => (
                     fallback,
                     DecisionReason::store_failure(error.to_string()),
@@ -460,12 +518,10 @@ pub(crate) async fn prepare_using(
             },
         },
     };
-    if reason == DecisionReason::IncompatiblePolicy {
-        return PreparedSampling::disabled(reason, recording);
-    }
     let authoritative = matches!(
         reason,
         DecisionReason::MissingRoster
+            | DecisionReason::IncompatiblePolicy
             | DecisionReason::Roster
             | DecisionReason::OutsideCutoff
             | DecisionReason::UnsettledRoster
@@ -475,7 +531,15 @@ pub(crate) async fn prepare_using(
     });
     let (signal, recording_changes) = watch::channel(recording);
     let stop = CancellationToken::new();
-    let mut worker = match Worker::new(config, store, clock, observed, signal, authoritative) {
+    let mut worker = match Worker::new(
+        config,
+        store,
+        clock,
+        observed,
+        foreign,
+        signal,
+        authoritative,
+    ) {
         Ok(worker) => worker,
         Err(error) => {
             return PreparedSampling::disabled(
@@ -520,7 +584,7 @@ pub(crate) async fn prepare_using(
             weights.stop();
         }
         terminal_signal.send_replace(false);
-        driver.shutdown().await;
+        tokio::join!(driver.shutdown(), worker.release());
         // Immutable historical reports expire through storage lifecycle policy.
     });
     PreparedSampling {
@@ -555,32 +619,52 @@ async fn catch_panic<T>(future: impl std::future::Future<Output = T>) -> Result<
 #[derive(Clone)]
 struct Cache {
     observed: Option<Observed>,
-    compatible: bool,
+    // Set while another policy owns the roster; this process neither reports nor leads.
+    foreign: Option<Foreign>,
 }
-fn publish_cache(cache: &watch::Sender<Cache>, incoming: Option<Observed>, compatible: bool) {
-    cache.send_if_modified(|current| {
-        if !compatible {
-            current.compatible = false;
-            return true;
+impl Cache {
+    fn compatible(&self) -> bool {
+        self.foreign.is_none()
+    }
+}
+fn publish_cache(cache: &watch::Sender<Cache>, incoming: Option<Decoded>) {
+    cache.send_if_modified(|current| match incoming {
+        // Delayed GETs may complete out of order. A roster replaces another
+        // policy's roster only if it was written later, and vice versa.
+        Some(Decoded::Foreign(foreign)) => {
+            if current
+                .foreign
+                .as_ref()
+                .is_some_and(|f| f.modified_at >= foreign.modified_at)
+                || current
+                    .observed
+                    .as_ref()
+                    .is_some_and(|o| o.modified_at > foreign.modified_at)
+            {
+                return false;
+            }
+            current.foreign = Some(foreign);
+            current.observed = None;
+            true
         }
-        // A successful incompatible response is terminal for joining in this run.
-        // An older compatible GET may still complete after that response.
-        if !current.compatible {
-            return false;
+        Some(Decoded::Roster(incoming)) => {
+            if let Some(foreign) = &current.foreign {
+                if incoming.modified_at <= foreign.modified_at {
+                    return false;
+                }
+                current.foreign = None;
+            } else if let Some(old) = &current.observed
+                && (incoming.roster.epoch < old.roster.epoch
+                    || (incoming.roster.epoch == old.roster.epoch
+                        && incoming.roster.revision != old.roster.revision))
+            {
+                return false;
+            }
+            current.observed = Some(incoming);
+            true
         }
-        if let Some(incoming) = &incoming
-            && let Some(old) = &current.observed
-            && (incoming.roster.epoch < old.roster.epoch
-                || (incoming.roster.epoch == old.roster.epoch
-                    && incoming.roster.revision != old.roster.revision))
-        {
-            return false;
-        }
-        // An earlier successful missing read cannot erase a later immutable roster.
-        if incoming.is_some() || current.observed.is_none() {
-            current.observed = incoming;
-        }
-        true
+        // An earlier successful missing read cannot erase a later roster.
+        None => current.observed.is_none() && current.foreign.is_none(),
     });
 }
 struct Worker {
@@ -592,7 +676,6 @@ struct Worker {
     signal: watch::Sender<bool>,
     cache: watch::Sender<Cache>,
     next_pass_ms: u64,
-    compatible: bool,
     election_needed: bool,
 }
 impl Worker {
@@ -601,17 +684,20 @@ impl Worker {
         store: Arc<dyn SamplingStore>,
         clock: Arc<dyn Clock>,
         observed: Option<Observed>,
+        foreign: Option<Foreign>,
         signal: watch::Sender<bool>,
         authoritative: bool,
     ) -> Result<Self, StoreError> {
         let born_ms = millis(clock.now())?;
         let election_needed = authoritative
-            && observed
-                .as_ref()
-                .is_none_or(|o| expired(o, &config, store.as_ref(), clock.now()));
+            && match (&observed, &foreign) {
+                (_, Some(f)) => lease_expired(f.modified_at, &config, store.as_ref(), clock.now()),
+                (Some(o), None) => claimable(o, &config, store.as_ref(), clock.now()),
+                (None, None) => true,
+            };
         let cache = watch::channel(Cache {
             observed: observed.clone(),
-            compatible: true,
+            foreign,
         })
         .0;
         Ok(Self {
@@ -623,23 +709,27 @@ impl Worker {
             signal,
             cache,
             next_pass_ms: born_ms,
-            compatible: true,
             election_needed,
         })
     }
     fn now(&self) -> Result<u64, StoreError> {
         millis(self.clock.now())
     }
-    fn learn(&mut self, observed: Option<Observed>, _now: u64) {
-        publish_cache(&self.cache, observed, true);
+    fn learn(&mut self, incoming: Option<Decoded>) {
+        publish_cache(&self.cache, incoming);
         self.consume_cache();
     }
     fn consume_cache(&mut self) {
         let state = self.cache.borrow().clone();
-        self.compatible = state.compatible;
-        if !self.compatible {
+        if let Some(foreign) = &state.foreign {
             self.leader = None;
-            self.election_needed = false;
+            self.observed = None;
+            self.election_needed = lease_expired(
+                foreign.modified_at,
+                &self.config,
+                self.store.as_ref(),
+                self.clock.now(),
+            );
             return;
         }
         let observed = state.observed;
@@ -654,54 +744,65 @@ impl Worker {
         if self.leader.is_none()
             && let Some(current) = &observed
             && current.roster.holder == self.config.invocation_id
-            && !expired(current, &self.config, self.store.as_ref(), self.clock.now())
+            && !claimable(current, &self.config, self.store.as_ref(), self.clock.now())
         {
             self.leader = Some(current.clone());
         }
         self.election_needed = observed
             .as_ref()
-            .is_none_or(|o| expired(o, &self.config, self.store.as_ref(), self.clock.now()));
+            .is_none_or(|o| claimable(o, &self.config, self.store.as_ref(), self.clock.now()));
         self.observed = observed;
     }
-    async fn read_roster(&self) -> Result<Option<Observed>, StoreError> {
-        let result = bounded(
+    async fn read_roster(&self) -> Result<Option<Decoded>, StoreError> {
+        bounded(
             Timing::new(&self.config).operation,
             self.store
                 .get(format!("{}roster.json", self.config.pool_prefix())),
         )
         .await
-        .and_then(|object| object.map(|o| decode(o, &self.config)).transpose());
-        if result
-            .as_ref()
-            .is_err_and(|error| matches!(error.kind(), StoreErrorKind::Unsupported {}))
-        {
-            publish_cache(&self.cache, None, false);
-        }
-        result
+        .and_then(|object| object.map(|o| decode(o, &self.config)).transpose())
     }
     async fn replace(
         &self,
         roster: &Roster,
         previous: Option<&VersionToken>,
     ) -> Result<Option<Observed>, StoreError> {
-        let result = replace(
+        match replace(
             &self.config,
             self.store.as_ref(),
             self.clock.as_ref(),
             roster,
             previous,
         )
-        .await;
-        if result
-            .as_ref()
-            .is_err_and(|error| matches!(error.kind(), StoreErrorKind::Unsupported {}))
+        .await?
         {
-            publish_cache(&self.cache, None, false);
+            Some(Decoded::Roster(observed)) => Ok(Some(observed)),
+            Some(foreign @ Decoded::Foreign(_)) => {
+                publish_cache(&self.cache, Some(foreign));
+                Ok(None)
+            }
+            None => Ok(None),
         }
-        result
+    }
+    /// Gives up a held lease on clean exit so a successor need not wait for expiry.
+    async fn release(&mut self) {
+        let Some(leader) = self.leader.take() else {
+            return;
+        };
+        let mut roster = leader.roster.clone();
+        roster.released = true;
+        if let Err(error) = roster.mutate(&self.config.invocation_id) {
+            tracing::warn!(%error, "could not release sampling roster lease");
+            return;
+        }
+        match self.replace(&roster, Some(&leader.version)).await {
+            Ok(Some(_)) => tracing::debug!("released sampling roster lease"),
+            Ok(None) => tracing::debug!("sampling roster lease was already superseded"),
+            Err(error) => tracing::warn!(%error, "could not release sampling roster lease"),
+        }
     }
     async fn election(&mut self) -> Result<(), StoreError> {
-        if !self.election_needed || !self.compatible {
+        if !self.election_needed {
             return Ok(());
         }
         self.election_needed = false;
@@ -709,25 +810,38 @@ impl Worker {
         let delay = u128::from(self.config.rank()) * span / SPACE;
         tokio::time::sleep(Duration::from_millis(delay as u64)).await;
         // One authoritative re-read after backoff, then one CAS. No immediate retry loop.
-        let observed = self.read_roster().await?;
-        if observed
-            .as_ref()
-            .is_some_and(|o| !expired(o, &self.config, self.store.as_ref(), self.clock.now()))
-        {
-            self.learn(observed, self.now()?);
-            return Ok(());
-        }
-        let mut roster = observed.as_ref().map_or_else(
-            || Roster::initial(&self.config, &self.config.invocation_id),
-            |o| o.roster.clone(),
-        );
+        let now = self.clock.now();
+        let (mut roster, previous) = match self.read_roster().await? {
+            Some(Decoded::Roster(o)) if !claimable(&o, &self.config, self.store.as_ref(), now) => {
+                self.learn(Some(Decoded::Roster(o)));
+                return Ok(());
+            }
+            Some(Decoded::Foreign(f))
+                if !lease_expired(f.modified_at, &self.config, self.store.as_ref(), now) =>
+            {
+                self.learn(Some(Decoded::Foreign(f)));
+                return Ok(());
+            }
+            Some(Decoded::Roster(o)) => {
+                let mut roster = o.roster;
+                roster.released = false;
+                (roster, Some(o.version))
+            }
+            // Another policy's lapsed roster carries nothing this policy can use.
+            Some(Decoded::Foreign(f)) => (
+                Roster::created(&self.config, &self.config.invocation_id, self.now()?),
+                Some(f.version),
+            ),
+            None => (
+                Roster::created(&self.config, &self.config.invocation_id, self.now()?),
+                None,
+            ),
+        };
         roster.mutate(&self.config.invocation_id)?;
-        let claimed = self
-            .replace(&roster, observed.as_ref().map(|o| &o.version))
-            .await?;
+        let claimed = self.replace(&roster, previous.as_ref()).await?;
         self.leader = claimed.clone();
         if let Some(claimed) = claimed {
-            self.learn(Some(claimed), self.now()?);
+            self.learn(Some(Decoded::Roster(claimed)));
             self.next_pass_ms = self.now()?;
         }
         Ok(())
@@ -740,12 +854,16 @@ impl Worker {
             return Ok(());
         };
         // A GET reconciles uncertain CAS and fences every publication on this same object.
-        let Some(current) = self.read_roster().await? else {
-            return Ok(());
+        let current = match self.read_roster().await? {
+            Some(Decoded::Roster(current)) => current,
+            other => {
+                self.learn(other);
+                return Ok(());
+            }
         };
         if current.version != previous.version || current.roster.holder != self.config.invocation_id
         {
-            self.learn(Some(current), self.now()?);
+            self.learn(Some(Decoded::Roster(current)));
             return Ok(());
         }
         let now = self.now()?;
@@ -762,7 +880,7 @@ impl Worker {
             return Ok(());
         };
         self.leader = Some(reserved.clone());
-        self.learn(Some(reserved.clone()), now);
+        self.learn(Some(Decoded::Roster(reserved.clone())));
         let Some(window) = assess else {
             return Ok(());
         };
@@ -800,7 +918,7 @@ impl Worker {
         let published = self.replace(&result, Some(&reserved.version)).await?;
         self.leader = published.clone();
         if let Some(published) = published {
-            self.learn(Some(published), finished);
+            self.learn(Some(Decoded::Roster(published)));
         }
         Ok(())
     }
@@ -813,13 +931,9 @@ impl Worker {
         let mut changes = self.cache.subscribe();
         loop {
             self.now()?;
-            if changes
-                .has_changed()
-                .map_err(|_| invalid("sampling control cache closed"))?
-            {
-                changes.borrow_and_update();
-                self.consume_cache();
-            }
+            changes.borrow_and_update();
+            // Lease expiry depends on time as well as on the cached roster.
+            self.consume_cache();
             if let Err(error) = self.election().await {
                 self.leader = None;
                 rate_limited!(Duration::from_secs(60), {
@@ -849,7 +963,16 @@ impl Worker {
             let next = if self.leader.is_some() {
                 self.next_pass_ms
             } else {
-                now.saturating_add(Timing::new(&self.config).poll)
+                let poll = now.saturating_add(Timing::new(&self.config).poll);
+                // Re-read another policy's roster as soon as its lease could lapse.
+                let foreign = self.cache.borrow().foreign.clone();
+                match foreign
+                    .and_then(|f| lease_deadline(f.modified_at, &self.config, self.store.as_ref()))
+                    .map(millis)
+                {
+                    Some(Ok(deadline)) => poll.min(deadline.saturating_add(1).max(now)),
+                    _ => poll,
+                }
             };
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_millis(next.saturating_sub(now).max(1))) => {},
@@ -878,7 +1001,7 @@ async fn replace(
     clock: &dyn Clock,
     roster: &Roster,
     previous: Option<&VersionToken>,
-) -> Result<Option<Observed>, StoreError> {
+) -> Result<Option<Decoded>, StoreError> {
     let key = format!("{}roster.json", config.pool_prefix());
     let condition = previous.map_or_else(WriteCondition::absent, |v| {
         WriteCondition::matching(v.clone())
@@ -896,11 +1019,11 @@ async fn replace(
     )
     .await
     {
-        Ok(PutOutcome::Stored { version }) => Ok(Some(Observed {
+        Ok(PutOutcome::Stored { version }) => Ok(Some(Decoded::Roster(Observed {
             roster: roster.clone(),
             version,
             modified_at: clock.now(),
-        })),
+        }))),
         Ok(PutOutcome::PreconditionFailed {}) => Ok(None),
         Err(error) => {
             if !matches!(
@@ -914,16 +1037,16 @@ async fn replace(
             });
             // Cancelled writes may still commit. One readback reconciles the exact fresh revision.
             match bounded(timeout, store.get(key)).await {
-                Ok(Some(object)) => {
-                    let observed = decode(object, config)?;
-                    if observed.roster.revision == roster.revision
-                        && observed.roster.holder == config.invocation_id
+                Ok(Some(object)) => match decode(object, config)? {
+                    Decoded::Roster(observed)
+                        if observed.roster.revision == roster.revision
+                            && observed.roster.holder == config.invocation_id =>
                     {
-                        Ok(Some(observed))
-                    } else {
-                        Ok(None)
+                        Ok(Some(Decoded::Roster(observed)))
                     }
-                }
+                    Decoded::Roster(_) => Ok(None),
+                    foreign @ Decoded::Foreign(_) => Ok(Some(foreign)),
+                },
                 Ok(None) => Err(error),
                 Err(read_error) => Err(read_error),
             }

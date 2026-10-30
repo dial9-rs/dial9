@@ -99,6 +99,7 @@ fn worker(config: &Config, store: Arc<MemoryStore>, enabled: bool) -> Worker {
         store.clone(),
         store,
         None,
+        None,
         watch::channel(enabled).0,
         false,
     )
@@ -454,6 +455,7 @@ async fn an_unusable_census_does_not_skip_the_profiler_channel_or_reset_source_a
         store.clone(),
         store.clone(),
         Some(observed.clone()),
+        None,
         watch::channel(false).0,
         true,
     )
@@ -515,11 +517,11 @@ async fn any_disabled_process_can_claim_a_successfully_observed_expired_lease() 
     publish(store.as_ref(), &policy, &roster, WriteCondition::absent()).await;
     let mut node = worker(&policy, store.clone(), false);
     let observed = node.read_roster().await.unwrap();
-    node.learn(observed, node.now().unwrap());
+    node.learn(observed);
     assert!(!node.election_needed);
     tokio::time::advance(Duration::from_secs(186)).await;
     let observed = node.read_roster().await.unwrap();
-    node.learn(observed, node.now().unwrap());
+    node.learn(observed);
     assert!(node.election_needed);
     node.election().await.unwrap();
     assert!(node.leader.is_some());
@@ -545,6 +547,8 @@ async fn uncertain_claim_reconciles_the_same_roster_revision_and_avoids_blind_re
             .unwrap(),
         &policy,
     )
+    .unwrap()
+    .roster()
     .unwrap();
     assert_eq!(persisted.roster.revision, observed.roster.revision);
 }
@@ -668,31 +672,140 @@ async fn trim_lead_reserves_slow_publication_and_uncertain_write_readback() {
     )
     .await
     .unwrap()
+    .unwrap()
+    .roster()
     .unwrap();
     assert_eq!(millis(published.modified_at).unwrap(), 641_998);
     assert_eq!(millis(store.now()).unwrap(), 644_997);
     assert!(activation - millis(store.now()).unwrap() > 75_000);
 }
 
+fn foreign_roster(policy: &Config) -> Roster {
+    let mut foreign = Roster::initial(policy, &nonce());
+    foreign.policy.poll_ms = 30_000;
+    foreign
+}
+
 #[tokio::test(start_paused = true)]
-async fn a_role_read_of_an_incompatible_policy_refuses_further_joining() {
+async fn a_foreign_roster_blocks_joining_until_its_lease_lapses_then_is_claimed() {
     let store = store_at(600_000);
     let policy = config_for(15, "incompatible-role");
-    let mut foreign = Roster::initial(&policy, &nonce());
-    foreign.policy.target = 16;
-    publish(store.as_ref(), &policy, &foreign, WriteCondition::absent()).await;
-    let node = worker(&policy, store, true);
-    let error = node.read_roster().await.err().unwrap();
-    assert!(matches!(error.kind(), StoreErrorKind::Unsupported {}));
-    assert!(!node.cache.borrow().compatible);
+    publish(
+        store.as_ref(),
+        &policy,
+        &foreign_roster(&policy),
+        WriteCondition::absent(),
+    )
+    .await;
+    let mut node = worker(&policy, store.clone(), true);
+    let read = node.read_roster().await.unwrap();
+    assert!(matches!(read, Some(Decoded::Foreign(_))));
+    node.learn(read);
+    assert!(!node.cache.borrow().compatible());
+    assert!(!node.election_needed, "a live foreign lease is respected");
     assert!(
         *node.signal.borrow(),
         "protocol refusal is separate from recorder state"
     );
+    tokio::time::advance(Duration::from_secs(186)).await;
+    let read = node.read_roster().await.unwrap();
+    node.learn(read);
+    assert!(node.election_needed);
+    node.election().await.unwrap();
+    assert!(node.leader.is_some());
+    assert!(node.cache.borrow().compatible());
+    let claimed = node.read_roster().await.unwrap().unwrap().roster().unwrap();
+    assert_eq!(claimed.roster.holder, policy.invocation_id);
+    assert!(
+        claimed.roster.epoch > 786_000,
+        "a recreated roster's epoch outranks any cached predecessor"
+    );
 }
 
 #[tokio::test(start_paused = true)]
-async fn uncertain_roster_publication_refuses_an_incompatible_superseding_readback() {
+async fn a_different_target_shares_the_roster_instead_of_conflicting() {
+    let store = store_at(600_000);
+    let old = config_for(15, "old-target");
+    let mut roster = Roster::initial(&old, &old.invocation_id);
+    roster.population = Some(Population {
+        window: 9,
+        estimate: 100.0,
+        computed_ms: 600_000,
+    });
+    publish(store.as_ref(), &old, &roster, WriteCondition::absent()).await;
+    let new = config_for(50, "new-target");
+    let prepared = prepare_using(new.clone(), store.clone(), Duration::from_secs(1), store).await;
+    assert!(matches!(
+        prepared.reason,
+        DecisionReason::Roster | DecisionReason::OutsideCutoff
+    ));
+    assert_eq!(
+        prepared.into_session().unwrap().startup_probability(),
+        0.5,
+        "each process admits itself with its own target"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cleanly_exiting_leader_releases_its_lease_for_immediate_takeover() {
+    let store = store_at(600_000);
+    let first = config_for(15, "first-leader");
+    let session = prepare_using(
+        first.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        store.clone(),
+    )
+    .await
+    .into_session()
+    .unwrap();
+    sleep_until(&store, 605_000).await;
+    session.shutdown(Duration::from_secs(9)).await;
+    let released = decode(
+        store
+            .get(format!("{}roster.json", first.pool_prefix()))
+            .await
+            .unwrap()
+            .unwrap(),
+        &first,
+    )
+    .unwrap()
+    .roster()
+    .unwrap();
+    assert!(released.roster.released);
+    assert_eq!(released.roster.holder, first.invocation_id);
+    let second = config_for(15, "second-leader");
+    let session = prepare_using(
+        second.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        store.clone(),
+    )
+    .await
+    .into_session()
+    .unwrap();
+    sleep_until(&store, 608_000).await;
+    let claimed = decode(
+        store
+            .get(format!("{}roster.json", second.pool_prefix()))
+            .await
+            .unwrap()
+            .unwrap(),
+        &second,
+    )
+    .unwrap()
+    .roster()
+    .unwrap();
+    assert_eq!(
+        claimed.roster.holder, second.invocation_id,
+        "takeover does not wait for the 186s lease"
+    );
+    assert!(!claimed.roster.released);
+    session.shutdown(Duration::from_secs(9)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn uncertain_roster_publication_learns_a_foreign_superseding_readback() {
     struct SupersedingStore {
         inner: MemoryStore,
         foreign: Bytes,
@@ -733,7 +846,7 @@ async fn uncertain_roster_publication_refuses_an_incompatible_superseding_readba
     let policy = config_for(15, "incompatible-readback");
     let own = Roster::initial(&policy, &policy.invocation_id);
     let mut foreign = own.clone();
-    foreign.policy.target = 16;
+    foreign.policy.poll_ms = 30_000;
     foreign.mutate(&nonce()).unwrap();
     let store = Arc::new(SupersedingStore {
         inner: MemoryStore::at(UNIX_EPOCH + Duration::from_secs(600)),
@@ -744,18 +857,18 @@ async fn uncertain_roster_publication_refuses_an_incompatible_superseding_readba
         store.clone(),
         store,
         None,
+        None,
         watch::channel(true).0,
         true,
     )
     .unwrap();
-    let error = node.replace(&own, None).await.err().unwrap();
-    assert!(matches!(error.kind(), StoreErrorKind::Unsupported {}));
-    assert!(!node.cache.borrow().compatible);
+    assert!(node.replace(&own, None).await.unwrap().is_none());
+    assert!(!node.cache.borrow().compatible());
     assert!(*node.signal.borrow());
 }
 
 #[test]
-fn delayed_cache_responses_cannot_restore_old_controls_or_known_incompatibility() {
+fn delayed_cache_responses_order_rosters_and_foreign_policies_by_write_time() {
     let policy = config_for(15, "cache");
     let mut old = Roster::initial(&policy, &nonce());
     old.epoch = 10;
@@ -774,20 +887,42 @@ fn delayed_cache_responses_cannot_restore_old_controls_or_known_incompatibility(
     });
     let (cache, _) = watch::channel(Cache {
         observed: Some(older.clone()),
-        compatible: true,
+        foreign: None,
     });
-    publish_cache(&cache, Some(new.clone()), true);
-    publish_cache(&cache, Some(older), true);
+    publish_cache(&cache, Some(Decoded::Roster(new.clone())));
+    publish_cache(&cache, Some(Decoded::Roster(older.clone())));
     assert_eq!(
         cache.borrow().observed.as_ref().unwrap().version,
         new.version
     );
-    publish_cache(&cache, None, false);
-    // Even a delayed response for the same accepted epoch/revision must not undo
-    // a successful incompatible response that completed before it.
-    publish_cache(&cache, Some(new), true);
-    assert!(!cache.borrow().compatible);
-    assert_eq!(cache.borrow().observed.as_ref().unwrap().roster.epoch, 11);
+    let foreign = Foreign {
+        version: VersionToken::new("foreign"),
+        modified_at: UNIX_EPOCH + Duration::from_secs(900),
+    };
+    publish_cache(&cache, Some(Decoded::Foreign(foreign.clone())));
+    assert!(!cache.borrow().compatible());
+    // A delayed response written before the foreign roster cannot undo it.
+    publish_cache(&cache, Some(Decoded::Roster(new)));
+    publish_cache(&cache, None);
+    assert!(!cache.borrow().compatible());
+    let mut successor = Observed {
+        roster: Roster::created(&policy, &nonce(), 1_100_000),
+        version: VersionToken::new("successor"),
+        modified_at: UNIX_EPOCH + Duration::from_secs(1100),
+    };
+    successor.roster.mutate(&policy.invocation_id).unwrap();
+    publish_cache(&cache, Some(Decoded::Roster(successor.clone())));
+    assert!(cache.borrow().compatible());
+    publish_cache(&cache, Some(Decoded::Foreign(foreign)));
+    assert!(
+        cache.borrow().compatible(),
+        "a stale foreign read is ignored"
+    );
+    publish_cache(&cache, Some(Decoded::Roster(older)));
+    assert_eq!(
+        cache.borrow().observed.as_ref().unwrap().version,
+        successor.version
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1070,6 +1205,8 @@ async fn common_trim_boundary_is_independent_of_a_slow_many_page_leader_round(
             .unwrap(),
         &policy,
     )
+    .unwrap()
+    .roster()
     .unwrap();
     roster = observed.roster;
     roster.mutate(&policy.invocation_id).unwrap();
@@ -1366,6 +1503,7 @@ async fn slow_many_page_round_expires_with_a_reservation_and_no_false_population
         store.clone(),
         store.clone(),
         Some(observed.clone()),
+        None,
         watch::channel(false).0,
         true,
     )
@@ -1384,12 +1522,14 @@ async fn slow_many_page_round_expires_with_a_reservation_and_no_false_population
         &policy,
     )
     .unwrap()
+    .roster()
+    .unwrap()
     .roster;
     assert_eq!(roster.last_window, Some(9));
     assert!(roster.population.is_none());
     let before = store.lists.load(Ordering::SeqCst);
     let observed = node.read_roster().await.unwrap();
-    node.learn(observed, node.now().unwrap());
+    node.learn(observed);
     assert!(
         node.leader.is_some(),
         "authoritative control reads resume after round cancellation"
@@ -1428,7 +1568,7 @@ async fn a_window_dimension_cannot_contaminate_another_pools_observation(#[case]
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_previous_wire_schema_is_refused_before_deserializing_its_different_body() {
+async fn a_previous_wire_schema_is_not_deserialized_and_is_claimed_after_its_lease() {
     let store = store_at(600_000);
     let policy = config_for(15, "schema-upgrade");
     let body = serde_json::json!({
@@ -1449,22 +1589,55 @@ async fn a_previous_wire_schema_is_refused_before_deserializing_its_different_bo
         )
         .await
         .unwrap();
-    let prepared = prepare_using(policy, store.clone(), Duration::from_secs(1), store).await;
-    assert_eq!(
-        prepared.reason,
-        DecisionReason::IncompatiblePolicy,
-        "known previous schema should not run uncoordinated report maintenance"
+    let prepared = prepare_using(
+        policy.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        store.clone(),
+    )
+    .await;
+    assert_eq!(prepared.reason, DecisionReason::IncompatiblePolicy);
+    assert_foreign_roster_is_claimed_after_its_lease(&policy, &store, prepared).await;
+}
+
+/// No reports while the foreign lease is live; the roster is ours once it lapses.
+async fn assert_foreign_roster_is_claimed_after_its_lease(
+    policy: &Config,
+    store: &Arc<MemoryStore>,
+    prepared: PreparedSampling,
+) {
+    let session = prepared.into_session().unwrap();
+    let before = store.operation_log().len();
+    sleep_until(store, 780_000).await;
+    assert!(
+        store.operation_log()[before..]
+            .iter()
+            .all(|(_, operation)| !matches!(operation, StoreOperation::Put { .. })),
+        "no uncoordinated writes under a live foreign lease"
     );
-    assert!(prepared.session.is_none());
+    sleep_until(store, 1_000_000).await;
+    let claimed = decode(
+        store
+            .get(format!("{}roster.json", policy.pool_prefix()))
+            .await
+            .unwrap()
+            .unwrap(),
+        policy,
+    )
+    .unwrap()
+    .roster()
+    .unwrap();
+    assert_eq!(claimed.roster.holder, policy.invocation_id);
+    session.shutdown(Duration::from_secs(9)).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_unknown_wire_schema_is_refused_without_understanding_its_body() {
+async fn an_unknown_wire_schema_is_not_understood_and_is_claimed_after_its_lease() {
     let store = store_at(600_000);
     let policy = config_for(15, "future-schema");
     let body = serde_json::json!({
-        "policy": {"schema":6},
-        "future-format": ["intentionally not a schema5 roster"]
+        "policy": {"schema":7},
+        "future-format": ["intentionally not a schema6 roster"]
     });
     store
         .put(
@@ -1475,9 +1648,15 @@ async fn an_unknown_wire_schema_is_refused_without_understanding_its_body() {
         )
         .await
         .unwrap();
-    let prepared = prepare_using(policy, store.clone(), Duration::from_secs(1), store).await;
+    let prepared = prepare_using(
+        policy.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        store.clone(),
+    )
+    .await;
     assert_eq!(prepared.reason, DecisionReason::IncompatiblePolicy);
-    assert!(prepared.session.is_none());
+    assert_foreign_roster_is_claimed_after_its_lease(&policy, &store, prepared).await;
 }
 
 #[rstest::rstest]
