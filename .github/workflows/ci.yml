@@ -587,10 +587,34 @@ jobs:
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
 
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_decode]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # cargo-fuzz needs nightly for the sanitizer flags.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@184183c2401be73c3bf42c2e61268aa5855379c1 # v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: dial9-trace-format/fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run ${{ matrix.target }} for 60s
+        working-directory: dial9-trace-format
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- -max_total_time=60
+
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [release-published, fmt, clippy, build, min-versions, android-aarch64-build, feature-check, no-tokio-unstable, check-docs, trace-integrity, ui, asan, ecs-sim, frame-pointer-detection, shuttle, package, doctests]
+    needs: [release-published, fmt, clippy, build, min-versions, android-aarch64-build, feature-check, no-tokio-unstable, check-docs, trace-integrity, ui, asan, ecs-sim, frame-pointer-detection, shuttle, package, doctests, fuzz]
     if: always()
     steps:
       - run: |
