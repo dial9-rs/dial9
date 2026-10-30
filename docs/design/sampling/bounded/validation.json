@@ -2,8 +2,8 @@
   "evidence_base": "a45f1b693fcdd8711e400e40caef5aa65e4eeab0",
   "implementation_base": "22cc577986b530fd05b27eac8c2751130c533aca",
   "reviewed_initial_wire_controller_milestone": "59806840",
-  "final_implementation_source": null,
-  "final_implementation_source_status": "Pending root integration; no final Rust refinement or test result is claimed by these resources.",
+  "final_implementation_source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+  "final_implementation_source_status": "Integrated source inspected. Focused sampler and independent graceful-exit checks passed; full workspace stress has two unresolved telemetry gzip failures and is not claimed green. No Rust/network refinement proof is claimed.",
   "scope": "Separate mathematical/finite-model/cohort reference evidence for the stated contract. No Rust, hash implementation, S3 request-latency/delivery, general election liveness, or instantaneous-population proof.",
   "runtime": {
     "python": "3.12.12",
@@ -51,7 +51,17 @@
         "missing first 1/q",
         "duplicate first 1/q",
         "replace actual weights with exact current population / profilers"
-      ]
+      ],
+      "rare_hot_workload_case": {
+        "processes": 100000,
+        "target_profilers": 15,
+        "hot_cpu_fraction": "9/10",
+        "hot_process_miss_probability": "19997/20000",
+        "exact_mean_conservation": true,
+        "exact_variance": "5399082683299920",
+        "independent_reviewer_artifact_comparison": "pass",
+        "qualification": "Population/count accuracy supplies no universal CPU relative-error guarantee."
+      }
     },
     {
       "command": "python3 docs/design/sampling/bounded/check_report_lifetime.py",
@@ -67,17 +77,17 @@
     }
   ],
   "remaining_validation": [
-    "Compare stated contract, request accounting, and normal-exit drain reference to final integrated Rust source.",
-    "Exercise immutable per-run opportunity/cutoff through cache changes and long suspension without birth/resume catch-up.",
-    "Replay backend short-page/native-retry and uncertain reservation/takeover request ledgers; verify population source age is not refreshed.",
-    "Namespace isolation and incompatible-schema classification are backed by direct Rust regressions, not by the abstract finite models."
+    "The finite models and reference simulators are not a formal refinement of the committed Rust, SHA-derived random streams, backend, or scheduler.",
+    "Long suspension, crashes, failed/unobserved delivery and server commits after client deadlines remain outside healthy progress/delivery guarantees.",
+    "Namespace isolation, schema classification, native retry caps, and async cancellation are covered by separate direct Rust tests, not by abstract model proofs.",
+    "Census Gaussian reference bands apply to the settled population experiment only; CPU workload, source-age lag, clock alignment and missing support require their stated qualifications."
   ],
   "resource_sha256": {
     "BoundedCensus.tla": "ba20b2dc728a9f60e641bec5cec3488907264e59897ebe935f598a6e17e49bae",
     "DoubleTrim.log": "586ce44d4756e2167bfb5cc24077263a938e22080cf24df5d8f75f2b64df83ae",
     "LateEnable.log": "028c74789e108b18a526176605ecd8d214eb62efbf83e07c5281d90cf93c8f67",
     "QuietProgress.tla": "fa409d204eda30d84c79ff0c4daecaf37129475259faaa32e9ed5fd228dd3fcf",
-    "README.md": "c5afc92036eaeeebb7ba0b4e7f6e2224e7d91075ffd3bb634a3073b6b7f87f8f",
+    "README.md": "e9f8702151c102ff2bb8087c55c32d90519a837cd7915940a2f25e708484f2bb",
     "RerollCurrent.log": "44c3fac7e0cf8c354db923ba81a4a1effd389d9bfa00fc95717cec081b5e1a69",
     "ReservationFreshens.log": "2a965ce6bae490bff9f79f5f106bb37cc74a4aeabf3455d48d1038c0e3fbdd87",
     "ShortPageExhaustion.log": "08b0c00be928030fec6da0b86cc1ace832ecf5091eea911d8c91c9c12666926a",
@@ -90,14 +100,87 @@
     "progress-RedrawEachInterval.log": "7a66eb7e69668b184d504cd9f4e74552e5cad016f854c53c9944ab1c1fc9cfdf",
     "progress-ReporterOnlyReads.log": "8fd8dde94716d2044446ce36e50ccf208bb854e1268c9de9744bd05a89a62c93",
     "progress-safe.log": "7a0f299f672df0e927ff1a148a0501254a4da27602b496cdce11efaea301473f",
-    "proof.md": "8dc4aa4e7d879ace4c32816f8c647fcb255196c5a16d2b23c59a04f396f2e320",
+    "proof.md": "a8dd80a41505fc71d10def65d5d15039e849369a349a647f1ec0511e6c285dbb",
     "safe.log": "88911873ee16d0a720ab9e34847d6fa96fa564452dab26de14183ac90679175a",
     "simulate.py": "2a98053fe1e85772058de77a24ac6a89ce3d27aec92a49002f1ccadbfc5595f6",
     "simulation-results.json": "6361635f3265dc65a8d1dea102936a21d8660a86b9b0c58958749645373cacd3",
     "statistical-results.json": "0dc143777a1132f78480c6b2d0334452babe042e9c77d994695992ea6ba7ef75",
     "check_report_lifetime.py": "a0dc91f415438e1039105496f29fc74a4380ce9e88ea310f230f54a6d71afafc",
-    "check_weight_lineage.py": "674016f3438b5063977e1eeec1d5a61af9cc024e2f5390d077a482c0bcc0c16d",
+    "check_weight_lineage.py": "a2a5d5c18a59c51d36a0bfa2a1ca20e5b13a3b3d686aaf2d167957333a18bbe7",
     "report-lifetime-results.json": "38e96e8969e732e41410bf368e5b252923248c43a75cb6d1df4bdcf39122f09d",
-    "weight-lineage-results.json": "42c7ef47e056a8aa493016d415056e59c1781514d1e85701f7f861dbae3cdc52"
-  }
+    "weight-lineage-results.json": "42c7ef47e056a8aa493016d415056e59c1781514d1e85701f7f861dbae3cdc52",
+    "workload-skew-results.json": "a5c3f282011e27f12fb2a226a050e8eb35d6a82889b25cda85fea3ca64971375",
+    "workspace-stress-failure.log": "0e3f51ca63fda409d158ef2ff406a379ec1f888acaa33e31a61d0170a4d67a60"
+  },
+  "implementation_source_files_sha256": {
+    "dial9-sampling/src/protocol/mod.rs": "4140f58d357c6ee397583254d3643aebf1e26083f74ccb654632c315e6a906f1",
+    "dial9-sampling/src/protocol/engine.rs": "436f26e30250108989bff4ac11fdf602fe194c19c09e2a3ad0bbd145f3bcdd2b",
+    "dial9-sampling/src/protocol/observation.rs": "9bbd9d6cd6ac567845abde861636f75c94bd22f59a4bfda539ac7056ba6f2aa1",
+    "dial9-sampling/src/protocol/census.rs": "1a6ff53ce7c60fa8f08b9b19ba9914fbda89949547a0987cb40ac66a5b11af43",
+    "dial9-sampling/src/trace_weights.rs": "13b711169fe9329aa11a1cd6a2e0e97bfbcfdc73f24c162d2ccba6d00fdce78a",
+    "dial9-sampling/src/protocol/tests.rs": "52187fe6272b84d9c47bc60728fabdb1712f47f812111aeb49202ff305313cdc"
+  },
+  "implementation_checks": [
+    {
+      "kind": "Committed-source contract inspection",
+      "source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+      "checked_rules": [
+        "bottom-k boundary/cutoff estimator and strict zero-boundary rejection",
+        "sorted canonical immutable keys with reserved window namespace",
+        "schema discriminator checked before body decoding",
+        "shared nine-second cleanup budget, stop control polls, drain captured jobs, then abort and join",
+        "scalar Source reports evaluated actual expansion weight; no history reconstruction"
+      ],
+      "qualification": "Manual comparison plus targeted implementation regressions; not formal refinement."
+    },
+    {
+      "kind": "Independent paused graceful-exit regression rerun",
+      "source": "9c225b54",
+      "integrated_equivalent_lifecycle_patch": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+      "result": "4/4 passed",
+      "cases": [
+        "graceful captured-job drain, two latency paths",
+        "forced cleanup abort/join, two pending request paths"
+      ],
+      "qualification": "Independent graceful-exit source is equivalent to the integrated lifecycle patch; the integrated workspace receipt is separate."
+    },
+    {
+      "kind": "Sampler portion of integrated all-feature workspace stress",
+      "source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+      "result": "153/153 passed",
+      "receipt": "All 153 sampler PASS records extracted from the authoritative integrated-source workspace stress log; the overall workspace command failed two telemetry tests.",
+      "sampler_pass_record_count": 153,
+      "sampler_pass_records_sha256": "213f24b8c7bd7bd54c9f3700f042e87d3eba09c2a6ebd771dc6d3ec5f4eb65ae",
+      "overall_command": "cargo nextest run --all-features --stress-duration 20s --no-fail-fast"
+    },
+    {
+      "kind": "Integrated workspace verification",
+      "source": "0412753a631cb58933b6756510ee2e0a2bd66cba",
+      "checks": [
+        {
+          "command": "cargo fmt --all --check",
+          "exit_code": 0
+        },
+        {
+          "command": "cargo clippy --all-targets --all-features",
+          "exit_code": 0
+        },
+        {
+          "command": "cargo nextest run --all-features --stress-duration 20s --no-fail-fast",
+          "exit_code": 100,
+          "passed": 1768,
+          "failed": 2,
+          "skipped": 4,
+          "failed_tests": [
+            "dial9-tokio-telemetry::writeback_no_trailing_data graceful_shutdown_produces_clean_gzip_segments",
+            "dial9-tokio-telemetry::writeback_no_leaked_gz eviction_cleans_up_processed_gz_segments"
+          ],
+          "failure_excerpt": "workspace-stress-failure.log",
+          "full_log_sha256": "5917de33e0a48148e29998ff41753805100cca92d52da667307cd307d7f83239",
+          "status": "Unresolved; coordinator is comparing exact current and baseline revisions. No claim that the failures are pre-existing or that the full suite passed."
+        }
+      ],
+      "qualification": "Implementation tests are distinct from reference-model evidence; subsequent verification receipts must preserve this original failed result."
+    }
+  ]
 }

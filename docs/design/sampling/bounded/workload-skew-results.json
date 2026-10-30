@@ -1,0 +1,17 @@
+{
+  "population": 100000,
+  "target": 15,
+  "actual_p": "3/20000",
+  "ordinary_cpu_work": 99999,
+  "single_hot_unit_cpu_work": 899991,
+  "true_cpu_work": 999990,
+  "hot_share": "9/10",
+  "probability_hot_unit_missing": "19997/20000",
+  "probability_hot_unit_missing_percent": 99.985,
+  "expected_weighted_cpu_work": "999990",
+  "conditional_mean_weighted_cpu_ratio_if_hot_missing": "1/10",
+  "conditional_mean_weighted_cpu_ratio_if_hot_selected": "60001/10",
+  "exact_weighted_cpu_variance": "5399082683299920",
+  "unconditional_relative_cpu_sd": 73.47918526068,
+  "scope": "Independent Bernoulli startup, positive support, exogenous work and complete trace delivery. Exact count/census accuracy does not provide a universal CPU-workload relative-error guarantee; this distribution is a highly non-Gaussian mixture."
+}

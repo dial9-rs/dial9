@@ -1,0 +1,18 @@
+Selected verbatim excerpts from the integrated-source workspace stress run.
+Source: 0412753a631cb58933b6756510ee2e0a2bd66cba
+Command: cargo nextest run --all-features --stress-duration 20s --no-fail-fast
+Exit: 100; baseline diagnosis pending at evidence finalization.
+
+    thread 'graceful_shutdown_produces_clean_gzip_segments' (47374) panicked at dial9-tokio-telemetry/tests/writeback_no_trailing_data.rs:86:5:
+    expected at least one gzip-compressed segment
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+    thread 'eviction_cleans_up_processed_gz_segments' (47388) panicked at dial9-tokio-telemetry/tests/writeback_no_leaked_gz.rs:85:5:
+    expected no unprocessed .bin files after graceful shutdown, found: ["/tmp/.tmpu3JUV9/trace.3.bin"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+ Stress test iteration 1 (00:00:00/00:00:20 elapsed so far, 00:00:20 remaining)
+ Stress test [  42.644s] iteration 1: 1770 tests run: 1768 passed, 2 failed, 4 skipped
+     Summary [  42.644s] 1 stress run iteration: 0 passed, 1 failed

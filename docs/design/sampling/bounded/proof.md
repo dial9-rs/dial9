@@ -140,7 +140,14 @@ changing work, and a source-born exemption. Its three negative controls remove
 or duplicate the first `1/q`, or replace actual probabilities with an exactly
 correct fleet population divided by the current profiler count. All violate
 work conservation; an accurate population estimate cannot replace the
-probability lineage.
+probability lineage. Unbiasedness also provides no universal CPU relative-error
+bound. The exact rare-hot-process fixture places 90% of work in one of 100,000
+processes, each admitted with `p=15/100000`. With probability 99.985% the hot
+process is absent, and conditional expected expansion then equals only 10%
+of fleet CPU. Conditional on its presence, expected expansion is about 6,000
+times truth. The unconditional mean is correct; the mixture is highly
+non-Gaussian. Census Gaussian reference bands cannot be reused for such
+workload distributions.
 An eligible run applies a token at most once. A missed activation is skipped,
 not applied retrospectively; such a run retains its actual untrimmed weight.
 There is no replacement by `N_hat / observed_profiler_count`.

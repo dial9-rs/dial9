@@ -5,9 +5,10 @@ result file, or new dependency belongs in implementation PR #1093. The previous
 selected-only and reporting-epoch resources remain unchanged and historical.
 
 Implementation base: `22cc577986b530fd05b27eac8c2751130c533aca`.
-The initial wire/controller milestone reviewed here is `59806840`; the final
-implementation source is explicitly pending in `validation.json`. These
-resources validate the stated model contract, not arbitrary later code.
+The initial wire/controller milestone was `59806840`; the integrated source
+reviewed here is `0412753a631cb58933b6756510ee2e0a2bd66cba`. Its Rust test
+receipts are recorded separately in `validation.json`. These resources validate
+the stated contract; they are not a refinement proof of that implementation.
 
 ## Contract exercised
 
@@ -35,8 +36,8 @@ resources validate the stated model contract, not arbitrary later code.
   and end+22-second closure under the default 5-second skew setting.
   Normal application exit stops new observations and control work, then drains
   already captured immutable reports within one shared 9-second cleanup budget.
-  This reference rule is pending final Rust integration; it does not guarantee
-  delivery after crashes, backend failure, or a late server commit.
+  The final source and paused regressions implement this rule; it does not
+  guarantee delivery after crashes, backend failure, or a late server commit.
 - Profiler PUT instants remain uniform and independent of fixed control GETs.
   A trim reserves the first UTC boundary strictly after the pre-publication
   time+81s: 75s for propagation (`60s active cadence + 2*5s skew + 3s GET
@@ -119,6 +120,15 @@ correct current population divided by profiler count gives `185/12`.
 These are expectation identities, not a claim that one small sampled
 flamegraph closely matches its fleet.
 
+[A rare hot process](workload-skew-results.json) demonstrates why the census
+Gaussian band cannot bound flamegraph CPU error. With 100,000 processes and
+target 15, a single process responsible for 90% of CPU is missed with probability
+99.985%. Conditional on missing it, expected weighted CPU is only 10% of truth;
+conditional on selecting it, expected expansion is about 6,000 times truth.
+The unconditional expectation remains correct, but the distribution is a
+highly non-Gaussian mixture. Without workload assumptions, correct process
+sampling provides no useful universal relative CPU-error guarantee.
+
 [Report lifetime checks](report-lifetime-results.json) expose delivery bias
 separately from sampling variance. For a 60-second lifetime and healthy
 2.5-second operations, immediate exit cancellation loses the last `5/60` of
@@ -163,17 +173,19 @@ legitimate sampling error:
 | --- | --- | --- |
 | Namespace construction cannot place another channel, pool, or caller dimension inside a source-window prefix. | Direct Rust namespace regression; the models treat keys as abstract identities. | Give a caller dimension the reserved name `window`; assert prefix isolation through escaped sorted keys. |
 | Known incompatible wire schema prevents participation even if its body cannot deserialize as the current format. | Direct Rust previous/future-schema regressions; no wire-format model proof. | Treat schema 4 as transport failure and incorrectly enter the uncoordinated fallback. |
-| A report describes presence and recording at its captured instant; normal exit cannot erase a bounded successful captured job. | Exact and seeded report-lifetime reference. | Cancel immediately, or re-evaluate recording after shutdown; keep crash/failure cases separate. |
+| A report describes presence and recording at its captured instant; normal exit cannot erase a bounded successful captured job. | Exact and seeded report-lifetime reference; paused Rust drain/cancellation regressions. | Cancel immediately, or re-evaluate recording after shutdown; keep crash/failure cases separate. |
 | Actual `1/p × product(1/q)` conserves each supported process's exogenous work in expectation. | Exact adaptive lineage oracle, including source-born exemptions. | Missing or duplicate `1/q`; substitute population/profiler-count; use unequal CPU and lifetimes to expose cancellation. |
+| Accuracy claims distinguish census/count variance from workload variance and systematic delivery loss. | Exact rare-hot-process mixture and report-lifetime references. | Infer CPU bounds from the Gaussian census band, or classify missing reports as symmetric sampling noise. |
 | Current rank, cutoff, and observation instant remain frozen despite roster refresh, elections, retry, birth, or resume. | Finite reroll control and lifetime reference; cohort step assertions. | Trace per-run opportunity/cutoff through delayed cache arrivals and suspension without catch-up. |
 | Reservation, result publication, and population source age remain distinct through takeover and uncertainty. | Finite fenced-CAS/reservation controls; cohort step assertions. | Replay an uncertain reservation followed by takeover; reject a second LIST or freshened old observation. |
 | Every source obeys the LIST/key cap; incomplete or invalid prefixes never become a numerical population. | Finite cap/short-page controls and cohort step assertions. | Replay sorted short pages, repeated cursors/identities, malformed keys and exhausted native retry attempts. |
 | Quiet scheduled opportunities remain at most 300 seconds apart under healthy timing. | Exact nested-phase checks and fair finite quiet-progress model. | Independent phase redraw or active/quiet phases; keep GET failures and scheduler suspension outside the healthy bound. |
 
-Direct Rust/backend correspondence, exact request ledgers under uncertain
-remote completion, and long suspension still need review against the final
-implementation revision. A default-disabled cohort has no profiling support;
-conservation must report that limitation rather than invent a weight.
+The final implementation has been inspected and tested separately. A formal
+Rust/backend refinement, exact request ledgers under uncertain remote
+completion, and long suspension remain outside these reference resources.
+A default-disabled cohort has no profiling support; conservation must report
+that limitation rather than invent a weight.
 
 ## Reproduce
 
@@ -190,4 +202,4 @@ python3 docs/design/sampling/bounded/check_models.py /path/to/tla2tools.jar
 
 Results are seeded independent reference experiments. Actual async timing,
 consumer metadata, cancellation, and storage behavior require separate Rust
-tests and review against the final implementation revision.
+tests and review; the implementation receipts record those checks separately.

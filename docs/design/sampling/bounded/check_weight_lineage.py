@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from fractions import Fraction as F
 from itertools import product
 import json
+import math
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -123,6 +124,40 @@ def observe(states, now):
                 exact_per_unit_actual_cpu_work={u.name: str(v) for u, v in zip(UNITS, per_unit)})
 
 
+def workload_skew():
+    """Exact Bernoulli moments when one rare process owns most CPU work."""
+    population, target = 100_000, 15
+    p = F(target, population)
+    ordinary_cpu = population - 1
+    hot_cpu = 9 * ordinary_cpu
+    truth = ordinary_cpu + hot_cpu
+    missing = F(ordinary_cpu)
+    selected = ordinary_cpu + hot_cpu / p
+    expected = (1 - p) * missing + p * selected
+    variance = (1 - p) / p * (ordinary_cpu + hot_cpu ** 2)
+    assert expected == truth
+    assert hot_cpu / F(truth) == F(9, 10)
+    assert 1 - p > F(999, 1000)
+    assert missing / truth == F(1, 10)
+    return {
+        "population": population,
+        "target": target,
+        "actual_p": str(p),
+        "ordinary_cpu_work": ordinary_cpu,
+        "single_hot_unit_cpu_work": hot_cpu,
+        "true_cpu_work": truth,
+        "hot_share": str(F(hot_cpu, truth)),
+        "probability_hot_unit_missing": str(1 - p),
+        "probability_hot_unit_missing_percent": float(100 * (1 - p)),
+        "expected_weighted_cpu_work": str(expected),
+        "conditional_mean_weighted_cpu_ratio_if_hot_missing": str(missing / truth),
+        "conditional_mean_weighted_cpu_ratio_if_hot_selected": str(selected / truth),
+        "exact_weighted_cpu_variance": str(variance),
+        "unconditional_relative_cpu_sd": math.sqrt(float(variance)) / truth,
+        "scope": "Independent Bernoulli startup, positive support, exogenous work and complete trace delivery. Exact count/census accuracy does not provide a universal CPU-workload relative-error guarantee; this distribution is a highly non-Gaussian mixture.",
+    }
+
+
 def main():
     states = list(startup())
     rows = [observe(states, 110)]
@@ -142,8 +177,10 @@ def main():
                                   dict(effective_second=240, source_window=2)],
                   branch_probability_mass=str(sum((s.probability for s in states), F(0))),
                   final_branch_count=len(states), snapshots=rows)
+    skew = workload_skew()
     (HERE / "weight-lineage-results.json").write_text(json.dumps(result, indent=2) + "\n")
-    print(json.dumps(result, indent=2))
+    (HERE / "workload-skew-results.json").write_text(json.dumps(skew, indent=2) + "\n")
+    print(json.dumps({"weight_lineage": result, "workload_skew": skew}, indent=2))
 
 
 if __name__ == '__main__':
