@@ -967,8 +967,13 @@ async fn a_fast_leaders_promoted_control_waits_for_the_local_future_boundary(
     session.shutdown(Duration::from_secs(1)).await;
 }
 
+#[rstest::rstest]
+#[case(Duration::ZERO)]
+#[case(Duration::from_millis(200))]
 #[tokio::test(start_paused = true)]
-async fn forced_shutdown_joins_pending_report_and_controller_requests() {
+async fn forced_shutdown_joins_pending_report_and_controller_requests(
+    #[case] cleanup_timeout: Duration,
+) {
     let inner = store_at(600_000);
     let policy = config_for(15, "overlap-48");
     let historical = census::report_key(&policy, "census", 9, 1, &Cutoff(None));
@@ -1009,7 +1014,9 @@ async fn forced_shutdown_joins_pending_report_and_controller_requests() {
     .await
     .unwrap();
     assert!(store.active.load(Ordering::SeqCst) >= 2);
-    session.shutdown(Duration::ZERO).await;
+    let shutdown_start = Instant::now();
+    session.shutdown(cleanup_timeout).await;
+    assert_eq!(shutdown_start.elapsed(), cleanup_timeout);
     assert_eq!(
         store.active.load(Ordering::SeqCst),
         0,
@@ -1471,6 +1478,71 @@ async fn an_unknown_wire_schema_is_refused_without_understanding_its_body() {
     let prepared = prepare_using(policy, store.clone(), Duration::from_secs(1), store).await;
     assert_eq!(prepared.reason, DecisionReason::IncompatiblePolicy);
     assert!(prepared.session.is_none());
+}
+
+#[rstest::rstest]
+#[case(Duration::from_millis(2500), true, Duration::from_millis(4999))]
+#[case(Duration::from_secs(30), false, Duration::from_millis(8999))]
+#[tokio::test(start_paused = true)]
+async fn graceful_shutdown_drains_captured_observations_within_one_shared_deadline(
+    #[case] latency: Duration,
+    #[case] delivered: bool,
+    #[case] elapsed: Duration,
+) {
+    let inner = store_at(600_000);
+    let policy = config_for(15, "overlap-48");
+    let (puts, _events) = tokio::sync::mpsc::unbounded_channel();
+    let store = Arc::new(NotifyingStore {
+        inner: inner.clone(),
+        puts,
+        active: AtomicUsize::new(0),
+    });
+    let session = prepare_using(
+        policy.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        inner.clone(),
+    )
+    .await
+    .into_session()
+    .unwrap();
+    let recording = session.recording_changes();
+    let weights = session.weights().unwrap();
+    inner.set_latency(latency);
+    let instant =
+        600_000 + (u128::from(policy.draw("census-instant", "10")) * 60_000 / SPACE) as u64;
+    let key = census::report_key(
+        &policy,
+        "census",
+        10,
+        policy.draw("census-rank", "10"),
+        &Cutoff(None),
+    );
+    sleep_until(&inner, instant + 1).await;
+    // The due observation was captured while alive; its control GET is pending.
+    assert!(inner.operation_log().iter().any(|(at, operation)| {
+        matches!(operation, StoreOperation::Get(_)) && millis(*at).unwrap() == instant
+    }));
+    assert!(!inner.objects().contains_key(&key));
+    let shutdown_start = Instant::now();
+    let shutdown = tokio::spawn(session.shutdown(super::super::CLEANUP_TIMEOUT));
+    tokio::task::yield_now().await;
+    assert!(!*recording.borrow(), "recording continued during cleanup");
+    assert_eq!(metadata_weight(&weights), "0");
+    shutdown.await.unwrap();
+    assert_eq!(inner.objects().contains_key(&key), delivered);
+    assert_eq!(shutdown_start.elapsed(), elapsed);
+    assert_eq!(store.active.load(Ordering::SeqCst), 0);
+    if delivered {
+        assert!(inner.objects()[&key].body().is_empty());
+    }
+    // The next profiler opportunity occurs during cleanup, after application exit.
+    assert!(!inner.operation_log().iter().any(|(_, operation)| {
+        matches!(operation, StoreOperation::Put { key, .. } if key.starts_with(&policy.report_prefix("profilers", 10)))
+    }));
+    let operations = inner.operation_count();
+    tokio::time::advance(Duration::from_secs(120)).await;
+    assert_eq!(inner.operation_count(), operations);
 }
 
 #[rstest::rstest]

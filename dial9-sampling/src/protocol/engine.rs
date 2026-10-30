@@ -516,11 +516,11 @@ pub(crate) async fn prepare_using(
                 Ok(Err(error)) | Err(error) => tracing::error!(%error, "sampling observation driver stopped"),
             } },
         }
-        driver.shutdown().await;
         if let Some(weights) = terminal_weights {
             weights.stop();
         }
         terminal_signal.send_replace(false);
+        driver.shutdown().await;
         // Immutable historical reports expire through storage lifecycle policy.
     });
     PreparedSampling {

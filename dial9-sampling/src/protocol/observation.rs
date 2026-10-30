@@ -365,11 +365,15 @@ impl ObservationDriver {
         }
     }
     pub(super) async fn shutdown(&mut self) {
-        self.jobs.abort_all();
-        while let Some(result) = self.jobs.join_next().await {
-            if let Err(error) = result
-                && error.is_panic()
-            {
+        // Stop control polling immediately; captured live observations may finish
+        // within the session's shared cleanup deadline before forced cancellation.
+        for (_, handle, poll) in self.in_flight.values() {
+            if *poll {
+                handle.abort();
+            }
+        }
+        while let Some(result) = self.jobs.join_next_with_id().await {
+            if let Err(error) = self.completed(result) {
                 tracing::error!(%error, "sampling report panicked during shutdown");
             }
         }

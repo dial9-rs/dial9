@@ -14,7 +14,8 @@ pub(crate) use engine::{DecisionReason, PreparedSampling, SamplingSession};
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 
-pub(crate) const CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
+// Defaults allow one captured census GET and two PUT attempts, each bounded to 3s.
+pub(crate) const CLEANUP_TIMEOUT: Duration = Duration::from_secs(9);
 
 /// Startup choice when a sampling decision could not be made within the timeout
 #[non_exhaustive]
