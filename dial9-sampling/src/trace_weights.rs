@@ -26,6 +26,15 @@ impl TraceWeights {
         }
     }
 
+    /// Weights for a process that was not randomly admitted.
+    pub(crate) fn unknown(pool: String) -> Self {
+        Self {
+            pool,
+            weight: Arc::new(Mutex::new(None)),
+            emitted_weight: None,
+        }
+    }
+
     pub(crate) fn current_expansion_weight(&self) -> Option<f64> {
         *self.weight.lock().expect("sampling weight lock")
     }

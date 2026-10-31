@@ -97,6 +97,8 @@ Processes read a shared roster at startup and on a fixed schedule: once a minute
 1. A subset of nodes are "reporting": Each minute, processes make a fresh sampling decision and report once at a randomly chosen instant. These reports estimate the mean number of live processes during that completed minute.
 2. A smaller subset of nodes are "profiling": These nodes have profiling enabled. The startup decision stays fixed; the sampler may later stop an enabled profiler.
 
+When a pool has no roster yet, the first process to create one becomes its leader and profiles, whatever `if_failed` says. This keeps a freshly deployed fleet from starting with zero profilers. Its trace weight is unknown, and trimming thins it like any other profiler. Other processes that start before the first population estimate is published use `if_failed`.
+
 One leader updates the roster using a bounded sample of the lowest random hashes from the completed minute. Reports remain immutable after a process exits, and old windows expire through the storage lifecycle policy.
 
 ## Fleet flamegraph weights

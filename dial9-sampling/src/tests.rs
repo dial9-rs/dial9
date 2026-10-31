@@ -552,7 +552,11 @@ async fn completed_census_supplies_population_for_later_startup() {
         UNIX_EPOCH + Duration::from_secs(WINDOW * 60),
     ));
     let cold = prepare(&config(1, 1), inner.clone(), inner.clone()).await;
-    assert!(!cold.enabled, "cold start uses disabled fallback");
+    assert!(
+        cold.enabled,
+        "the roster creator profiles despite a disabled fallback"
+    );
+    assert_eq!(cold.reason, protocol::DecisionReason::CreatedRoster);
     let cold = cold.into_session().unwrap();
     tick(150).await;
     let value = roster(&inner);
@@ -563,9 +567,10 @@ async fn completed_census_supplies_population_for_later_startup() {
         warm.enabled,
         "published population supports startup admission"
     );
-    assert!(
-        cold.weights().is_none(),
-        "original startup remains disabled"
+    assert_eq!(
+        cold.weights().unwrap().current_expansion_weight(),
+        None,
+        "the creator was not randomly sampled, so its weight stays unknown"
     );
     warm.into_session()
         .unwrap()

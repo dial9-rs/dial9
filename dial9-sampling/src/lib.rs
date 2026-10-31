@@ -35,6 +35,10 @@ use tokio::runtime::Runtime;
 ///
 /// If a decision can't be reached within `startup_timeout` (default 1s), the `if_failed` behavior will be used.
 ///
+/// A new pool has no population estimate yet. The process that creates its
+/// roster profiles regardless of `if_failed` and leads the pool; its trace
+/// weight is unknown because it was not randomly sampled.
+///
 /// See the [complete runnable example][example].
 ///
 /// [example]: https://github.com/dial9-rs/dial9/blob/3297ff097371a7af6d47ac33280e4f5ab639a14e/dial9/examples/manual_sampling.rs

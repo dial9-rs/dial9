@@ -126,16 +126,15 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
             .build()
             .await
     };
-    for (environment, fallback, expected) in [
-        ("customer/prod", StartupFailure::assume_population(1), true),
-        ("customer/prod-unarmed", StartupFailure::disabled(), false),
-    ] {
+    // The first process creates the pool's roster and profiles despite a disabled
+    // fallback. The second finds that roster without a population and is denied.
+    for expected in [true, false] {
         Sampling::builder()
-            .add_dimension("environment", environment)
+            .add_dimension("environment", "customer/prod")
             .add_dimension("az", "a")
             .num_target_profilers(1)
             .startup_timeout(Duration::from_secs(5))
-            .if_failed(fallback)
+            .if_failed(StartupFailure::disabled())
             .build()
             .with_storage(make_store())
             .start_application(|status| {
@@ -233,7 +232,8 @@ fn two_clients_upload_readable_trace_and_denied_process_allocates_no_writer() {
         })
         .unwrap();
     assert!(found);
-    assert_eq!(metadata["dial9.sampling.weight"], "1");
+    // The roster creator was not randomly sampled, so its weight is unknown.
+    assert_eq!(metadata["dial9.sampling.weight"], "null");
     assert_eq!(
         metadata["dial9.sampling.pool"],
         "az=a/environment=customer%2Fprod/"

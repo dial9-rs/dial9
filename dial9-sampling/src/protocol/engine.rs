@@ -19,14 +19,20 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DecisionReason {
     Roster,
+    /// This process created the pool's roster and leads it.
+    CreatedRoster,
     OutsideCutoff,
     TargetZero,
     MissingRoster,
     IncompatiblePolicy,
     UnsettledRoster,
     Timeout,
-    InvalidConfiguration { message: String },
-    StoreFailure { message: String },
+    InvalidConfiguration {
+        message: String,
+    },
+    StoreFailure {
+        message: String,
+    },
 }
 impl DecisionReason {
     pub(crate) fn invalid_configuration(message: impl Into<String>) -> Self {
@@ -474,7 +480,7 @@ pub(crate) async fn prepare_using(
         )
     };
     let mut foreign = None;
-    let (recording, reason, observed) = match result {
+    let (mut recording, mut reason, mut observed) = match result {
         None | Some(Err(_)) => (fallback, DecisionReason::Timeout, None),
         Some(Ok(Err(error))) => (
             fallback,
@@ -518,16 +524,47 @@ pub(crate) async fn prepare_using(
             },
         },
     };
+    // A new pool has no population to sample from. Its creator profiles so the
+    // pool never bootstraps with zero profilers; trimming corrects overshoot.
+    let mut created = false;
+    if reason == DecisionReason::MissingRoster {
+        match create_roster(&config, store.as_ref(), clock.as_ref(), deadline).await {
+            Ok(Some(Decoded::Roster(claimed))) => {
+                created = true;
+                recording = true;
+                reason = DecisionReason::CreatedRoster;
+                startup_probability = 1.0;
+                observed = Some(claimed);
+            }
+            Ok(Some(Decoded::Foreign(other))) => {
+                foreign = Some(other);
+                reason = DecisionReason::IncompatiblePolicy;
+            }
+            // Another process created the roster first.
+            Ok(None) => {}
+            Err(error) => {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(%error, "could not create sampling roster at startup");
+                });
+            }
+        }
+    }
     let authoritative = matches!(
         reason,
         DecisionReason::MissingRoster
+            | DecisionReason::CreatedRoster
             | DecisionReason::IncompatiblePolicy
             | DecisionReason::Roster
             | DecisionReason::OutsideCutoff
             | DecisionReason::UnsettledRoster
     );
+    // The creator was not randomly sampled, so its expansion weight is unknown.
     let weights = recording.then(|| {
-        crate::trace_weights::TraceWeights::new(config.pool_path(), 1.0 / startup_probability)
+        if created {
+            crate::trace_weights::TraceWeights::unknown(config.pool_path())
+        } else {
+            crate::trace_weights::TraceWeights::new(config.pool_path(), 1.0 / startup_probability)
+        }
     });
     let (signal, recording_changes) = watch::channel(recording);
     let stop = CancellationToken::new();
@@ -600,6 +637,25 @@ pub(crate) async fn prepare_using(
             weights,
         }),
     }
+}
+
+/// Claims a missing roster within the startup deadline; `None` means another process won.
+async fn create_roster(
+    config: &Config,
+    store: &dyn SamplingStore,
+    clock: &dyn Clock,
+    deadline: Instant,
+) -> Result<Option<Decoded>, StoreError> {
+    let mut roster = Roster::created(config, &config.invocation_id, millis(clock.now())?);
+    roster.mutate(&config.invocation_id)?;
+    tokio::time::timeout_at(deadline, replace(config, store, clock, &roster, None))
+        .await
+        .map_err(|_| {
+            StoreError::new(
+                StoreErrorKind::unavailable(),
+                "startup deadline expired while creating the roster",
+            )
+        })?
 }
 
 // Catch a maintenance panic while retaining the driver so its report jobs can
@@ -695,6 +751,15 @@ impl Worker {
                 (Some(o), None) => claimable(o, &config, store.as_ref(), clock.now()),
                 (None, None) => true,
             };
+        // A roster created at startup is led at once, so a process that exits
+        // before its first maintenance pass still releases the lease.
+        let leader = observed
+            .as_ref()
+            .filter(|o| {
+                o.roster.holder == config.invocation_id
+                    && !claimable(o, &config, store.as_ref(), clock.now())
+            })
+            .cloned();
         let cache = watch::channel(Cache {
             observed: observed.clone(),
             foreign,
@@ -705,7 +770,7 @@ impl Worker {
             store,
             clock,
             observed,
-            leader: None,
+            leader,
             signal,
             cache,
             next_pass_ms: born_ms,

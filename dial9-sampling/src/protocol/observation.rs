@@ -145,7 +145,10 @@ impl ObservationDriver {
                         .is_some_and(|end| now <= end.saturating_add(timing.age))
                 {
                     if trim.survival.includes(self.config.draw("trim", &trim.salt)) {
-                        if let Some(weights) = &self.weights {
+                        // An unknown weight (a roster creator's) stays unknown when thinned.
+                        if let Some(weights) = &self.weights
+                            && weights.current_expansion_weight().is_some()
+                        {
                             weights.multiply(1.0 / trim.survival.probability())?;
                         }
                     } else {

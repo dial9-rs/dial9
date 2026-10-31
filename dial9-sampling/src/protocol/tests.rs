@@ -245,6 +245,193 @@ async fn startup_is_one_read_and_expired_source_uses_configured_fallback() {
         .await;
 }
 
+/// Startup sees no roster, while writes go to a store that may already hold one.
+struct CreationStore {
+    inner: Arc<MemoryStore>,
+    stall_puts: bool,
+}
+impl SamplingStore for CreationStore {
+    fn get(&self, _key: String) -> StoreFuture<'_, Option<StoredObject>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn put(&self, request: PutRequest) -> StoreFuture<'_, PutOutcome> {
+        Box::pin(async move {
+            if self.stall_puts {
+                std::future::pending::<()>().await;
+            }
+            self.inner.put(request).await
+        })
+    }
+    fn list_sorted_page(&self, request: ListRequest) -> StoreFuture<'_, ListPage> {
+        self.inner.list_sorted_page(request)
+    }
+}
+async fn stored_roster(store: &MemoryStore, config: &Config) -> Roster {
+    let object = store
+        .get(format!("{}roster.json", config.pool_prefix()))
+        .await
+        .unwrap()
+        .unwrap();
+    decode(object, config).unwrap().roster().unwrap().roster
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_creator_of_a_missing_roster_profiles_and_leads() {
+    let store = store_at(600_000);
+    let mut creator = config_for(15, "creator");
+    creator.if_failed = super::super::StartupFailure::disabled();
+    let prepared = prepare_using(
+        creator.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        store.clone(),
+    )
+    .await;
+    assert!(
+        prepared.enabled,
+        "a disabled fallback cannot leave a new pool unprofiled"
+    );
+    assert_eq!(prepared.reason, DecisionReason::CreatedRoster);
+    assert_eq!(
+        store.operation_count(),
+        2,
+        "one GET and one conditional PUT"
+    );
+    let session = prepared.into_session().unwrap();
+    assert_eq!(metadata_weight(&session.weights().unwrap()), "null");
+    let created = stored_roster(&store, &creator).await;
+    assert_eq!(created.holder, creator.invocation_id);
+    assert!(created.population.is_none());
+
+    let mut joiner = config_for(15, "joiner");
+    joiner.if_failed = super::super::StartupFailure::disabled();
+    let joined = prepare_using(joiner, store.clone(), Duration::from_secs(1), store.clone()).await;
+    assert!(
+        !joined.enabled,
+        "only the creator bypasses an unsettled roster"
+    );
+    assert_eq!(joined.reason, DecisionReason::UnsettledRoster);
+
+    // The creator's maintenance starts as leader without waiting for an election.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let led = stored_roster(&store, &creator).await;
+    assert_eq!(led.holder, creator.invocation_id);
+    assert!(led.epoch > created.epoch, "the creator ran a leader pass");
+    joined
+        .into_session()
+        .unwrap()
+        .shutdown(Duration::from_secs(1))
+        .await;
+    session.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_creator_exiting_before_maintenance_runs_releases_its_lease() {
+    let store = store_at(600_000);
+    let creator = config_for(15, "creator");
+    prepare_using(
+        creator.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        store.clone(),
+    )
+    .await
+    .into_session()
+    .unwrap()
+    .shutdown(Duration::from_secs(1))
+    .await;
+    let released = stored_roster(&store, &creator).await;
+    assert!(
+        released.released,
+        "a successor need not wait for lease expiry"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_creator_surviving_a_trim_keeps_an_unknown_weight_and_keeps_recording() {
+    let store = store_at(600_000);
+    let creator = config_for(15, "creator");
+    let session = prepare_using(
+        creator.clone(),
+        store.clone(),
+        Duration::from_secs(1),
+        store.clone(),
+    )
+    .await
+    .into_session()
+    .unwrap();
+    let weights = session.weights().unwrap();
+    let recording = session.recording_changes();
+    let key = format!("{}roster.json", creator.pool_prefix());
+    let observed = decode(store.get(key).await.unwrap().unwrap(), &creator)
+        .unwrap()
+        .roster()
+        .unwrap();
+    let mut roster = observed.roster;
+    roster
+        .mutate(&config_for(15, "other").invocation_id)
+        .unwrap();
+    roster.trim = Some(Trim {
+        epoch: roster.epoch,
+        salt: nonce(),
+        source_window: 10,
+        effective_window: 12,
+        created_ms: 600_000,
+        // Every draw survives.
+        survival: Cutoff(None),
+    });
+    publish(
+        store.as_ref(),
+        &creator,
+        &roster,
+        WriteCondition::unconditional(),
+    )
+    .await;
+    sleep_until(&store, 722_001).await;
+    assert!(
+        *recording.borrow(),
+        "surviving a trim must not stop maintenance"
+    );
+    assert_eq!(metadata_weight(&weights), "null");
+    session.shutdown(Duration::from_secs(1)).await;
+}
+
+#[rstest::rstest]
+#[case::lost_race(false)]
+#[case::deadline(true)]
+#[tokio::test(start_paused = true)]
+async fn an_unsuccessful_roster_creation_uses_the_configured_fallback(#[case] stall_puts: bool) {
+    let inner = store_at(600_000);
+    let mut config = config_for(15, "loser");
+    config.if_failed = super::super::StartupFailure::disabled();
+    if !stall_puts {
+        let winner = Roster::created(&config_for(15, "winner"), &nonce(), 600_000);
+        publish(inner.as_ref(), &config, &winner, WriteCondition::absent()).await;
+    }
+    let store = Arc::new(CreationStore {
+        inner: inner.clone(),
+        stall_puts,
+    });
+    let started = tokio::time::Instant::now();
+    let prepared = prepare_using(config, store, Duration::from_secs(1), inner.clone()).await;
+    assert!(!prepared.enabled);
+    assert_eq!(prepared.reason, DecisionReason::MissingRoster);
+    if stall_puts {
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(1),
+            "creation honors the deadline"
+        );
+    } else {
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+    prepared
+        .into_session()
+        .unwrap()
+        .shutdown(Duration::from_secs(1))
+        .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn bottom_sample_uses_each_actual_cutoff_without_a_second_division() {
     let store = store_at(600_000);

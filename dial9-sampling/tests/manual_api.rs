@@ -525,6 +525,10 @@ fn zero_or_invalid_startup_does_not_poll_storage(
 #[test]
 fn cold_disabled_recorder_stays_off_when_a_later_invocation_is_enabled() {
     let store = Arc::new(MemoryStore::new());
+    // A prior invocation creates the roster, so this cold start is not its creator.
+    policy()
+        .with_storage(async { Ok(store.clone()) })
+        .start_application(|SamplingStatus { enabled, .. }| assert!(enabled));
     Sampling::builder()
         .num_target_profilers(1)
         .if_failed(StartupFailure::disabled())
@@ -554,7 +558,7 @@ fn maintenance_termination_disables_registered_recorder_after_status_drop() {
 
     #[derive(Debug)]
     struct EndMaintenance {
-        inner: MemoryStore,
+        inner: Arc<MemoryStore>,
         trigger: Mutex<Option<oneshot::Receiver<()>>>,
     }
     impl SamplingStore for EndMaintenance {
@@ -573,11 +577,17 @@ fn maintenance_termination_disables_registered_recorder_after_status_drop() {
         }
     }
 
+    // Seed a released roster so the first intercepted PUT is a maintenance
+    // election rather than startup roster creation.
+    let seeded = Arc::new(MemoryStore::new());
+    policy()
+        .with_storage(async { Ok(seeded.clone()) })
+        .start_application(|SamplingStatus { enabled, .. }| assert!(enabled));
     let (trigger, end) = oneshot::channel();
     let recorder = policy()
         .with_storage(async {
             Ok(EndMaintenance {
-                inner: MemoryStore::new(),
+                inner: seeded.clone(),
                 trigger: Mutex::new(Some(end)),
             })
         })
