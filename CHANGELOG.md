@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.6...dial9-v0.5.7) - 2026-10-31
+
+### Added
+
+- *(tokio)* add runtime detach and scope guards ([#1076](https://github.com/dial9-rs/dial9/pull/1076))
+- *(tokio)* record TaskMeta scheduling latency ([#1077](https://github.com/dial9-rs/dial9/pull/1077))
+- *(viewer)* investigate span tail latency ([#1075](https://github.com/dial9-rs/dial9/pull/1075))
+
+### Fixed
+
+- *(core)* preserve final metadata after segment rotation ([#1100](https://github.com/dial9-rs/dial9/pull/1100))
+- *(trace-format)* include file headers in encoder byte counts ([#1096](https://github.com/dial9-rs/dial9/pull/1096))
+- *(trace-format)* bound stack pool frame_count by input length ([#1098](https://github.com/dial9-rs/dial9/pull/1098))
+- *(viewer)* assume reader roles in the server Region ([#1102](https://github.com/dial9-rs/dial9/pull/1102))
+- *(viewer)* invalidate cached spans missing unit metadata ([#1097](https://github.com/dial9-rs/dial9/pull/1097))
+- *(viewer)* preserve flamegraph detail during refinement ([#1095](https://github.com/dial9-rs/dial9/pull/1095))
+- *(deps)* clear zstd RustSec advisories ([#1092](https://github.com/dial9-rs/dial9/pull/1092))
+
 ## [0.5.6](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.5...dial9-v0.5.6) - 2026-10-26
 
 ### Added
