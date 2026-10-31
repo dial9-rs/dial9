@@ -25,6 +25,7 @@ pub use tokio_hooks::TokioHooks;
 pub use recorder_tokio::RecorderS3ClientExt;
 pub use recorder_tokio::{
     AttachedRuntime, Dial9HandleTokioExt, RecorderPipelineExt, TokioAttachOptions,
+    TokioDetachGuard, TokioDetachOutcome,
 };
 
 // Re-exports for internal test access
@@ -40,7 +41,7 @@ use crate::telemetry::task_metadata::TaskId;
 use handle::INSTRUMENTED_SPAWN;
 #[cfg(not(tokio_unstable))]
 pub(crate) use recorder_tokio::current_runtime_ctx;
-pub(crate) use runtime_context::{clear_poll_span, poll_span_open};
+pub(crate) use runtime_context::poll_span_open;
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
@@ -587,6 +588,47 @@ mod tests {
             reserved.is_empty(),
             "a paused recorder should not resolve workers: {reserved:?}"
         );
+
+        drop(rt);
+        rec.graceful_shutdown(Duration::from_secs(1));
+    }
+
+    /// Pausing or detaching mid-poll still closes the poll-span marker at poll
+    /// end, though the end event is not recorded: a marker left set would mute
+    /// every later wrapper poll on the thread.
+    #[rstest::rstest]
+    #[case::paused(false)]
+    #[case::detached(true)]
+    fn poll_span_closes_when_stopped_mid_poll(#[case] detach: bool) {
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
+        let handle = rec.handle().clone();
+        let rt = rec
+            .handle()
+            .attach_tokio_runtime(
+                tokio::runtime::Builder::new_current_thread(),
+                TokioAttachOptions::default(),
+            )
+            .unwrap();
+
+        let open_mid_poll = rt.block_on(async move {
+            crate::telemetry::spawn(async move {
+                let open = poll_span_open();
+                if detach {
+                    assert_eq!(
+                        handle.detach_tokio_runtime(&tokio::runtime::Handle::current()),
+                        TokioDetachOutcome::Detached
+                    );
+                } else {
+                    handle.disable();
+                }
+                open
+            })
+            .await
+            .unwrap()
+        });
+        assert!(open_mid_poll, "the traced poll opened a span");
+        // The current-thread runtime polled the task on this thread.
+        assert!(!poll_span_open(), "the span marker must close at poll end");
 
         drop(rt);
         rec.graceful_shutdown(Duration::from_secs(1));

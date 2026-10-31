@@ -302,9 +302,9 @@ impl<F: Future> Future for WakeTraced<F> {
     }
 }
 
-/// Closes the poll span its wrapper opened, and clears the thread's span
-/// marker unconditionally: a buffer disabled at drop time must not leave the
-/// marker set.
+/// Closes the poll span its wrapper opened. `record_poll_end` clears the
+/// thread's span marker unconditionally: a buffer disabled at drop time must
+/// not leave the marker set.
 struct PollSpanGuard<'a> {
     ctx: &'a RuntimeContext,
 }
@@ -312,7 +312,6 @@ struct PollSpanGuard<'a> {
 impl Drop for PollSpanGuard<'_> {
     fn drop(&mut self) {
         self.ctx.record_poll_end();
-        crate::telemetry::recorder::clear_poll_span();
     }
 }
 

@@ -1,6 +1,7 @@
 use super::source::{FlushContext, Source};
 #[cfg(not(tokio_unstable))]
 use crate::primitives::sync::Weak;
+use crate::primitives::sync::atomic::AtomicBool;
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
@@ -44,6 +45,10 @@ pub(crate) struct RuntimeContext {
     /// Global worker IDs within this runtime.
     /// Populated lazily the first time each worker thread resolves its identity.
     pub worker_ids: Mutex<BTreeSet<u64>>,
+    /// Set by `detach_tokio_runtime`. Tokio hooks cannot be removed from a
+    /// built runtime, so a detached runtime that keeps running still calls
+    /// them; this makes them record nothing.
+    detached: AtomicBool,
 }
 
 thread_local! {
@@ -91,20 +96,66 @@ thread_local! {
     static LAST_TS: Cell<u64> = const { Cell::new(0) };
 }
 
+#[cfg(tokio_unstable)]
 thread_local! {
     /// This worker's [`RuntimeMetrics`], cached so queue-depth reads on the poll
     /// and park paths cost only a thread-local read.
-    static WORKER_METRICS: RefCell<Option<RuntimeMetrics>> = const { RefCell::new(None) };
+    ///
+    /// Keyed by `RuntimeContext::id`: a thread can drive several runtimes in
+    /// turn (`current_thread`, `LocalRuntime`), and the cached metrics hold a
+    /// strong `Handle` that keeps a dropped runtime's drivers open.
+    static WORKER_METRICS: RefCell<Option<(u64, RuntimeMetrics)>> = const { RefCell::new(None) };
 }
 
-/// Read this worker's runtime metrics. Call only from a Tokio runtime thread,
+/// Read the metrics of `ctx`'s runtime. Call only from one of its threads,
 /// which every hook path already is.
 #[cfg(tokio_unstable)]
-fn worker_metrics<R>(f: impl FnOnce(&RuntimeMetrics) -> R) -> R {
+fn worker_metrics<R>(ctx: &RuntimeContext, f: impl FnOnce(&RuntimeMetrics) -> R) -> R {
     WORKER_METRICS.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        f(slot.get_or_insert_with(|| tokio::runtime::Handle::current().metrics()))
+        if let Some((id, metrics)) = &*cell.borrow()
+            && *id == ctx.id
+        {
+            return f(metrics);
+        }
+        worker_metrics_miss(cell, ctx.id, f)
     })
+}
+
+/// Miss path of [`worker_metrics`], kept out of line so the hit path stays
+/// small.
+#[cfg(tokio_unstable)]
+#[cold]
+#[inline(never)]
+fn worker_metrics_miss<R>(
+    cell: &RefCell<Option<(u64, RuntimeMetrics)>>,
+    ctx_id: u64,
+    f: impl FnOnce(&RuntimeMetrics) -> R,
+) -> R {
+    let metrics = tokio::runtime::Handle::current().metrics();
+    let result = f(&metrics);
+    // Dropped outside the borrow: the last `Handle` of a dropped runtime
+    // tears down its drivers and hooks.
+    let stale = cell.borrow_mut().replace((ctx_id, metrics));
+    drop(stale);
+    result
+}
+
+/// Drop this thread's cached metrics if they belong to `ctx_id`, so a
+/// detached runtime driven from this thread is not kept alive by the cache.
+#[cfg(tokio_unstable)]
+fn release_worker_metrics(ctx_id: u64) {
+    // `try_with` only fails once TLS teardown has started, which drops the
+    // cache itself.
+    let _ = WORKER_METRICS.try_with(|cell| {
+        let stale = {
+            let mut slot = cell.borrow_mut();
+            match &*slot {
+                Some((id, _)) if *id == ctx_id => slot.take(),
+                _ => None,
+            }
+        };
+        drop(stale);
+    });
 }
 
 /// This thread's global worker ID, claiming one if it has none yet.
@@ -130,16 +181,30 @@ fn claim_thread_worker_id(ctx: &RuntimeContext) -> Option<u64> {
     })
 }
 
+/// Forget this thread's worker ID in the runtime with context `ctx_id`, so a
+/// thread that drives one runtime after another does not scan one entry per
+/// detached runtime on every event. A detached context records nothing, so it
+/// never claims again.
+#[cfg(not(tokio_unstable))]
+fn release_claimed_worker_id(ctx_id: u64) {
+    // `try_with` only fails once TLS teardown has started.
+    let _ = CLAIMED_WORKER_IDS.try_with(|claimed| {
+        claimed.borrow_mut().retain(|(owner, _)| *owner != ctx_id);
+    });
+}
+
 /// Local queue depth for the current worker.
 ///
 /// Reports `0` when tokio does not expose per-worker queue depth.
 /// Consumers tell the two apart via the `tokio.local_queue` segment-metadata
 /// key, which is `false` exactly when this can only return `0`.
-fn current_local_queue_depth() -> usize {
+fn current_local_queue_depth(
+    #[cfg_attr(not(tokio_unstable), allow(unused_variables))] ctx: &RuntimeContext,
+) -> usize {
     #[cfg(tokio_unstable)]
     {
         match tokio::runtime::worker_index() {
-            Some(idx) => worker_metrics(|m| m.worker_local_queue_depth(idx)),
+            Some(idx) => worker_metrics(ctx, |m| m.worker_local_queue_depth(idx)),
             None => 0,
         }
     }
@@ -225,18 +290,21 @@ pub(crate) type RuntimeContextRegistry = Arc<Mutex<Vec<Arc<RuntimeContext>>>>;
 /// runtime->worker segment metadata.
 pub(crate) struct TokioRuntimesSource {
     contexts: RuntimeContextRegistry,
-    /// Metrics for each attached runtime, paired with the runtime's name, handed
-    /// over once the caller has built it. The flush thread has no runtime context
-    /// of its own, so it cannot ask Tokio for these itself. The name is carried
-    /// alongside so each runtime's sample can be tagged with its identity.
-    /// Dropped with the source at recorder teardown.
-    runtime_metrics: Vec<(Option<String>, RuntimeMetrics)>,
+    /// Id, name and metrics of each attached runtime. The flush thread has no
+    /// runtime context, so it cannot ask Tokio for these itself. Removed on
+    /// detach; otherwise dropped with the source at recorder teardown.
+    /// `RuntimeMetrics` holds a strong `Handle`, which keeps the runtime's
+    /// drivers open.
+    runtime_metrics: Vec<(tokio::runtime::Id, Option<String>, RuntimeMetrics)>,
     last_sample: Instant,
     sample_interval: Duration,
     /// Fingerprint of the metadata emitted on the last `segment_metadata` call,
     /// used to skip the rebuild when nothing changed. See `segment_metadata` for
-    /// what it is and why it is sufficient. `0` means "nothing emitted yet".
-    last_fingerprint: usize,
+    /// what it is and why it is sufficient. `(0, 0)` means "nothing emitted yet".
+    last_fingerprint: (usize, u64),
+    /// Runtimes detached so far. Only grows, so it keeps the fingerprint
+    /// changing on removal.
+    detached_runtimes: u64,
     /// Whether the process-fixed metadata entries have been emitted yet. They
     /// never change, so they are emitted exactly once (the writer keeps them in
     /// its merged cache and re-emits them on every rotation).
@@ -260,7 +328,8 @@ impl TokioRuntimesSource {
             runtime_metrics: Vec::new(),
             last_sample: time_source().instant(),
             sample_interval: Duration::from_millis(10),
-            last_fingerprint: 0,
+            last_fingerprint: (0, 0),
+            detached_runtimes: 0,
             fixed_metadata_emitted: false,
             next_worker_id: Arc::new(AtomicU64::new(0)),
         }
@@ -276,23 +345,88 @@ impl TokioRuntimesSource {
     pub(crate) fn worker_id_counter(&self) -> WorkerIdCounter {
         self.next_worker_id.clone()
     }
+
+    /// Stop tracking runtime `id`: remove its metrics and its context, and mark
+    /// the context detached. `None` if this source does not track `id`.
+    ///
+    /// Returns what was removed so the caller can drop it after releasing the
+    /// source lock: the last `RuntimeMetrics` of a dropped runtime tears down
+    /// its drivers and drops its hooks, which run user code.
+    ///
+    /// Lock order is sources (held by the caller) then registry, the same as
+    /// `segment_metadata` on the flush thread.
+    pub(crate) fn detach_runtime(&mut self, id: tokio::runtime::Id) -> Option<DetachedRuntime> {
+        let metrics = self
+            .runtime_metrics
+            .iter()
+            .position(|(rt, _, _)| *rt == id)
+            .map(|i| self.runtime_metrics.remove(i).2);
+        let context = {
+            let mut contexts = self.contexts.lock().unwrap();
+            contexts
+                .iter()
+                .position(|c| c.is_runtime(id))
+                .map(|i| contexts.remove(i))
+        };
+        if metrics.is_none() && context.is_none() {
+            return None;
+        }
+        if let Some(ctx) = &context {
+            ctx.detached.store(true, Ordering::Relaxed);
+        }
+        self.detached_runtimes += 1;
+        Some(DetachedRuntime {
+            _metrics: metrics,
+            context,
+        })
+    }
 }
 
-/// Give the source the metrics of a freshly built runtime (paired with its
-/// name), so the flush thread can sample this runtime's scheduler metrics and
-/// tag the sample with the runtime's identity.
+/// What [`TokioRuntimesSource::detach_runtime`] removed, dropped by the caller
+/// outside the source lock.
+pub(crate) struct DetachedRuntime {
+    _metrics: Option<RuntimeMetrics>,
+    context: Option<Arc<RuntimeContext>>,
+}
+
+impl DetachedRuntime {
+    /// Release the calling thread's per-runtime state for the detached runtime:
+    /// its cached metrics, or its claimed worker ID without `tokio_unstable`.
+    /// Other threads keep theirs until they exit, though their cached metrics
+    /// are also replaced when they next record for a different runtime.
+    pub(crate) fn release_thread_cache(&self) {
+        if let Some(ctx) = &self.context {
+            #[cfg(tokio_unstable)]
+            release_worker_metrics(ctx.id);
+            #[cfg(not(tokio_unstable))]
+            release_claimed_worker_id(ctx.id);
+        }
+    }
+}
+
+/// Publish a freshly built runtime: its context to the registry, and its
+/// metrics (paired with its name) to the source, so the flush thread can sample
+/// this runtime's scheduler metrics and tag the sample with its identity.
+///
+/// Both under one source lock, so a concurrent detach removes both or neither.
+/// Lock order is sources then registry, as in `detach_runtime`.
 ///
 /// Called once per attach, after the caller's runtime exists.
-pub(crate) fn register_runtime_metrics(
+pub(crate) fn register_attached_runtime(
     handle: &Dial9Handle,
+    ctx: Arc<RuntimeContext>,
+    runtime_id: tokio::runtime::Id,
     runtime_name: Option<String>,
     metrics: RuntimeMetrics,
 ) {
     let registered = handle.with_source(|source: &mut TokioRuntimesSource| {
-        source.runtime_metrics.push((runtime_name, metrics));
+        source.contexts.lock().unwrap().push(ctx);
+        source
+            .runtime_metrics
+            .push((runtime_id, runtime_name, metrics));
     });
     if registered.is_none() {
-        tracing::warn!("Tokio source missing; queue depth will not be sampled");
+        tracing::warn!("Tokio source missing; runtime not tracked");
     }
 }
 
@@ -312,7 +446,7 @@ impl Source for TokioRuntimesSource {
         // The name is interned lazily in `RuntimeMetricsSample::encode`, so each
         // event costs one `u32` handle rather than a fresh `String`.
         let timestamp_ns = clock_monotonic_ns();
-        for (runtime_name, metrics) in &self.runtime_metrics {
+        for (_, runtime_name, metrics) in &self.runtime_metrics {
             ctx.record_event(&RuntimeMetricsSample {
                 timestamp_ns,
                 runtime_name: runtime_name.as_deref().unwrap_or(""),
@@ -364,24 +498,28 @@ impl Source for TokioRuntimesSource {
 
         // Self-detected change: there is no external signal to keep in sync, so
         // a new caller that mutates runtime/worker metadata cannot forget to
-        // announce it. The fingerprint is the runtime count plus the total
-        // number of registered workers across all runtimes. Both only ever grow
-        // (runtimes and workers are added, never removed) and each worker's
-        // global id is fixed once assigned, so an unchanged fingerprint means
-        // unchanged metadata. Cheap — a few uncontended read locks and no
-        // allocation — so it runs every flush cycle.
+        // announce it. The fingerprint is the runtime count plus total worker
+        // count, paired with the detach count. Worker ids are fixed once
+        // assigned, the sum only grows between detaches, and every detach bumps
+        // the counter, so a change always changes the fingerprint. Cheap, so it
+        // runs every flush cycle.
         let contexts = self.contexts.lock().unwrap();
-        let fingerprint = contexts.len()
+        let attached = contexts.len()
             + contexts
                 .iter()
                 .map(|c| c.worker_ids.lock().unwrap().len())
                 .sum::<usize>();
+        let fingerprint = (attached, self.detached_runtimes);
         if fingerprint == self.last_fingerprint {
             return;
         }
         self.last_fingerprint = fingerprint;
-        // The writer's merge is additive, so emitting the full current snapshot
-        // on each change is correct. A fingerprint bump from an unnamed runtime
+        // The writer's merge is additive and incoming-wins per key, so emitting
+        // the full current snapshot on each change is correct. A fingerprint
+        // bump from an unnamed runtime re-emits an unchanged snapshot, which the
+        // merge dedupes. A detached runtime's `runtime.{name}` entry is replaced
+        // only once another attached runtime with that name has a worker;
+        // otherwise the writer keeps the stale entry.
         out.extend(contexts.iter().filter_map(|c| c.metadata_entry()));
     }
 }
@@ -402,6 +540,7 @@ impl RuntimeContext {
             #[cfg(tokio_unstable)]
             worker_id_base: OnceLock::new(),
             worker_ids: Mutex::new(BTreeSet::new()),
+            detached: AtomicBool::new(false),
         }
     }
 
@@ -409,7 +548,13 @@ impl RuntimeContext {
     ///
     /// Lazy on purpose: building one of these events can resolve the worker and
     /// read the clock, which a paused recorder must not pay for.
+    ///
+    /// A detached context records nothing. Checked before `make` runs, so a
+    /// detached runtime also claims no worker ids.
     fn record<E: Encodable>(&self, make: impl FnOnce() -> E) {
+        if self.detached.load(Ordering::Relaxed) {
+            return;
+        }
         self.recorder_handle.record_event_with(make);
     }
 
@@ -440,7 +585,10 @@ impl RuntimeContext {
         }
     }
 
+    /// Clears the poll-span marker even when nothing is recorded (paused, or
+    /// detached mid-poll), so it cannot stay set past the poll.
     pub(crate) fn record_poll_end(&self) {
+        clear_poll_span();
         self.record(|| make_poll_end(self));
     }
 
@@ -475,7 +623,6 @@ impl RuntimeContext {
     }
 
     /// Whether this context instruments the runtime with `id`.
-    #[cfg(not(tokio_unstable))]
     pub(crate) fn is_runtime(&self, id: tokio::runtime::Id) -> bool {
         self.runtime_id.get() == Some(&id)
     }
@@ -547,7 +694,7 @@ impl RuntimeContext {
         // `get_or_init` runs its closure exactly once, so the block is reserved
         // once however many workers resolve at the same moment.
         let base = self.worker_id_base.get_or_init(|| {
-            let num_workers = worker_metrics(|m| m.num_workers()) as u64;
+            let num_workers = worker_metrics(self, |m| m.num_workers()) as u64;
             self.reserve_worker_ids(num_workers)
         });
         Some(base + local_index as u64)
@@ -728,7 +875,7 @@ fn make_poll_start(
     #[cfg(all(tokio_unstable, feature = "schedule-latency"))] scheduling_delay_ns: u64,
 ) -> PollStart {
     let worker_id = event_worker_id(ctx);
-    let worker_local_queue_depth = current_local_queue_depth();
+    let worker_local_queue_depth = current_local_queue_depth(ctx);
     let timestamp_ns = clock_monotonic_ns();
     POLL_START_TS.with(|c| c.set(NonZeroU64::new(timestamp_ns)));
     PollStart {
@@ -744,7 +891,6 @@ fn make_poll_start(
 
 /// Poll-end counterpart to [`make_poll_start`].
 fn make_poll_end(ctx: &RuntimeContext) -> PollEndEvent {
-    POLL_START_TS.with(|c| c.set(None));
     PollEndEvent {
         timestamp_ns: clock_monotonic_ns(),
         worker_id: event_worker_id(ctx),
@@ -773,22 +919,22 @@ pub(crate) fn cache_runtime_ctx(runtime: tokio::runtime::Id, ctx: &Arc<RuntimeCo
 }
 
 /// Whether a recorded poll span is open on this thread: set by
-/// [`make_poll_start`], cleared by [`make_poll_end`]. The `WakeTraced` wrapper
-/// reads it to leave polls that tokio's hooks (or an outer wrapper) already
-/// record to their recorder.
+/// [`make_poll_start`], cleared by [`RuntimeContext::record_poll_end`]. The
+/// `WakeTraced` wrapper reads it to leave polls that tokio's hooks (or an outer
+/// wrapper) already record to their recorder.
 pub(crate) fn poll_span_open() -> bool {
     POLL_START_TS.with(|c| c.get().is_some())
 }
 
 /// Close this thread's poll-span marker unconditionally, so a buffer disabled
 /// at poll end cannot leave it set and mute every later wrapper poll.
-pub(crate) fn clear_poll_span() {
+fn clear_poll_span() {
     POLL_START_TS.with(|c| c.set(None));
 }
 
 fn make_worker_park(ctx: &RuntimeContext) -> WorkerParkEvent {
     let worker_id = event_worker_id(ctx);
-    let worker_local_queue_depth = current_local_queue_depth();
+    let worker_local_queue_depth = current_local_queue_depth(ctx);
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
     // Only read schedstat on 1-in-N parks. The counter and the "sampled this
     // park" flag are thread-local, so the matching unpark on the same worker
@@ -819,7 +965,7 @@ fn make_worker_park(ctx: &RuntimeContext) -> WorkerParkEvent {
 
 fn make_worker_unpark(ctx: &RuntimeContext) -> WorkerUnparkEvent {
     let worker_id = event_worker_id(ctx);
-    let worker_local_queue_depth = current_local_queue_depth();
+    let worker_local_queue_depth = current_local_queue_depth(ctx);
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
     // Only read schedstat on unpark if the matching park sampled it, so the
     // delta below always pairs with a park-time reading. Reset the flag either
@@ -848,6 +994,7 @@ fn make_worker_unpark(ctx: &RuntimeContext) -> WorkerUnparkEvent {
 #[cfg(all(test, not(shuttle)))]
 mod tests {
     use super::*;
+    use crate::telemetry::TokioDetachOutcome;
 
     /// Push a named runtime context with a single resolved worker into `contexts`.
     fn push_named_runtime(contexts: &RuntimeContextRegistry, name: &str, worker_id: u64) {
@@ -956,6 +1103,266 @@ mod tests {
         assert_eq!(value("tokio.poll_coverage"), coverage);
         assert_eq!(value("tokio.local_queue"), local_queue);
         assert_eq!(value("tokio.unstable"), unstable);
+    }
+
+    /// A context bound to a fresh runtime's id, with one resolved worker. The
+    /// runtime is returned so its id stays unique for the test.
+    fn push_bound_runtime(
+        contexts: &RuntimeContextRegistry,
+        name: &str,
+        worker_id: u64,
+    ) -> tokio::runtime::Runtime {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        push_named_runtime(contexts, name, worker_id);
+        contexts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .bind_runtime(rt.handle().id());
+        rt
+    }
+
+    #[test]
+    fn segment_metadata_reemits_after_detach() {
+        let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+        let mut source = TokioRuntimesSource::new(contexts.clone());
+        let old = push_bound_runtime(&contexts, "main", 0);
+        let new = push_bound_runtime(&contexts, "main", 1);
+        let mut out = Vec::new();
+        source.segment_metadata(&mut out);
+
+        // Detaching one of two same-name runtimes re-emits only the survivor,
+        // which overwrites the key in the writer's merged cache.
+        assert!(source.detach_runtime(old.handle().id()).is_some());
+        out.clear();
+        source.segment_metadata(&mut out);
+        assert_eq!(out, vec![("runtime.main".to_string(), "1".to_string())]);
+
+        // Detaching the last one is still a change, though there is nothing
+        // left to emit for the name.
+        assert!(source.detach_runtime(new.handle().id()).is_some());
+        out.clear();
+        source.segment_metadata(&mut out);
+        assert!(out.is_empty());
+
+        // A same-name replacement with the same runtime and worker counts is
+        // still a change: only the detach count tells the two snapshots apart.
+        let a = push_bound_runtime(&contexts, "main", 2);
+        out.clear();
+        source.segment_metadata(&mut out);
+        assert!(source.detach_runtime(a.handle().id()).is_some());
+        let _b = push_bound_runtime(&contexts, "main", 3);
+        out.clear();
+        source.segment_metadata(&mut out);
+        assert_eq!(out, vec![("runtime.main".to_string(), "3".to_string())]);
+    }
+
+    /// Whether `handle`'s recorder tracks `rt` in its registry and its metrics.
+    fn tracked(handle: &Dial9Handle, rt: &tokio::runtime::Handle) -> (bool, bool) {
+        let id = rt.id();
+        let registry = super::super::recorder_tokio::tokio_attach_state(handle)
+            .unwrap()
+            .registry;
+        let in_registry = registry.lock().unwrap().iter().any(|c| c.is_runtime(id));
+        let in_metrics = handle
+            .with_source(|s: &mut TokioRuntimesSource| {
+                s.runtime_metrics.iter().any(|(rt, _, _)| *rt == id)
+            })
+            .unwrap();
+        (in_registry, in_metrics)
+    }
+
+    #[test]
+    fn detach_releases_runtime_once() {
+        use crate::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
+        let rec = dial9_core::recorder::recorder(
+            crate::telemetry::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+        )
+        .build();
+        let handle = rec.handle();
+        let rt = handle
+            .attach_tokio_runtime(
+                tokio::runtime::Builder::new_current_thread(),
+                TokioAttachOptions::builder().runtime_name("main").build(),
+            )
+            .unwrap();
+        let ctx = super::super::recorder_tokio::tokio_attach_state(handle)
+            .unwrap()
+            .registry
+            .lock()
+            .unwrap()[0]
+            .clone();
+        assert_eq!(tracked(handle, rt.handle()), (true, true));
+
+        // Pausing is not shutting down: a paused recorder still detaches.
+        handle.disable();
+        assert_eq!(
+            handle.detach_tokio_runtime(rt.handle()),
+            TokioDetachOutcome::Detached
+        );
+        assert_eq!(tracked(handle, rt.handle()), (false, false));
+        assert!(ctx.detached.load(Ordering::Relaxed));
+        // Idempotent.
+        assert_eq!(
+            handle.detach_tokio_runtime(rt.handle()),
+            TokioDetachOutcome::NotTracked
+        );
+
+        drop(rt);
+        rec.graceful_shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn detach_unknown_runtime_is_not_tracked() {
+        use crate::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
+        let new_rec = || {
+            dial9_core::recorder::recorder(
+                crate::telemetry::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+            )
+            .build()
+        };
+        let (rec, other) = (new_rec(), new_rec());
+        let unattached = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        // No Tokio source installed yet, and detach must not install one.
+        assert_eq!(
+            rec.handle().detach_tokio_runtime(unattached.handle()),
+            TokioDetachOutcome::NotTracked
+        );
+        assert!(
+            rec.handle()
+                .with_source(|_: &mut TokioRuntimesSource| ())
+                .is_none()
+        );
+        assert_eq!(
+            Dial9Handle::disabled().detach_tokio_runtime(unattached.handle()),
+            TokioDetachOutcome::NotTracked
+        );
+
+        let attached = other
+            .handle()
+            .attach_tokio_runtime(
+                tokio::runtime::Builder::new_current_thread(),
+                TokioAttachOptions::default(),
+            )
+            .unwrap();
+        // Attached to `other`, not `rec`; `other` keeps tracking it.
+        assert_eq!(
+            rec.handle().detach_tokio_runtime(attached.handle()),
+            TokioDetachOutcome::NotTracked
+        );
+        assert_eq!(
+            other.handle().detach_tokio_runtime(unattached.handle()),
+            TokioDetachOutcome::NotTracked
+        );
+        assert_eq!(tracked(other.handle(), attached.handle()), (true, true));
+
+        let uninstrumented = other
+            .handle()
+            .attach_tokio_runtime(
+                tokio::runtime::Builder::new_current_thread(),
+                TokioAttachOptions::builder()
+                    .tokio_instrumentation_enabled(false)
+                    .build(),
+            )
+            .unwrap();
+        assert_eq!(
+            other.handle().detach_tokio_runtime(uninstrumented.handle()),
+            TokioDetachOutcome::NotTracked
+        );
+
+        // Shutdown drops the source, so there is nothing left to detach.
+        let other_handle = other.handle().clone();
+        rec.graceful_shutdown(Duration::from_secs(1));
+        other.graceful_shutdown(Duration::from_secs(1));
+        assert_eq!(
+            other_handle.detach_tokio_runtime(attached.handle()),
+            TokioDetachOutcome::NotTracked
+        );
+        drop((attached, uninstrumented));
+    }
+
+    /// Attach, use, detach and drop a runtime repeatedly: the registry and the
+    /// sampled metrics hold nothing between restarts, rather than one entry
+    /// per runtime ever attached.
+    #[rstest::rstest]
+    #[case::multi_thread("multi_thread")]
+    #[case::current_thread("current_thread")]
+    #[case::local("local")]
+    fn restart_loop_keeps_tracking_bounded(#[case] flavor: &str) {
+        use crate::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
+        let rec = dial9_core::recorder::recorder(
+            crate::telemetry::buffer::MemoryBuffer::new(1 << 20).unwrap(),
+        )
+        .build();
+        let handle = rec.handle();
+        let tracked_counts = || {
+            let registry = super::super::recorder_tokio::tokio_attach_state(handle)
+                .unwrap()
+                .registry;
+            let contexts = registry.lock().unwrap().len();
+            let metrics = handle
+                .with_source(|s: &mut TokioRuntimesSource| s.runtime_metrics.len())
+                .unwrap();
+            (contexts, metrics)
+        };
+        let work = || async {
+            crate::telemetry::spawn(tokio::task::yield_now())
+                .await
+                .unwrap();
+        };
+        let options = || TokioAttachOptions::builder().runtime_name("main").build();
+
+        for _ in 0..20 {
+            match flavor {
+                "local" => {
+                    let rt = handle
+                        .attach_tokio_local_runtime(
+                            tokio::runtime::Builder::new_current_thread(),
+                            options(),
+                        )
+                        .unwrap();
+                    crate::telemetry::block_on_local(&rt, async {
+                        crate::telemetry::spawn_local(tokio::task::yield_now())
+                            .await
+                            .unwrap();
+                    });
+                    assert_eq!(tracked_counts(), (1, 1));
+                    assert_eq!(
+                        handle.detach_tokio_runtime(rt.handle()),
+                        TokioDetachOutcome::Detached
+                    );
+                }
+                _ => {
+                    let builder = if flavor == "multi_thread" {
+                        let mut b = tokio::runtime::Builder::new_multi_thread();
+                        b.worker_threads(2);
+                        b
+                    } else {
+                        tokio::runtime::Builder::new_current_thread()
+                    };
+                    let rt = handle.attach_tokio_runtime(builder, options()).unwrap();
+                    crate::telemetry::block_on(&rt, work());
+                    assert_eq!(tracked_counts(), (1, 1));
+                    assert_eq!(
+                        handle.detach_tokio_runtime(rt.handle()),
+                        TokioDetachOutcome::Detached
+                    );
+                }
+            }
+            assert_eq!(tracked_counts(), (0, 0));
+            #[cfg(not(tokio_unstable))]
+            assert_eq!(
+                CLAIMED_WORKER_IDS.with(|claimed| claimed.borrow().len()),
+                0,
+                "this thread keeps no worker ID claim for a detached runtime"
+            );
+        }
+        rec.graceful_shutdown(Duration::from_secs(1));
     }
 
     #[test]
@@ -1103,7 +1510,7 @@ mod shuttle_tests {
     use super::super::recorder_tokio;
     use super::*;
     use crate::background_task::testutil::CapturingProcessor;
-    use crate::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
+    use crate::telemetry::{Dial9HandleTokioExt, TokioAttachOptions, TokioDetachOutcome};
     use dial9_core::shuttle_test;
 
     shuttle_test! {
@@ -1228,13 +1635,12 @@ mod shuttle_tests {
                         let name = format!("runtime-{i}");
                         let builder = tokio::runtime::Builder::new_current_thread();
                         let options = TokioAttachOptions::builder()
-                            .runtime_name(name.clone())
+                            .runtime_name(name)
                             .build();
                         let runtime = handle.attach_tokio_runtime(builder, options).unwrap();
+                        let id = runtime.handle().id();
                         drop(runtime);
 
-                        // Keyed by `runtime_name`, not runtime id: `is_runtime` needs
-                        // `cfg(not(tokio_unstable))`, which this crate's shuttle build never sets.
                         let state = recorder_tokio::tokio_attach_state(&handle)
                             .expect("attach_tokio_runtime installed the source above");
                         let ctx = state
@@ -1242,7 +1648,7 @@ mod shuttle_tests {
                             .lock()
                             .unwrap()
                             .iter()
-                            .find(|c| c.runtime_name.as_deref() == Some(name.as_str()))
+                            .find(|c| c.is_runtime(id))
                             .cloned()
                             .expect("attach_tokio_runtime pushed this context above");
                         // Drives the real worker-registration path a live
@@ -1305,6 +1711,125 @@ mod shuttle_tests {
                      found these runtime.* entries: {runtime_entries:?}"
                 );
             }
+        }
+    }
+
+    shuttle_test! {
+        // Same `stack_size` and budget as `shuttle_concurrent_attach`.
+        num_iters = 10_000, depth = 3, stack_size = dial9_core::primitives::SHUTTLE_TOKIO_STACK_SIZE;
+        // Two detaches of one runtime race an attach of its same-name
+        // replacement and the flush thread's `segment_metadata`. Exactly one
+        // detach wins, only the replacement stays tracked, and the trace's
+        // final `runtime.main` lists only the replacement's worker.
+        fn shuttle_detach_races_attach_and_flush() {
+            let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+                metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+            ));
+
+            let writer = dial9_core::buffer::MemoryBuffer::new(1 << 16).unwrap();
+            let (capture, captured) = CapturingProcessor::new();
+            let recorder = dial9_core::recorder::recorder(writer)
+                .pipe(capture)
+                .build();
+            recorder.handle().enable();
+            let handle = recorder.handle().clone();
+            let options = || TokioAttachOptions::builder().runtime_name("main").build();
+            let context_of = |id: tokio::runtime::Id| {
+                recorder_tokio::tokio_attach_state(&handle)
+                    .expect("source installed by attach")
+                    .registry
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|c| c.is_runtime(id))
+                    .cloned()
+            };
+
+            let old = handle
+                .attach_tokio_runtime(tokio::runtime::Builder::new_current_thread(), options())
+                .unwrap();
+            let old_ctx = context_of(old.handle().id()).expect("old runtime attached");
+            // No live Tokio worker under shuttle; stand in for its first touch.
+            register_worker_if_needed(&old_ctx, 0);
+
+            let detachers: Vec<_> = (0..2)
+                .map(|_| {
+                    let handle = handle.clone();
+                    let rt = old.handle().clone();
+                    crate::primitives::thread::spawn(move || handle.detach_tokio_runtime(&rt))
+                })
+                .collect();
+            let attacher = {
+                let handle = handle.clone();
+                crate::primitives::thread::spawn(move || {
+                    let new = handle
+                        .attach_tokio_runtime(
+                            tokio::runtime::Builder::new_current_thread(),
+                            TokioAttachOptions::builder().runtime_name("main").build(),
+                        )
+                        .unwrap();
+                    let ctx = recorder_tokio::tokio_attach_state(&handle)
+                        .expect("source installed by attach")
+                        .registry
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|c| c.is_runtime(new.handle().id()))
+                        .cloned()
+                        .expect("new runtime attached");
+                    register_worker_if_needed(&ctx, 1);
+                    new
+                })
+            };
+
+            let wins = detachers
+                .into_iter()
+                .map(|d| d.join().unwrap())
+                .filter(|outcome| matches!(outcome, TokioDetachOutcome::Detached))
+                .count();
+            let new = attacher.join().unwrap();
+            assert_eq!(wins, 1, "exactly one concurrent detach releases the runtime");
+            assert!(old_ctx.detached.load(Ordering::Relaxed));
+            assert!(context_of(old.handle().id()).is_none());
+            assert!(context_of(new.handle().id()).is_some());
+            let metrics_ids = handle
+                .with_source(|s: &mut TokioRuntimesSource| {
+                    s.runtime_metrics.iter().map(|(id, _, _)| *id).collect::<Vec<_>>()
+                })
+                .unwrap();
+            assert_eq!(metrics_ids, vec![new.handle().id()]);
+            drop(old);
+            drop(new);
+
+            // A real event, so `finalize()` seals the segment (see
+            // `shuttle_concurrent_attach`).
+            handle.record_event(WorkerParkEvent {
+                timestamp_ns: 0,
+                worker_id: WorkerId::UNKNOWN,
+                local_queue: 0,
+                cpu_time_ns: 0,
+                tid: 0,
+            });
+            recorder.graceful_shutdown(Duration::from_secs(1));
+
+            // The writer's merge is incoming-wins, so the last emission is
+            // what a reader sees.
+            let mut seen = std::collections::HashMap::new();
+            for bytes in captured.lock().unwrap().iter() {
+                let events = crate::telemetry::format::decode_events(bytes).expect("decode trace");
+                for event in events {
+                    if let crate::telemetry::analysis_events::Dial9Event::SegmentMetadataEvent(meta) =
+                        event
+                    {
+                        seen.extend(meta.entries);
+                    }
+                }
+            }
+            assert_eq!(
+                seen.get("runtime.main").map(String::as_str),
+                Some("1"),
+                "runtime.main must list only the live runtime's worker: {seen:?}"
+            );
         }
     }
 }
