@@ -543,6 +543,7 @@ jobs:
           RUSTFLAGS: "--cfg tokio_unstable"
         run: |
           cargo package \
+            -p dial9-sampling \
             -p dial9-trace-format-derive \
             -p dial9-trace-format \
             -p dial9-core \

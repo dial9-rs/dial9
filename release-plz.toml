@@ -31,6 +31,10 @@ name = "dial9-tokio-telemetry"
 changelog_update = false
 
 [[package]]
+name = "dial9-sampling"
+changelog_update = false
+
+[[package]]
 name = "dial9-core"
 changelog_update = false
 
@@ -77,6 +81,7 @@ changelog_update = true
 changelog_path = "CHANGELOG.md"
 changelog_include = [
     "dial9-core",
+    "dial9-sampling",
     "dial9-utils",
     "dial9-destinations-s3",
     "dial9-metrique",

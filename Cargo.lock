@@ -1909,14 +1909,20 @@ dependencies = [
  "dial9-macro",
  "dial9-metrique",
  "dial9-perf-self-profile",
+ "dial9-sampling",
  "dial9-tokio-telemetry",
  "dial9-trace-format",
  "dial9-viewer",
  "flate2",
  "hostname",
  "metrique",
+ "rstest 0.26.1",
+ "s3s",
+ "s3s-aws",
+ "s3s-fs",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
@@ -2031,6 +2037,31 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "dial9-sampling"
+version = "0.5.6"
+dependencies = [
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "bon",
+ "bytes",
+ "dial9",
+ "dial9-core",
+ "dial9-destinations-s3",
+ "dial9-tokio-telemetry",
+ "rstest 0.26.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shuttle",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ulid",
 ]
 
 [[package]]
