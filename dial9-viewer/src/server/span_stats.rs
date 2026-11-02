@@ -6,6 +6,7 @@
 //! Uses the same scope/resolve/fold pipeline as `/api/flamegraph`. Reads
 //! `spans/` part-files (written by the v5 fold) for each folded source file.
 mod spans_reader;
+pub(crate) mod tail;
 
 #[cfg(test)]
 use spans_reader::parse_map_column;
@@ -1070,6 +1071,7 @@ impl SpanStatsAccum {
             attributes,
             composition,
             details_complete,
+            ..
         } = row;
         // Attribute filters narrow the entire aggregate: a non-matching row
         // contributes to no counts, histograms, composition, or exemplars.
@@ -1289,6 +1291,11 @@ impl SpanStatsAccum {
             elapsed_ns,
             exemplar: Some(exemplar),
             attributes: span.attributes,
+            attribute_units: span.attribute_units,
+            observed_active_wall_ns: Some(to_i64(
+                "observed_active_wall_ns",
+                span.observed_active_wall_ns,
+            )?),
             composition: Some(composition),
             details_complete: Some(span.details_complete),
         })
@@ -1553,6 +1560,8 @@ mod tests {
             elapsed_ns: unknown_ns,
             exemplar: None,
             attributes: Vec::new(),
+            attribute_units: Vec::new(),
+            observed_active_wall_ns: None,
             composition: Some(RowComposition {
                 on_cpu_ns: 0,
                 blocked_ns: 0,
@@ -1620,6 +1629,7 @@ mod tests {
                     details_complete: *complete,
                     concurrent: false,
                     parent_span_uid: None,
+                    attribute_units: Vec::new(),
                     attributes: attrs.clone(),
                     on_cpu_ns_est: None,
                     blocked_ns_est: None,
@@ -1643,6 +1653,85 @@ mod tests {
         let mut buf = Vec::new();
         write_spans(&mut buf, &resolved).unwrap();
         buf
+    }
+
+    #[rstest::rstest]
+    #[case(false, 0)]
+    #[case(true, 2)]
+    fn hydration_materializes_only_selected_coordinates(
+        #[case] select: bool,
+        #[case] expected_rows: u64,
+    ) {
+        let attributes = vec![("Mode".to_string(), "chosen".to_string())];
+        let data = make_spans_parquet_with_attrs(&[
+            (10, 20, 10, "A", "h1", true, attributes.clone()),
+            (10, 20, 10, "A", "h2", true, attributes.clone()),
+            (30, 40, 10, "A", "h1", true, attributes),
+        ]);
+        let mut expected = Vec::new();
+        let (_, result) =
+            SpansBatchReader::new(None, None, None, None).read(data.clone(), |input| {
+                if let SpanStatsInput::Row(row) = input
+                    && let Some(mut exemplar) = row.exemplar
+                    && select
+                    && (exemplar.start_ns, exemplar.end_ns) == (10, 20)
+                {
+                    exemplar.attributes.clear();
+                    expected.push((serde_json::to_value(exemplar)?, row.attributes));
+                }
+                Ok(())
+            });
+        result.unwrap();
+        let coordinates = if select {
+            [(10, 20)].into_iter().collect()
+        } else {
+            Default::default()
+        };
+        let mut actual = Vec::new();
+        let (phases, result) = SpansBatchReader::new(None, None, None, None)
+            .without_exemplar_attributes()
+            .with_selected_coordinates(coordinates)
+            .read(data, |input| {
+                if let SpanStatsInput::Row(row) = input
+                    && let Some(exemplar) = row.exemplar
+                {
+                    actual.push((serde_json::to_value(exemplar)?, row.attributes));
+                }
+                Ok(())
+            });
+        result.unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(phases.rows_materialized, expected_rows);
+        assert_eq!(phases.attribute_entries, expected_rows);
+    }
+
+    #[test]
+    fn hydration_selection_preserves_row_validation() {
+        // Invalid times must still fail even when no example selects the row.
+        use arrow::array::Int64Array;
+        use parquet::arrow::ArrowWriter;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let valid = make_spans_parquet(&[(10, 20, 10, "A", "h1", true)]);
+        let batch = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(valid))
+            .unwrap()
+            .build()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let schema = batch.schema();
+        let mut columns = batch.columns().to_vec();
+        columns[schema.index_of("end_ns").unwrap()] =
+            std::sync::Arc::new(Int64Array::from(vec![-1]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut data = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut data, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let (_, result) = SpansBatchReader::new(None, None, None, None)
+            .with_selected_coordinates(Default::default())
+            .read(data, |_| Ok(()));
+        assert!(result.unwrap_err().to_string().contains("negative end_ns"));
     }
 
     /// Finding 3: Occurrence time is end_ns in [start, end).
@@ -1701,6 +1790,7 @@ mod tests {
             details_complete: true,
             concurrent: false,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
             on_cpu_ns_est: None,
             blocked_ns_est: None,
@@ -1819,6 +1909,7 @@ mod tests {
                     details_complete: true,
                     concurrent: false,
                     parent_span_uid: None,
+                    attribute_units: Vec::new(),
                     attributes: Vec::new(),
                     on_cpu_ns_est: None,
                     blocked_ns_est: None,
@@ -1894,6 +1985,7 @@ mod tests {
                     details_complete: true,
                     concurrent: false,
                     parent_span_uid: None,
+                    attribute_units: Vec::new(),
                     attributes: Vec::new(),
                     on_cpu_ns_est: None,
                     blocked_ns_est: None,
@@ -1981,6 +2073,7 @@ mod tests {
             details_complete: false,
             concurrent: false,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: vec![],
             on_cpu_ns_est: Some(on_cpu),
             blocked_ns_est: None,
@@ -2104,6 +2197,7 @@ mod tests {
                 details_complete: true,
                 concurrent: false,
                 parent_span_uid: None,
+                attribute_units: Vec::new(),
                 attributes: Vec::new(),
                 on_cpu_ns_est: None,
                 blocked_ns_est: None,
@@ -2685,6 +2779,7 @@ mod tests {
             details_complete: true,
             concurrent: false,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: vec![
                 ("http.method".to_string(), "GET".to_string()),
                 ("http.path".to_string(), "/api/users".to_string()),
@@ -2910,6 +3005,7 @@ mod tests {
             details_complete: true,
             concurrent: false,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
             on_cpu_ns_est: None,
             blocked_ns_est: None,

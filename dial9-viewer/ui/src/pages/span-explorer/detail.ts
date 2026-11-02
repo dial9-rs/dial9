@@ -1,6 +1,5 @@
-// The detail panel for the selected span type: header, duration histogram,
-// band readout, five-way time composition, flamegraph deep links, exemplars,
-// and the coverage badge.
+// One investigation surface for the selected span: duration histogram,
+// latency analysis, time composition, and trace inspection.
 
 import { html, nothing, render, type TemplateResult } from "lit-html";
 import {
@@ -45,6 +44,11 @@ export interface HistogramComparisonModel {
 /** Everything the panel renders from. */
 export interface DetailModel {
   spanType: SpanTypeStats | undefined;
+  catalogExpanded: boolean;
+  spanTypeCount: number;
+  onToggleCatalog: () => void;
+  /** A replacement catalog is loading, so the previous detail is retired. */
+  loading?: boolean;
   band: DurationBand;
   coverage: Coverage | null;
   attrFilters: readonly AttrFilter[];
@@ -112,6 +116,10 @@ function headerTemplate(
           : fmtNs(st.max_ns)
       }</span
     >
+    <button id="btn-toggle-catalog" class="change-span" type="button"
+      aria-controls="catalog-wrap" aria-expanded=${m.catalogExpanded} @click=${m.onToggleCatalog}>
+      ${m.catalogExpanded ? "Hide span list" : `Change span · ${m.spanTypeCount}`}
+    </button>
   </div>`;
 }
 
@@ -272,7 +280,7 @@ export function renderDetail(detailPanel: HTMLElement, m: DetailModel): void {
   const st = m.spanType;
   if (!st) {
     detailPanel.className = "detail-panel empty";
-    render(html`<span>${EMPTY_HINT}</span>`, detailPanel);
+    render(m.loading ? nothing : html`<span>${EMPTY_HINT}</span>`, detailPanel);
     return;
   }
   detailPanel.className = "detail-panel";
@@ -300,9 +308,18 @@ export function renderDetail(detailPanel: HTMLElement, m: DetailModel): void {
     html`
       ${headerTemplate(st, m, exemplars[0] ?? null)}
       <div class="histogram-wrap"></div>
-      ${bandTemplate(st, m)} ${compositionTemplate(st, m)}
-      ${flamegraphLinksTemplate(m)}
-      ${exemplarsTemplate(exemplars, tableCtx, hasBand, m.exemplarRefreshPending)}
+      ${bandTemplate(st, m)}
+      <div class="span-tail-mount"></div>
+      ${compositionTemplate(st, m)}
+      <section class="span-trace-inspection" aria-label="Trace inspection">
+        <div class="span-trace-heading"><h3>Inspect traces</h3>
+          ${flamegraphLinksTemplate(m)}
+        </div>
+        <details class="span-recorded-instances">
+          <summary>Browse recorded instances${hasBand ? " in selected band" : ""}</summary>
+          ${exemplarsTemplate(exemplars, tableCtx, hasBand, m.exemplarRefreshPending)}
+        </details>
+      </section>
       ${
         m.coverage
           ? html`<div class="coverage">${formatCoverageBadge(m.coverage)}</div>`

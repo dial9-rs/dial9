@@ -11,6 +11,7 @@ use arrow::array::{
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use std::collections::BTreeSet;
 
 use super::{Exemplar, ExemplarAttribute, TimeComposition};
 use crate::server::metrics::SpanStatsPhaseDurations;
@@ -50,6 +51,8 @@ const SPAN_STATS_COLUMNS: &[&str] = &[
     "scheduler_delay_ns",
     "unknown_ns",
     "attributes",
+    "attribute_units",
+    "observed_active_wall_ns",
     "source_key",
     "host",
 ];
@@ -97,6 +100,8 @@ pub(super) struct SpanStatsRow {
     pub elapsed_ns: i64,
     pub exemplar: Option<Exemplar>,
     pub attributes: Vec<(String, String)>,
+    pub attribute_units: Vec<(String, String)>,
+    pub observed_active_wall_ns: Option<i64>,
     pub composition: Option<RowComposition>,
     pub details_complete: Option<bool>,
 }
@@ -114,6 +119,8 @@ pub(super) struct SpansBatchReader {
     end_ns: Option<i64>,
     span_type_uid: Option<[u8; 16]>,
     exemplar_only: Option<ExemplarOnlyConfig>,
+    exemplar_attributes: bool,
+    selected_coordinates: Option<BTreeSet<(i64, i64)>>,
 }
 
 #[derive(Default)]
@@ -133,7 +140,22 @@ impl SpansBatchReader {
             end_ns,
             span_type_uid,
             exemplar_only,
+            exemplar_attributes: true,
+            selected_coordinates: None,
         }
+    }
+
+    pub(super) fn without_exemplar_attributes(mut self) -> Self {
+        self.exemplar_attributes = false;
+        self
+    }
+
+    /// Hydration only needs selected example coordinates. Keep row validation
+    /// and wire order, including duplicate identities, before materializing.
+    pub(super) fn with_selected_coordinates(mut self, coordinates: BTreeSet<(i64, i64)>) -> Self {
+        debug_assert!(self.exemplar_only.is_none());
+        self.selected_coordinates = Some(coordinates);
+        self
     }
 
     pub(super) fn read(
@@ -261,6 +283,8 @@ impl SpansBatchReader {
         let source_key_col = column::<StringArray>(batch, "source_key");
         let host_col = column::<StringArray>(batch, "host");
         let attributes_col = column::<MapArray>(batch, "attributes");
+        let units_col = column::<MapArray>(batch, "attribute_units");
+        let active_wall_col = column::<Int64Array>(batch, "observed_active_wall_ns");
         let on_cpu_col = column::<Int64Array>(batch, "on_cpu_ns_est");
         let blocked_col = column::<Int64Array>(batch, "blocked_ns_est");
         let async_wait_col = column::<Int64Array>(batch, "async_wait_ns");
@@ -367,13 +391,17 @@ impl SpansBatchReader {
                         scheduler_delay_frac_sum: 0.0,
                         unknown_frac_sum: 0.0,
                     }),
-                    attributes: attributes
-                        .iter()
-                        .map(|(key, value)| ExemplarAttribute {
-                            key: key.clone(),
-                            value: value.clone(),
-                        })
-                        .collect(),
+                    attributes: (if self.exemplar_attributes {
+                        attributes.as_slice()
+                    } else {
+                        &[]
+                    })
+                    .iter()
+                    .map(|(key, value)| ExemplarAttribute {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
                 });
 
             SpanStatsRow {
@@ -386,6 +414,10 @@ impl SpansBatchReader {
                 elapsed_ns,
                 exemplar,
                 attributes,
+                attribute_units: units_col
+                    .map(|array| parse_map_column(array, row_index))
+                    .unwrap_or_default(),
+                observed_active_wall_ns: optional_i64(active_wall_col, row_index),
                 composition,
                 details_complete: optional_bool(details_complete_col, row_index),
             }
@@ -466,6 +498,14 @@ impl SpansBatchReader {
             let Some((elapsed_ns, end_ns)) = scoped_row(row_index)? else {
                 continue;
             };
+            if self.selected_coordinates.as_ref().is_some_and(|selected| {
+                !selected.contains(&(
+                    optional_i64(start_ns_col, row_index).unwrap_or(0),
+                    end_ns.unwrap_or(0),
+                ))
+            }) {
+                continue;
+            }
             let row = materialize_row(row_index, elapsed_ns, end_ns);
             counts.rows += 1;
             counts.attribute_entries += row.attributes.len() as u64;

@@ -138,6 +138,39 @@ describe("store.pointsOfInterest matches frozen filterPointsOfInterest", () => {
     expect(filterPointsOfInterest("spawn-delay", ws, workerIds, fatSched, opts)).toEqual([]);
   });
 
+  it("wake-delay: keeps a direct first-poll delay without a spawn", () => {
+    const first = {
+      start: 100,
+      end: 110,
+      taskId: 1,
+      spawnLocId: null,
+      spawnLoc: null,
+      schedulingDelay: 50,
+    };
+    const synthetic = {
+      0: { polls: [first], parks: [], actives: [], cpuSampleTimes: [] },
+    };
+    const delays = [
+      {
+        wakeTime: 50,
+        pollTime: 100,
+        delay: 50,
+        taskId: 1,
+        wakerTaskId: 0,
+        worker: 0,
+        poll: first,
+      },
+    ];
+    const syntheticStore = ColumnarWorkerSpans.fromWorkerSpans(synthetic);
+
+    const fat = filterPointsOfInterest("wake-delay", synthetic, [0], delays, {});
+    const col = syntheticStore.pointsOfInterest("wake-delay", [0], delays, {});
+
+    expect(fat).toHaveLength(1);
+    expect(col).toHaveLength(1);
+    expect(bag(col)).toEqual(bag(fat));
+  });
+
   it("spawn-delay: the frozen core's default threshold matches the TS one", () => {
     expect(CORE_SPAWN_DELAY_THRESHOLD_US).toBe(DEFAULT_SPAWN_DELAY_THRESHOLD_US);
   });

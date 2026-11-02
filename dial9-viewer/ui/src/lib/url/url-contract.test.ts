@@ -32,6 +32,7 @@ import {
 import { FLAMEGRAPH_LEGACY_PARAMS } from "./legacy-params.fixture.js";
 import { VIEWER_VIEW_QUERY_PARAMS } from "../../pages/viewer/url-state.js";
 import { POI_FILTERS } from "../../pages/viewer/poi.js";
+import { SPAN_EXPLORER_QUERY_PARAMS } from "../../pages/span-explorer/scope.js";
 
 const require = createRequire(import.meta.url);
 const uiDir = fileURLToPath(new URL("../../../", import.meta.url));
@@ -137,6 +138,11 @@ describe("URL contract: contract tables match the recorded fixtures", () => {
       section("Query params - viewer.html durable view state"),
     );
     expect(sorted(documented)).toEqual(sorted(VIEWER_VIEW_QUERY_PARAMS));
+  });
+
+  it("Span Explorer table = its source and durable analysis URL registry", () => {
+    expect(sorted(tableNames(section("Query params - span_explorer.html"))))
+      .toEqual(sorted(SPAN_EXPLORER_QUERY_PARAMS));
   });
 
   it("issue values = the viewer's issue detectors", () => {

@@ -62,6 +62,8 @@ export function schedulingDelayEvidenceLabel(kind: string | undefined): string {
       return "wake → poll";
     case "wake_during_poll":
       return "poll end → next poll";
+    case "task_meta":
+      return "Tokio measurement";
     default:
       return "unknown evidence";
   }

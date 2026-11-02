@@ -545,6 +545,7 @@ pub(crate) fn resolve_legacy_spans(
             scheduler_delay_ns: None,
             attribution_flags: flags,
             parent_span_uid,
+            attribute_units: Vec::new(),
             attributes: ctx.map(|c| c.attributes.clone()).unwrap_or_default(),
             source_key: source_key.to_string(),
             host: host.to_string(),
@@ -748,6 +749,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -779,6 +781,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 11,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -788,6 +791,7 @@ mod tests {
                 worker_id: 2,
                 task_id: 22,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -821,6 +825,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -858,6 +863,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -883,6 +889,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -916,6 +923,7 @@ mod tests {
             worker_id: 1,
             task_id: 11,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -943,6 +951,7 @@ mod tests {
             worker_id: 0,
             task_id: 99,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         }];
@@ -976,6 +985,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 11,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -985,6 +995,7 @@ mod tests {
                 worker_id: 2,
                 task_id: 22,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },

@@ -88,6 +88,7 @@ export interface PollView {
   taskId: number;
   spawnLocId: string | null;
   spawnLoc: string | null;
+  schedulingDelay?: number | undefined;
   openEnded: boolean;
   cpuSamples?: CpuSample[];
   schedSamples?: CpuSample[];
@@ -114,8 +115,8 @@ export interface ActiveView {
   ratio: number;
 }
 
-/** A wake->poll scheduling delay (feeds the wake-delay POI). `poll` is a fresh
- * PollView (consumers read poll.end); shape matches the frozen schedDelay. */
+/** A runnable-to-poll scheduling delay (feeds the wake-delay POI). `poll` is
+ * a fresh PollView (consumers read poll.end); shape matches the frozen delay. */
 export interface SchedDelayView {
   wakeTime: number;
   pollTime: number;
@@ -276,6 +277,8 @@ class WorkerPollColumns {
   spawnIdx: Int32Array;
   /** 1 = openEnded (no matching PollEnd), else 0. */
   openEnded: Uint8Array;
+  /** NaN encodes an absent direct scheduling-delay measurement. */
+  schedulingDelay: Float64Array;
   private _forest: SegmentForest<SpanAgg> | null = null;
 
   // Park spans (start/end sorted): end + NaN-encoded schedWait.
@@ -311,6 +314,8 @@ class WorkerPollColumns {
     this.taskId = new Float64Array(n);
     this.spawnIdx = new Int32Array(n);
     this.openEnded = new Uint8Array(n);
+    this.schedulingDelay = new Float64Array(n);
+    this.schedulingDelay.fill(NaN);
     this.parkStart = new Float64Array(nParks);
     this.parkEnd = new Float64Array(nParks);
     this.parkSchedWait = new Float64Array(nParks);
@@ -392,6 +397,8 @@ export class ColumnarWorkerSpans {
         cols.taskId[i] = p.taskId;
         cols.spawnIdx[i] = store.intern(p.spawnLoc ?? null);
         cols.openEnded[i] = p.openEnded ? 1 : 0;
+        cols.schedulingDelay[i] =
+          p.schedulingDelay == null ? NaN : p.schedulingDelay;
       }
       for (let i = 0; i < parks.length; i++) {
         cols.parkStart[i] = parks[i]!.start;
@@ -518,6 +525,8 @@ export class ColumnarWorkerSpans {
       start: c.start[i]!, end: c.end[i]!, taskId: c.taskId[i]!,
       spawnLocId: s, spawnLoc: s, openEnded: c.openEnded[i] === 1,
     };
+    const schedulingDelay = c.schedulingDelay[i]!;
+    if (!Number.isNaN(schedulingDelay)) view.schedulingDelay = schedulingDelay;
     if (this.cpuSamplesArr && c.cpuOff && c.cpuOff[i + 1]! > c.cpuOff[i]!) {
       view.cpuSamples = this.sliceSamples(c.cpuIdx!, c.cpuOff[i]!, c.cpuOff[i + 1]!);
     }
@@ -655,8 +664,22 @@ export class ColumnarWorkerSpans {
     }
 
     if (filterType === "wake-delay") {
+      // The first poll belongs to the separate spawn-delay detector. TaskMeta
+      // also measures it, but surfacing it here would list the same wait twice.
+      const csr = this.pollsByTaskCSR();
       for (const sd of schedDelays) {
         if (sd.delay <= 0) continue;
+        const slot = csr.slotOf.get(sd.taskId);
+        const spawnTs = opts.taskSpawnTimes?.get(sd.taskId);
+        if (
+          sd.poll.schedulingDelay != null &&
+          slot !== undefined &&
+          csr.start[csr.off[slot]!] === sd.pollTime &&
+          spawnTs !== undefined &&
+          spawnTs < sd.pollTime
+        ) {
+          continue;
+        }
         add({ time: sd.wakeTime, worker: sd.worker, type: "wake-delay", value: sd.delay / 1000, span: sd.poll, schedDelay: sd });
       }
     }
@@ -1032,9 +1055,10 @@ export class ColumnarWorkerSpans {
   /**
    * Columnar port of the frozen computeSchedulingDelays. For each poll of a
    * task, find the latest wake before its start; if that wake landed mid an
-   * earlier poll of the same task, measure from that poll's end. Emits a
-   * schedDelay per poll with delay in (0, 1e9), sorted by wakeTime - identical
-   * to the fat pass. `pollsByTask` (5.3M poll refs in the fat pass) becomes a
+   * earlier poll of the same task, measure from that poll's end. Direct
+   * measurements are preferred; inferred delays retain the historical
+   * (0, 1e9) validity bound. Results are sorted by wakeTime, identical to the
+   * fat pass. `pollsByTask` (5.3M poll refs in the fat pass) becomes a
    * per-task CSR over Float64 start/end columns (~85 MB, not 1.9 GB of objects),
    * transient to this call.
    */
@@ -1065,6 +1089,22 @@ export class ColumnarWorkerSpans {
         if ((++scanned & SCHED_CHUNK_MASK) === 0) yield scanned / total;
         const taskId = c.taskId[i];
         if (!taskId) continue;
+        const directDelay = c.schedulingDelay[i]!;
+        if (!Number.isNaN(directDelay)) {
+          if (directDelay > 0) {
+            const pollStart = c.start[i]!;
+            out.push(
+              Math.max(0, pollStart - directDelay),
+              pollStart,
+              directDelay,
+              taskId,
+              0,
+              w,
+              i,
+            );
+          }
+          continue;
+        }
         const taskWakes = wakes.forTask(taskId);
         if (taskWakes.length === 0) continue;
         const sStart = c.start[i]!;
@@ -1107,7 +1147,7 @@ const SCHED_CHUNK_MASK = (1 << 16) - 1;
 /** Per-worker growable number[] columns during a direct build; frozen to typed
  * arrays in finish(). */
 class WorkerColBuilder {
-  pStart: number[] = []; pEnd: number[] = []; pTask: number[] = []; pSpawn: number[] = []; pOpen: number[] = [];
+  pStart: number[] = []; pEnd: number[] = []; pTask: number[] = []; pSpawn: number[] = []; pOpen: number[] = []; pSchedulingDelay: number[] = [];
   kStart: number[] = []; kEnd: number[] = []; kWait: number[] = [];
   aStart: number[] = []; aEnd: number[] = []; aRatio: number[] = [];
 }
@@ -1133,10 +1173,11 @@ export class ColumnarWorkerSpansBuilder {
     return b;
   }
 
-  pushPoll(w: number, start: number, end: number, taskId: number, spawnLoc: string | null, openEnded: boolean): void {
+  pushPoll(w: number, start: number, end: number, taskId: number, spawnLoc: string | null, openEnded: boolean, schedulingDelay?: number): void {
     const b = this.col(w);
     b.pStart.push(start); b.pEnd.push(end); b.pTask.push(taskId);
     b.pSpawn.push(this.store._internSpawn(spawnLoc)); b.pOpen.push(openEnded ? 1 : 0);
+    b.pSchedulingDelay.push(schedulingDelay ?? NaN);
   }
   pushPark(w: number, start: number, end: number, schedWait: number | null): void {
     const b = this.col(w);
@@ -1152,6 +1193,7 @@ export class ColumnarWorkerSpansBuilder {
       const cols = new WorkerPollColumns(b.pStart.length, b.kStart.length, b.aStart.length);
       cols.start.set(b.pStart); cols.end.set(b.pEnd); cols.taskId.set(b.pTask);
       cols.spawnIdx.set(b.pSpawn); cols.openEnded.set(b.pOpen);
+      cols.schedulingDelay.set(b.pSchedulingDelay);
       cols.parkStart.set(b.kStart); cols.parkEnd.set(b.kEnd); cols.parkSchedWait.set(b.kWait);
       cols.activeStart.set(b.aStart); cols.activeEnd.set(b.aEnd); cols.activeRatio.set(b.aRatio);
       this.store._ingestWorker(w, cols);

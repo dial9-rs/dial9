@@ -502,6 +502,7 @@ fn resolve_span_task(worker_polls: &[(u64, u64, u64)], enter_ts: u64) -> Option<
             worker_id: 1,
             task_id,
             spawn_loc: None,
+            scheduling_delay_ns: None,
             readiness: None,
             task_instrumented: None,
         })
@@ -758,6 +759,7 @@ mod tests {
         assert_eq!(polls.len(), 1);
         assert_eq!(polls[0].start_ns, 10);
         assert_eq!(polls[0].end_ns, 20);
+        assert_eq!(polls[0].scheduling_delay_ns, None);
     }
 
     #[test]

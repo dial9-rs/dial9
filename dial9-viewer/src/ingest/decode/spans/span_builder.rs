@@ -68,6 +68,7 @@ pub(crate) struct SpanCandidate {
     // ── Relationships ────────────────────────────────────────────────────
     pub(crate) parent_span_uid: Option<[u8; 16]>,
     pub(crate) attributes: Vec<(String, String)>,
+    pub(crate) attribute_units: Vec<(String, String)>,
 
     // ── Source metadata ──────────────────────────────────────────────────
     pub(crate) source_key: String,
@@ -196,6 +197,7 @@ impl SpanCandidate {
             details_complete,
             concurrent,
             parent_span_uid: self.parent_span_uid,
+            attribute_units: self.attribute_units,
             attributes: self.attributes,
             on_cpu_ns_est,
             blocked_ns_est,
@@ -356,6 +358,7 @@ mod tests {
             scheduler_delay_ns: None,
             attribution_flags: 0b1111,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
             source_key: "test/key".to_string(),
             host: "host".to_string(),
@@ -399,6 +402,7 @@ mod tests {
             scheduler_delay_ns: None,
             attribution_flags: 0,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
             source_key: "test/key".to_string(),
             host: "host".to_string(),
@@ -441,6 +445,7 @@ mod tests {
             scheduler_delay_ns: None,
             attribution_flags: 0,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
             source_key: "test/key".to_string(),
             host: "host".to_string(),
@@ -480,6 +485,7 @@ mod tests {
             scheduler_delay_ns: None,
             attribution_flags: 0b1011,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
             source_key: "test/key".to_string(),
             host: "host".to_string(),

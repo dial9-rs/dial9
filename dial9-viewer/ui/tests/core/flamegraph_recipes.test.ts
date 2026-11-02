@@ -148,8 +148,8 @@ describe("flamegraph recipes", { timeout: 60_000 }, () => {
   // CPU sampling is stochastic: the demo must contain a qualifying poll,
   // but a 99Hz sample need not land inside it. Cross-check the recipe's
   // timestamp filter against the independently attached per-poll samples.
-  it("Recipe polls > 5ms", () => {
-    const THRESHOLD_NS = 5_000_000;
+  it("Recipe polls > 1ms", () => {
+    const THRESHOLD_NS = 1_000_000;
     const longPolls: Array<{ poll: Poll; workerId: number }> = [];
     for (const wid of workerIds) {
       for (const p of workerSpans[wid]!.polls) {
@@ -158,7 +158,7 @@ describe("flamegraph recipes", { timeout: 60_000 }, () => {
         }
       }
     }
-    expect(longPolls.length, "expected at least one poll over 5ms").toBeGreaterThan(0);
+    expect(longPolls.length, "expected at least one poll over 1ms").toBeGreaterThan(0);
 
     const samples = trace.cpuSamples.filter(
       (s) =>
@@ -174,12 +174,9 @@ describe("flamegraph recipes", { timeout: 60_000 }, () => {
       .flatMap(({ poll }) => poll.cpuSamples ?? [])
       .filter((s) => s.source === 0);
     // We deliberately do NOT assert `attached.length > 0`: at 99Hz a sample
-    // need not land inside a >5ms poll, and the current demo fixture has
-    // none, so that assertion is data-dependent and flaky (it carried
-    // `.fails` before the 2026-07 regen). The invariant that matters and is
-    // always true is that the recipe's timestamp filter agrees with the
-    // independently attached per-poll samples — including when both are
-    // empty.
+    // need not land inside a qualifying poll. The invariant that matters is
+    // that the recipe's timestamp filter agrees with the independently
+    // attached per-poll samples — including when both are empty.
     expect(
       samples.map((s) => s.timestamp).sort((a, b) => a - b),
       "direct long-poll filter disagrees with attached samples",

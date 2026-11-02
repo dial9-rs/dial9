@@ -398,8 +398,8 @@ pub fn parse_cred_inputs(
 /// [`crate::storage::EphemeralS3Config`] injects the S3 connector).
 pub trait RoleAssumer: Send + Sync {
     /// Assume `role_arn` and return temporary credentials. `region`, when set,
-    /// pins both the STS endpoint used to assume the role and the region carried
-    /// on the resulting credentials. Errors are opaque: the resolve path maps any
+    /// pins the S3 region carried on the resulting credentials. STS uses the
+    /// server's ambient region. Errors are opaque: the resolve path maps any
     /// failure to a 401 so the SDK message — which can name the role/account — is
     /// never reflected to the client (it is logged server-side instead).
     fn assume_role<'a>(
@@ -461,13 +461,13 @@ impl RoleAssumer for StsRoleAssumer {
     > {
         use aws_sdk_s3::config::ProvideCredentials;
         Box::pin(async move {
-            let mut builder = aws_config::sts::AssumeRoleProvider::builder(role_arn.as_str())
+            // The source identity may not be enabled in the bucket's opt-in
+            // Region. Assume in its ambient Region, then use the result for S3.
+            let provider = aws_config::sts::AssumeRoleProvider::builder(role_arn.as_str())
                 .configure(&self.config)
-                .session_name(ASSUME_ROLE_SESSION_NAME);
-            if let Some(region) = region {
-                builder = builder.region(aws_sdk_s3::config::Region::new(region.to_string()));
-            }
-            let provider = builder.build().await;
+                .session_name(ASSUME_ROLE_SESSION_NAME)
+                .build()
+                .await;
 
             let creds = provider
                 .provide_credentials()
@@ -846,8 +846,12 @@ mod tests {
     /// prove the [`AssumeRoleProvider`] wiring (region, credential extraction)
     /// yields the assumed credentials — without a network call. The canned XML
     /// shape mirrors aws-config's own AssumeRoleProvider tests.
+    #[rstest::rstest]
+    #[case(Some("ap-southeast-4"))]
+    #[case(Some("us-west-2"))]
+    #[case(None)]
     #[tokio::test]
-    async fn sts_role_assumer_mints_assumed_credentials() {
+    async fn sts_role_assumer_mints_assumed_credentials(#[case] region: Option<&str>) {
         use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
         use aws_smithy_types::body::SdkBody;
 
@@ -880,13 +884,13 @@ mod tests {
             .region(aws_sdk_s3::config::Region::new("us-east-1"))
             .time_source(aws_smithy_async::time::SystemTimeSource::new())
             .sleep_impl(aws_smithy_async::rt::sleep::TokioSleep::new())
-            .http_client(http_client)
+            .http_client(http_client.clone())
             .build();
 
         let assumer = StsRoleAssumer::from_config(config);
         let arn = RoleArn("arn:aws:iam::123456789012:role/dial9-reader".to_string());
         let temp = assumer
-            .assume_role(&arn, Some("us-west-2"))
+            .assume_role(&arn, region)
             .await
             .expect("assume-role should succeed against the replayed response");
 
@@ -894,6 +898,18 @@ mod tests {
         assert_eq!(temp.credentials.secret_access_key(), "assumed-secret");
         assert_eq!(temp.credentials.session_token(), Some("assumed-token"));
         // Region is forwarded from the request, not the base config.
-        assert_eq!(temp.region.as_deref(), Some("us-west-2"));
+        assert_eq!(temp.region.as_deref(), region);
+
+        let requests = http_client.actual_requests().collect::<Vec<_>>();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].uri(), "https://sts.us-east-1.amazonaws.com/");
+        assert!(
+            requests[0]
+                .headers()
+                .get("authorization")
+                .unwrap()
+                .contains("/us-east-1/sts/aws4_request"),
+            "STS must use the source identity's Region, independently of the S3 Region"
+        );
     }
 }

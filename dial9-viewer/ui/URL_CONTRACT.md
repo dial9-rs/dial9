@@ -228,6 +228,47 @@ service:
 | `to` | epoch seconds | Precise window end. |
 | `q` | string | Raw-search prefix query. |
 
+## Query params - span_explorer.html
+
+Span Explorer restores source, selected span, duration band and analysis
+controls from the query. Meaningful changes push history entries; Back and
+Forward restore the corresponding controls and requests. Defaults are omitted.
+Unrelated query parameters and the hash are preserved. Invalid analysis enum
+values are ignored. Temporary hover, pinned details and dialogs are not shared.
+
+| Param | Value | Meaning |
+|-------|-------|---------|
+| `trace` | URL | Raw trace source; takes precedence over aggregate mode. |
+| `api` | `1` | Aggregate mode. |
+| `data_dir` | path | Local-directory aggregate scope. |
+| `bucket` | string | S3 source bucket. |
+| `aws_region` | string | Source AWS Region. |
+| `aws_role_arn` | string | Role restored at boot; API requests carry it only in the credential header. |
+| `credential_mode` | `ambient` \| `role` \| `literal` | Credential identity mode. Literal secret values remain tab-scoped and are never serialized. |
+| `prefix` | string | Source key prefix. |
+| `service` | string | Source service filter. |
+| `host` | string, **repeatable** | Exact source host filters. |
+| `start_ns` | epoch ns | Occurrence-window start. |
+| `end_ns` | epoch ns | Occurrence-window end. |
+| `span_type_uid` | exact span-type ID | Selected callsite. |
+| `min_span_ns` | non-negative ns | Inclusive selected duration lower bound. |
+| `max_span_ns` | non-negative ns | Inclusive selected duration upper bound; omitted for an open-ended band. |
+| `attr` | `<key>=<value>`, **repeatable** | Attribute filters; the first `=` separates the key from its exact value. |
+| `max_files` | positive integer | Catalog/refinement file ceiling; tail analysis still caps it at 24. |
+| `tail_percentile` | `95` \| `99` \| `99.9` | Slow comparison percentile; default 99. Choosing a percentile clears the duration band. |
+| `tail_group_key` | string | Categorical analysis scope key; requires the accompanying value. |
+| `tail_group_value` | string | Exact categorical scope value, including an empty string or missing-value marker. Percent-encode once normally. |
+| `tail_property` | string | Displayed categorical histogram field. |
+| `tail_mode` | `stacked` \| `overlay` | Categorical histogram presentation; default stacked. |
+| `tail_x_scale` | `log` \| `linear` | Numeric plots' elapsed axis only; default log. |
+| `tail_fields` | `all` | Expand the numeric field list; omitted for its initial three fields. |
+
+Group scoping recomputes the complete comparison and its percentile within
+that group. Reset removes both group parameters. Initial grouped links survive
+loading and Apply/source refresh. Explicitly choosing another span clears
+its field/value scope and displayed property while retaining display
+preferences; history restoration restores the historical span's scope.
+
 ## Hash - versioned view state (`#v=1`)
 
 The hash carries a form-encoded payload with a leading integer version:

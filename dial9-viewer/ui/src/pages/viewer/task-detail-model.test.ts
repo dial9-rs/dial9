@@ -124,6 +124,25 @@ describe("computeTaskDetailData", () => {
     expect(data.hasPolls).toBe(true);
   });
 
+  it("skips wake matching when every poll has a direct delay", () => {
+    const measured = {
+      ...poll(100, 200, 42),
+      schedulingDelay: 25,
+    };
+    const data = computeTaskDetailData(
+      source({
+        workerIds: [0],
+        pollsByWorker: { 0: [measured] },
+        wakesByTask: { 42: [wake(50, 5)] },
+      }),
+      fakeTrace({}),
+      42,
+    );
+
+    expect(data.wakeCount).toBe(1);
+    expect(data.pollWakes).toEqual([null]);
+  });
+
   it("returns EMPTY when nothing is selected or the task has no polls", () => {
     const src = source({ workerIds: [0], pollsByWorker: { 0: [poll(0, 1, 9)] } });
     const trace = fakeTrace({});
@@ -330,6 +349,59 @@ describe("buildTaskDetailRenderModel: wake bands", () => {
     ).toBe("⏳ Scheduled — waiting 7.14ms for first poll after task spawn");
   });
 
+  it("uses spawn for the first poll and TaskMeta for later polls", () => {
+    const first = {
+      ...poll(4_000_000, 4_100_000, 1),
+      schedulingDelay: 2_000_000,
+    };
+    const second = {
+      ...poll(8_000_000, 8_100_000, 1),
+      schedulingDelay: 2_000_000,
+    };
+    const data = detailData({
+      polls: [first, second],
+      pollWakes: [
+        wakeInfo(3_000_000, 10, "first.rs:1"),
+        wakeInfo(7_000_000, 20, "second.rs:1"),
+      ],
+      spawnTs: 1_000_000,
+    });
+    const model = buildTaskDetailRenderModel({
+      data,
+      viewStart: 0,
+      viewEnd: 10_000_000,
+      drawW: 1000,
+    });
+
+    expect(model.schedulingBands).toEqual([
+      {
+        kind: "spawn",
+        x1: 100,
+        x2: 400,
+        delayNs: 3_000_000,
+        severity: "high",
+        showDelayLabel: true,
+      },
+      {
+        kind: "task-meta",
+        x1: 600,
+        x2: 800,
+        delayNs: 2_000_000,
+        severity: "high",
+        showDelayLabel: true,
+      },
+    ]);
+    expect(model.wakeRegions).toHaveLength(0);
+    expect(
+      model.hitRegions
+        .filter((region) => region.type === "scheduled")
+        .map((region) => region.detail),
+    ).toEqual([
+      "Scheduled — waiting 3ms for first poll after task spawn",
+      "Scheduled — waiting 2ms for worker to poll (measured by Tokio)",
+    ]);
+  });
+
   it("colours bands by delay severity and gates the labels on width", () => {
     // 1:1 ns->x would need a huge drawW; use a 10ms window / 1000px so the
     // three severities and both width thresholds are all exercised.
@@ -402,6 +474,21 @@ describe("buildTaskDetailRenderModel: idle gaps + lifespan", () => {
       pollWakes: [null, wakeInfo(140, 5, "io")],
     });
     const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
+    expect(m.idleBands).toHaveLength(0);
+  });
+
+  it("suppresses the idle band when direct readiness covers the gap", () => {
+    const next = {
+      ...poll(300, 350, 1),
+      schedulingDelay: 160,
+    };
+    const data = detailData({ polls: [poll(100, 150, 1), next] });
+    const m = buildTaskDetailRenderModel({
+      data,
+      viewStart: 0,
+      viewEnd: 1000,
+      drawW: 1000,
+    });
     expect(m.idleBands).toHaveLength(0);
   });
 

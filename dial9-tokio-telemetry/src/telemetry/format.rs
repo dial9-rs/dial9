@@ -82,6 +82,9 @@ pub struct PollStartEvent {
     pub task_id: TaskId,
     /// Interned spawn location.
     pub spawn_loc: InternedString,
+    /// Time from the task becoming scheduled until this poll began.
+    #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+    pub scheduling_delay_ns: u64,
 }
 
 /// Wire-format event for a task poll end.
@@ -274,4 +277,26 @@ pub(crate) fn decode_events(
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PollStartEvent;
+    use dial9_trace_format::TraceEvent;
+
+    #[test]
+    fn poll_start_schedule_latency_schema_matches_feature() {
+        let fields = PollStartEvent::field_defs();
+        let scheduling_delay = fields
+            .iter()
+            .find(|field| field.name() == "scheduling_delay_ns");
+
+        #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+        assert_eq!(
+            scheduling_delay.map(|field| field.field_type()),
+            Some(dial9_trace_format::types::FieldType::Varint)
+        );
+        #[cfg(not(all(tokio_unstable, feature = "schedule-latency")))]
+        assert!(scheduling_delay.is_none());
+    }
 }

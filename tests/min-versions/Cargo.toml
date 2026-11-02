@@ -33,7 +33,7 @@ metrique-sink = []
 [dependencies]
 tokio = { version = "=1.51.0", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "test-util"] }
 dial9 = { path = "../../dial9", default-features = false, features = ["tokio", "analysis", "cpu-profiling", "memory-profiling", "process-resource", "linux-socket", "worker-s3", "metrique-sink", "unstable-events"] }
-dial9-tokio-telemetry = { path = "../../dial9-tokio-telemetry", features = ["__nonlinux_all_features", "unstable-events"] }
+dial9-tokio-telemetry = { path = "../../dial9-tokio-telemetry", features = ["analysis", "cpu-profiling", "memory-profiling", "process-resource", "linux-socket", "worker-s3", "unstable-events"] }
 dial9-core = { path = "../../dial9-core", features = ["pipeline", "test-util"] }
 dial9-destinations-s3 = { path = "../../dial9-destinations-s3" }
 dial9-perf-self-profile = { path = "../../perf-self-profile", features = ["cpu-profiling", "test-util", "unstable-events"] }

@@ -105,6 +105,7 @@ pub(crate) fn resolve_single_event_spans(
             scheduler_delay_ns: None,
             attribution_flags,
             parent_span_uid: None,
+            attribute_units: event.attribute_units.clone(),
             attributes: event.attributes.clone(),
             source_key: source_key.to_string(),
             host: host.to_string(),
@@ -154,6 +155,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 10,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -163,6 +165,7 @@ mod tests {
                 worker_id: 2,
                 task_id: 10,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -172,6 +175,7 @@ mod tests {
                 worker_id: 3,
                 task_id: 10,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
                 readiness: None,
                 task_instrumented: None,
             },
@@ -206,6 +210,7 @@ mod tests {
             task_id: None,
             worker_id: None,
             decode_sequence,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
         assert_ne!(
@@ -226,6 +231,7 @@ mod tests {
             task_id: None,
             worker_id: None,
             decode_sequence: 0,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
         let resolution = resolve_single_event_spans(
@@ -263,6 +269,7 @@ mod tests {
             task_id: None,
             worker_id: None,
             decode_sequence,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
         let resolution = resolve_single_event_spans(
@@ -301,6 +308,7 @@ mod tests {
                 worker_id: 0,
                 task_id: 1,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
             }),
             TraceEvent::PollEnd(PollEnd {
                 timestamp_ns: 200,
@@ -316,6 +324,7 @@ mod tests {
                 worker_id: 1,
                 task_id: 2,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
             }),
             TraceEvent::PollEnd(PollEnd {
                 timestamp_ns: 400,
@@ -332,6 +341,7 @@ mod tests {
             task_id: None,
             worker_id: None,
             decode_sequence: 0,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
 
@@ -372,6 +382,7 @@ mod tests {
                 worker_id: 0,
                 task_id: 1,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
             }),
             TraceEvent::PollEnd(PollEnd {
                 timestamp_ns: 180,
@@ -394,6 +405,7 @@ mod tests {
                 task_id: None,
                 worker_id,
                 decode_sequence: 0,
+                attribute_units: Vec::new(),
                 attributes: Vec::new(),
             };
 
@@ -424,6 +436,7 @@ mod tests {
                 worker_id: 0,
                 task_id: 1,
                 spawn_loc: None,
+                scheduling_delay_ns: None,
             }),
             TraceEvent::PollEnd(PollEnd {
                 timestamp_ns: 140,
@@ -440,6 +453,7 @@ mod tests {
             task_id: Some(1),
             worker_id: None,
             decode_sequence: 0,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
         };
 

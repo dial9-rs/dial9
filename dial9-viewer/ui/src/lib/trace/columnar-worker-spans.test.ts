@@ -369,6 +369,38 @@ describe("ColumnarWorkerSpans.schedulingDelays matches frozen computeSchedulingD
     });
     expect([...col].map(norm)).toEqual([...fat].map(norm));
   });
+
+  it("uses a direct TaskMeta delay without wake evidence", () => {
+    const store = ColumnarWorkerSpans.fromWorkerSpans({
+      0: {
+        polls: [
+          {
+            start: 2_000_000_000,
+            end: 2_000_000_100,
+            taskId: 7,
+            spawnLocId: null,
+            spawnLoc: null,
+            schedulingDelay: 1_500_000_000,
+          },
+        ],
+        parks: [],
+        actives: [],
+        cpuSampleTimes: [],
+      },
+    });
+    const delays = store.schedulingDelays([0], WakeIndex.fromRecords({}));
+    const rows = [...delays];
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      wakeTime: 500_000_000,
+      pollTime: 2_000_000_000,
+      delay: 1_500_000_000,
+      taskId: 7,
+      wakerTaskId: 0,
+      worker: 0,
+    });
+  });
 });
 
 /** Keep only `keys` on each wake record. One record now serves both lookups,

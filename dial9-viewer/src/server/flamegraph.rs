@@ -32,8 +32,6 @@ use crate::server::fold_stream;
 use crate::server::metrics::{OperationMetrics, UxRequestLifecycle, track_sse_ux};
 
 const DEFAULT_FLAMEGRAPH_NODE_BUDGET: usize = 50_000;
-const PARTIAL_FLAMEGRAPH_NODE_BUDGET: usize = 2_000;
-const PARTIAL_FLAMEGRAPH_MAX_DEPTH: usize = 16;
 
 #[derive(Deserialize)]
 pub struct FlamegraphParams {
@@ -219,14 +217,6 @@ fn build_flamegraph_tree(
     stack_counts: &[([u8; 16], u64)],
     stacks_dict: &StackDictionary,
 ) -> FlamegraphTrie {
-    build_flamegraph_tree_to_depth(stack_counts, stacks_dict, usize::MAX)
-}
-
-fn build_flamegraph_tree_to_depth(
-    stack_counts: &[([u8; 16], u64)],
-    stacks_dict: &StackDictionary,
-    max_depth: usize,
-) -> FlamegraphTrie {
     let mut trie = FlamegraphTrie::new(stacks_dict.root());
 
     for (stack_id, count) in stack_counts {
@@ -237,11 +227,11 @@ fn build_flamegraph_tree_to_depth(
         // Frames are stored leaf→root; flamegraph trie inserts root→leaf
         trie.nodes[0].count += count;
         let mut node = 0;
-        for frame in frames.iter().rev().take(max_depth) {
+        for frame in frames.iter().rev() {
             node = trie.get_or_insert_child(node, *frame);
             trie.nodes[node].count += count;
         }
-        // The leaf, or the deepest retained prefix node, gets self-time.
+        // Only the sampled leaf gets self-time; callers retain inclusive counts.
         trie.nodes[node].self_count += count;
     }
 
@@ -1186,9 +1176,9 @@ impl fold_stream::FoldSink for FlamegraphSink {
 /// Cached already-folded parts are merged in bounded batches, with coverage
 /// emitted after each batch. Once cached state is exhausted, each later step
 /// pulls one file off [`refine::fold_stream`], reads + merges its part-files,
-/// and emits refined coverage. Flat-v1 adds cheap partial trees at exponential
-/// file-coverage checkpoints and one full bounded tree after the work-list
-/// drains; legacy formats retain cumulative trees. Dropping the returned stream
+/// and emits refined coverage. Flat-v1 adds bounded full-depth trees at exponential
+/// file-coverage checkpoints and one final tree after the work-list drains;
+/// legacy formats retain cumulative trees. Dropping the returned stream
 /// (client disconnect) drops the fold stream, cancelling in-flight folds.
 fn flamegraph_stream(
     agg: AggContext,
@@ -1234,22 +1224,14 @@ fn build_response(
     coverage: Coverage,
     kind: TreeEventKind,
 ) -> FlamegraphResponse {
-    let trie = match (ctx.wire_format, kind) {
-        (WireFormat::FlatV1, TreeEventKind::Partial) => build_flamegraph_tree_to_depth(
-            &snap.stack_counts,
-            snap.stacks_dict,
-            PARTIAL_FLAMEGRAPH_MAX_DEPTH,
-        ),
-        _ => build_flamegraph_tree(&snap.stack_counts, snap.stacks_dict),
-    };
+    // Build complete stacks before projection: depth cutoffs invent caller
+    // self-time and can hide an already-loaded inspect frame during refinement.
+    let trie = build_flamegraph_tree(&snap.stack_counts, snap.stacks_dict);
     let tree = match ctx.wire_format {
         WireFormat::Legacy => FlamegraphTree::Legacy(trie.into_legacy(snap.stacks_dict)),
         WireFormat::FlatV1 => FlamegraphTree::Flat(trie.into_projected_flat_tree(
             snap.stacks_dict,
-            match kind {
-                TreeEventKind::Partial => PARTIAL_FLAMEGRAPH_NODE_BUDGET,
-                TreeEventKind::Final => DEFAULT_FLAMEGRAPH_NODE_BUDGET,
-            },
+            DEFAULT_FLAMEGRAPH_NODE_BUDGET,
             ctx.inspect.as_deref(),
         )),
     };
@@ -1745,41 +1727,6 @@ mod tests {
     }
 
     #[test]
-    fn partial_tree_limits_depth_and_conserves_counts() {
-        let mut stacks = HashMap::new();
-        let a = [1u8; 16];
-        let b = [2u8; 16];
-        stacks.insert(
-            a,
-            vec![
-                "left-leaf".to_string(),
-                "left-middle".to_string(),
-                "shared".to_string(),
-                "root".to_string(),
-            ],
-        );
-        stacks.insert(
-            b,
-            vec![
-                "right-leaf".to_string(),
-                "right-middle".to_string(),
-                "shared".to_string(),
-                "root".to_string(),
-            ],
-        );
-        let stacks_dict = StackDictionary::from_stacks(stacks);
-        let tree = build_flamegraph_tree_to_depth(&[(a, 4), (b, 3)], &stacks_dict, 2)
-            .into_projected_flat_tree(&stacks_dict, PARTIAL_FLAMEGRAPH_NODE_BUDGET, None);
-
-        assert_eq!(tree.nodes.len(), 3);
-        assert_eq!(tree.nodes[0].count, 7);
-        assert_eq!(
-            tree.nodes.iter().map(|node| node.self_count).sum::<u64>(),
-            7
-        );
-    }
-
-    #[test]
     fn partial_tree_cadence_advances_at_power_of_two_crossings() {
         let cadence = PartialTreeCadence::new();
 
@@ -1791,6 +1738,94 @@ mod tests {
         assert!(cadence.should_emit(25, 250));
         assert!(!cadence.should_emit(25, 250));
         assert_eq!(cadence.next_files.get(), 32);
+    }
+
+    #[rstest::rstest]
+    #[case(32, 1)]
+    #[case(2, 2_500)]
+    #[case(2, DEFAULT_FLAMEGRAPH_NODE_BUDGET + 10)]
+    fn streamed_tree_matches_final_projection(#[case] depth: usize, #[case] branches: usize) {
+        let mut stacks = HashMap::new();
+        let mut stack_counts = Vec::new();
+        for branch in 0..branches {
+            let mut id = [0u8; 16];
+            id[..8].copy_from_slice(&(branch as u64).to_le_bytes());
+            let mut frames = vec![format!("leaf-{branch}")];
+            frames.extend((1..depth).map(|level| format!("caller-{level}")));
+            stacks.insert(id, frames);
+            stack_counts.push((id, 1));
+        }
+        let stacks_dict = StackDictionary::from_stacks(stacks);
+        let snapshot = AggSnapshot {
+            stack_counts,
+            stacks_dict: &stacks_dict,
+            total_samples: branches,
+            hosts: 1,
+            min_ts: Some(1),
+            max_ts: Some(2),
+            facets: Vec::new(),
+            poll_duration_histogram: Vec::new(),
+        };
+        let ctx = StreamCtx {
+            filter: SampleFilter::default(),
+            service: None,
+            hosts: Vec::new(),
+            from: None,
+            to: None,
+            start_ns: None,
+            end_ns: None,
+            min_poll_ns: None,
+            max_poll_ns: None,
+            wire_format: WireFormat::FlatV1,
+            inspect: Some("leaf-0".to_string()),
+        };
+        let coverage = Coverage {
+            files_matched: 32,
+            files_folded: 32,
+            folded_set_id: None,
+            target_folded_set_id: None,
+            fold_work_cap: 128,
+            samples_folded: branches,
+            total_bytes: 0,
+            hosts_matched: 1,
+            hosts_folded: 1,
+            fold_errors: 0,
+            fold_error_sample: None,
+        };
+
+        // Cached reconstruction can emit a partial at exactly the coverage of
+        // the completed view. It must preserve that view's paths and self-time.
+        let partial = build_response(&ctx, &snapshot, coverage.clone(), TreeEventKind::Partial);
+        let final_response = build_response(&ctx, &snapshot, coverage, TreeEventKind::Final);
+        assert_eq!(
+            serde_json::to_value(&partial.tree).unwrap(),
+            serde_json::to_value(&final_response.tree).unwrap()
+        );
+        let FlamegraphTree::Flat(tree) = partial.tree else {
+            panic!("flat-v1 request must return a flat tree");
+        };
+        assert_eq!(tree.inspect_retained, Some(true));
+        assert!(tree.nodes.len() <= DEFAULT_FLAMEGRAPH_NODE_BUDGET);
+        assert_eq!(
+            tree.omitted_nodes == 0,
+            branches + depth <= DEFAULT_FLAMEGRAPH_NODE_BUDGET
+        );
+        assert_eq!(
+            tree.nodes.iter().map(|node| node.self_count).sum::<u64>(),
+            branches as u64
+        );
+        for node in &tree.nodes {
+            let name = &tree.frames[node.frame as usize];
+            assert_eq!(
+                node.self_count,
+                if name == "[other]" {
+                    node.count
+                } else {
+                    u64::from(name.starts_with("leaf-"))
+                },
+                "only sampled leaves and explicit omissions have self-time: {name}"
+            );
+        }
     }
 
     #[test]

@@ -428,7 +428,7 @@
    * @param {number[]} workerIds - sorted worker IDs
    * @param {number} maxTs - end-of-trace timestamp for closing open spans
    * @returns {{
-   *   workerSpans: Object<number, { polls: Array<{start: number, end: number, taskId?: number, spawnLocId?: string|null, spawnLoc?: string|null}>, parks: Array<{start: number, end: number, schedWait: number}>, actives: Array<{start: number, end: number, ratio: number}>, cpuSampleTimes: number[] }>,
+   *   workerSpans: Object<number, { polls: Array<{start: number, end: number, taskId?: number, spawnLocId?: string|null, spawnLoc?: string|null, schedulingDelay?: number}>, parks: Array<{start: number, end: number, schedWait: number}>, actives: Array<{start: number, end: number, ratio: number}>, cpuSampleTimes: number[] }>,
    *   perWorker: Object<number, import('./trace_parser.js').TraceEvent[]>,
    *   queueSamples: Array<{t: number, global: number}>,
    *   workerQueueSamples: Object<number, Array<{t: number, local: number}>>,
@@ -525,6 +525,7 @@
               taskId: meta.taskId,
               spawnLocId: meta.spawnLocId,
               spawnLoc: meta.spawnLoc,
+              schedulingDelay: meta.schedulingDelay,
               openEnded: true, // no matching PollEnd; actual duration unknown
             });
           }
@@ -533,6 +534,7 @@
             taskId: e.taskId,
             spawnLocId: e.spawnLocId,
             spawnLoc: e.spawnLoc,
+            schedulingDelay: e.schedulingDelay,
           };
         } else if (e.eventType === EVENT_TYPES.PollEnd) {
           if (openPoll[w] != null) {
@@ -547,6 +549,7 @@
               taskId: meta.taskId,
               spawnLocId: meta.spawnLocId,
               spawnLoc: meta.spawnLoc,
+              schedulingDelay: meta.schedulingDelay,
             });
             openPoll[w] = null;
           }
@@ -566,6 +569,7 @@
               taskId: meta.taskId,
               spawnLocId: meta.spawnLocId,
               spawnLoc: meta.spawnLoc,
+              schedulingDelay: meta.schedulingDelay,
               openEnded: true,
             });
             openPoll[w] = null;
@@ -817,8 +821,8 @@
   }
 
   /**
-   * Compute scheduling delays: for each poll, find the most recent wake before it.
-   * Adjusts for mid-poll wake arrivals.
+   * Compute scheduling delays. Prefer a poll's direct measurement; otherwise
+   * use the most recent wake, adjusted for mid-poll wake arrivals.
    * @param {Object} workerSpans - as returned by buildWorkerSpans
    * @param {number[]} workerIds
    * @param {Object} wakesByTask - as returned by buildWorkerSpans
@@ -839,6 +843,21 @@
     for (const w of workerIds) {
       for (const s of workerSpans[w].polls) {
         if (!s.taskId) continue;
+        if (s.schedulingDelay != null) {
+          const delay = s.schedulingDelay;
+          if (delay > 0) {
+            schedDelays.push({
+              wakeTime: Math.max(0, s.start - delay),
+              pollTime: s.start,
+              delay,
+              taskId: s.taskId,
+              wakerTaskId: 0,
+              worker: w,
+              poll: s,
+            });
+          }
+          continue;
+        }
         const wakes = wakesByTask[s.taskId];
         if (!wakes || !wakes.length) continue;
         let lo = 0,
@@ -1106,8 +1125,29 @@
     }
 
     if (filterType === "wake-delay") {
+      // The first poll belongs to the separate spawn-delay detector. TaskMeta
+      // also measures it, but surfacing it here would list the same wait twice.
+      const firstPollStart = new Map();
+      for (const w of workerIds) {
+        for (const poll of workerSpans[w].polls) {
+          if (!poll.taskId) continue;
+          const current = firstPollStart.get(poll.taskId);
+          if (current === undefined || poll.start < current) {
+            firstPollStart.set(poll.taskId, poll.start);
+          }
+        }
+      }
       for (const sd of schedDelays) {
         if (sd.delay <= 0) continue;
+        const spawnTs = opts?.taskSpawnTimes?.get(sd.taskId);
+        if (
+          sd.poll.schedulingDelay != null &&
+          firstPollStart.get(sd.taskId) === sd.pollTime &&
+          spawnTs !== undefined &&
+          spawnTs < sd.pollTime
+        ) {
+          continue;
+        }
         add({
           time: sd.wakeTime,
           worker: sd.worker,

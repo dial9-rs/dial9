@@ -43,6 +43,8 @@ declare module "*/trace_parser.js" {
     /** null when this park->unpark carried no sched_wait_ns (distinct from a
      * sampled 0); the parser decodes the absent field to null. */
     schedWait: number | null;
+    /** Direct scheduled-to-poll latency from Tokio 1.54+, when recorded. */
+    schedulingDelay?: number | undefined;
     taskId: number;
     spawnLocId: string | null;
     spawnLoc: string | null;

@@ -341,12 +341,13 @@ export function longPollsTemplate(
 
 /**
  * "Scheduling delay": how long a runnable task waited before its next poll,
- * backed by same-segment spawn/wake evidence (an inter-poll gap is deliberately
- * never treated as a delay — it can contain legitimate I/O or timer waits). The
- * server ranks the top delays and reports coverage (measured vs why-unmeasured)
- * so the top-N reads against an honest denominator. Each row deep-links its
- * trace segment via the ready -> poll-end focus window. lit-html escapes every
- * interpolated value, so the attacker-influenceable spawn_loc/host render inert.
+ * measured directly by Tokio or reconstructed from same-segment spawn/wake
+ * evidence (an inter-poll gap is deliberately never treated as a delay — it can
+ * contain legitimate I/O or timer waits). The server ranks the top delays and
+ * reports coverage (measured vs why-unmeasured) so the top-N reads against an
+ * honest denominator. Each row deep-links its trace segment via the ready ->
+ * poll-end focus window. lit-html escapes every interpolated value, so the
+ * attacker-influenceable spawn_loc/host render inert.
  */
 export function schedulingDelaysTemplate(
   data: TokioStatsResponse,
@@ -369,6 +370,7 @@ export function schedulingDelaysTemplate(
 
   const coverageLine = html`<p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">
     ${observed.toLocaleString()} / ${total.toLocaleString()} polls observed (${pct}%) ·
+    ${(cov.task_meta_observed_polls ?? 0).toLocaleString()} direct Tokio ·
     ${cov.spawn_inferred_polls.toLocaleString()} spawn-inferred ·
     ${cov.wake_observed_polls.toLocaleString()} idle wakes ·
     ${cov.wake_during_poll_polls.toLocaleString()} in-poll wakes ·
@@ -381,7 +383,8 @@ export function schedulingDelaysTemplate(
           ${cov.uninstrumented_unmeasured_polls.toLocaleString()} uninstrumented,
           ${cov.instrumentation_unknown_unmeasured_polls.toLocaleString()} instrumentation
           unknown, ${cov.missing_readiness_unmeasured_polls.toLocaleString()} missing
-          same-segment readiness evidence. These are unknown, not zero-delay.
+          direct measurement or same-segment readiness evidence. These are unknown,
+          not zero-delay.
         </p>`
       : nothing;
 

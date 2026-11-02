@@ -20,6 +20,8 @@ pub(crate) enum SchedulingDelayKind {
     Wake = 1,
     /// A wake arrived during a poll, so readiness starts at that poll's end.
     WakeDuringPoll = 2,
+    /// Tokio measured the scheduled-to-poll interval directly in `TaskMeta`.
+    TaskMeta = 3,
 }
 
 impl SchedulingDelayKind {
@@ -28,6 +30,7 @@ impl SchedulingDelayKind {
             0 => Some(Self::Spawn),
             1 => Some(Self::Wake),
             2 => Some(Self::WakeDuringPoll),
+            3 => Some(Self::TaskMeta),
             _ => None,
         }
     }
@@ -85,12 +88,12 @@ pub(crate) struct ResolvedPoll {
     pub(crate) host: String,
     pub(crate) service: String,
     pub(crate) date: String,
-    /// Wall-clock time when the task became runnable, when that transition can
-    /// be proven from a spawn or wake event in this trace segment.
+    /// Wall-clock time when the task became runnable, measured directly or
+    /// proven from a spawn or wake event in this trace segment.
     pub(crate) ready_at_ns: Option<u64>,
-    /// Time from becoming runnable to this poll start. `None` means the segment
-    /// contains no safe readiness evidence; an inter-poll gap is not a valid
-    /// substitute because it can include legitimate I/O or timer waiting.
+    /// Time from becoming runnable to this poll start. `None` means there was
+    /// no direct measurement or safe readiness evidence; an inter-poll gap is
+    /// not a valid substitute because it can include I/O or timer waiting.
     pub(crate) scheduling_delay_ns: Option<u64>,
     /// Provenance of the readiness transition backing `scheduling_delay_ns`.
     pub(crate) scheduling_delay_kind: Option<SchedulingDelayKind>,
@@ -134,6 +137,8 @@ pub(crate) struct ResolvedSpan {
     pub(crate) parent_span_uid: Option<[u8; 16]>,
     /// Final close-time attributes.
     pub(crate) attributes: Vec<(String, String)>,
+    /// Producer-declared units; absent annotations remain absent.
+    pub(crate) attribute_units: Vec<(String, String)>,
     // ── Five-way time attribution (all nullable until effective metadata
     //    and wake classification are consumed) ─────────────────────────────
     /// Estimated on-CPU time. Null until profiler metadata is available.

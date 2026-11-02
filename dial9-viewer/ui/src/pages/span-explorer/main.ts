@@ -35,6 +35,7 @@ import {
   removeAttrFilter,
   shouldAdoptCatalogSnapshot,
   sourceScopeFromStored,
+  toUrlSourceScope,
 } from "../../lib/trace/index.js";
 import type {
   AttrFilter,
@@ -54,6 +55,7 @@ import {
   type SortKey,
 } from "./catalog.js";
 import { renderDetail } from "./detail.js";
+import { SpanTailAnalysis } from "./tail-analysis.js";
 import { renderFilterBar } from "./filters.js";
 import {
   retainMatchedHistogramPair,
@@ -65,6 +67,8 @@ import {
   exemplarScopeKey,
   isAggregateMode,
   readScope,
+  readTailView,
+  type TailViewState,
   type ViewState,
 } from "./scope.js";
 import {
@@ -80,6 +84,7 @@ import {
 } from "./raw.js";
 
 const els = pageEls();
+const tailAnalysis = new SpanTailAnalysis();
 
 // URL params are read ONCE: the load scope is fixed for the page's lifetime.
 const params = new URLSearchParams(window.location.search);
@@ -99,6 +104,8 @@ els.btnCopyLink.style.display = isSourceShareable(scope.source) ? "" : "none";
 
 let spanTypes: SpanTypeStats[] = [];
 let selectedUid = params.get("span_type_uid");
+let analysisView = readTailView(params);
+let catalogExpanded = false;
 let band: DurationBand = {
   min_ns:
     params.get("min_span_ns") != null
@@ -189,11 +196,72 @@ function linkState(): SpanExplorerState | null {
 function syncUrl(): void {
   // Keep the pathname explicit: a bare "?qs" would resolve against <base href="/">
   // and rewrite this page's path to "/".
-  history.replaceState(
-    null,
-    "",
-    `${window.location.pathname}?${buildBrowserQuery(scope, view())}`,
-  );
+  const next = `${window.location.pathname}?${buildBrowserQuery(
+    scope, view(), analysisView, new URLSearchParams(window.location.search),
+  )}${window.location.hash}`;
+  if (next !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+    history.pushState(null, "", next);
+  }
+}
+
+function changeAnalysisView(next: TailViewState, clearBand = false): void {
+  analysisView = next;
+  if (clearBand) applyBand({ min_ns: null, max_ns: null });
+  else {
+    syncUrl();
+    renderDetailNow();
+  }
+}
+
+function restoreUrl(): void {
+  const next = new URLSearchParams(window.location.search);
+  // The load source is fixed for this document. A different source needs a
+  // fresh boot, including restoration of its tab-scoped credentials.
+  const nextScope = readScope(next, scope.source);
+  if (JSON.stringify({ ...nextScope, source: toUrlSourceScope(nextScope.source) }) !==
+      JSON.stringify({ ...scope, source: toUrlSourceScope(scope.source) })) {
+    stopStreaming();
+    stopComparisonStreaming(true);
+    tailAnalysis.mount(null, null);
+    window.location.reload();
+    return;
+  }
+  const previous = view();
+  selectedUid = next.get("span_type_uid");
+  analysisView = readTailView(next);
+  band = {
+    min_ns: next.has("min_span_ns") ? Number(next.get("min_span_ns")) : null,
+    max_ns: next.has("max_span_ns") ? Number(next.get("max_span_ns")) : null,
+  };
+  attrFilters = parseAttrFilterParams(next.getAll("attr"));
+  maxFiles = next.has("max_files") ? Number(next.get("max_files")) : null;
+  els.fStart.value = next.has("start_ns") ? nsToPickerUtc(next.get("start_ns")) : "";
+  els.fEnd.value = next.has("end_ns") ? nsToPickerUtc(next.get("end_ns")) : "";
+  const current = view();
+  if (previous.startNs !== current.startNs || previous.endNs !== current.endNs ||
+      previous.maxFiles !== current.maxFiles) {
+    if (!rawMode) startStreaming("replace");
+    else renderDetailNow();
+    return;
+  }
+  const changedSpan = previous.selectedUid !== selectedUid;
+  const changedSelection = changedSpan ||
+    previous.bandMinNs !== band.min_ns || previous.bandMaxNs !== band.max_ns;
+  const changedFilters = JSON.stringify(previous.attrFilters) !== JSON.stringify(attrFilters);
+  if (changedSelection) {
+    if (activeStreamMode === "exemplars" || activeStreamMode === "refine") stopStreaming();
+    if (changedSpan) stopComparisonStreaming(true);
+    catalogExpanded = false;
+  }
+  const refreshExamples = changedSelection && selectedUid != null && !rawMode &&
+    exemplarScopeByUid.get(selectedUid) !== exemplarScopeKey(current);
+  if (refreshExamples) invalidateSelectedExemplarData();
+  if (changedSelection) exemplarRefreshPending = refreshExamples;
+  renderCatalogNow();
+  renderFilterBarNow();
+  if (changedSpan || changedFilters) startComparisonStreaming();
+  else renderDetailNow();
+  if (refreshExamples) startStreaming("exemplars");
 }
 
 // ── Rendering ──
@@ -205,9 +273,16 @@ function statsBadge(): string {
   return badge;
 }
 
-function renderDetailNow(): void {
+function renderDetailNow(loading = false): void {
+  const selected = loading
+    ? undefined
+    : spanTypes.find(s => s.span_type_uid === selectedUid);
   renderDetail(els.detailPanel, {
-    spanType: spanTypes.find((s) => s.span_type_uid === selectedUid),
+    spanType: selected,
+    catalogExpanded,
+    spanTypeCount: spanTypes.length,
+    onToggleCatalog: toggleCatalog,
+    loading,
     band,
     coverage: lastCoverage,
     attrFilters,
@@ -238,10 +313,23 @@ function renderDetailNow(): void {
       renderDetailNow();
     },
   });
+  tailAnalysis.mount(els.detailPanel.querySelector(".span-tail-mount"), selected ? {
+    spanType: selected, scope, view: view(), analysis: analysisView,
+    headers: Dial9Session.headers(Dial9Creds.headers()),
+    onClearBand: () => applyBand({ min_ns: null, max_ns: null }),
+    onBand: (minMs, maxMs) => applyBand({
+      min_ns: minMs == null ? null : Math.round(minMs * 1e6),
+      max_ns: maxMs == null ? null : Math.round(maxMs * 1e6),
+    }),
+    onAnalysisChange: changeAnalysisView,
+  } : null);
 }
 
 function renderCatalogNow(): void {
   renderCatalog(els, spanTypes, sort, selectedUid, selectSpanType);
+  const selected = spanTypes.find(s => s.span_type_uid === selectedUid);
+  const expanded = !selected || catalogExpanded;
+  els.catalogWrap.style.display = spanTypes.length && expanded ? "block" : "none";
 }
 
 function renderFilterBarNow(): void {
@@ -287,7 +375,11 @@ function selectSpanType(uid: string): void {
   if (activeStreamMode === "exemplars" || activeStreamMode === "refine")
     stopStreaming();
   stopComparisonStreaming(true);
+  if (uid !== selectedUid) {
+    analysisView = { ...analysisView, groupKey: null, groupValue: null, property: null };
+  }
   selectedUid = uid;
+  catalogExpanded = false;
   band = { min_ns: null, max_ns: null };
   const needsRefresh =
     !rawMode && exemplarScopeByUid.get(uid) !== exemplarScopeKey(view());
@@ -296,6 +388,7 @@ function selectSpanType(uid: string): void {
   syncUrl();
   renderCatalogNow();
   renderDetailNow();
+  els.detailPanel.querySelector<HTMLButtonElement>(".change-span")?.focus({ preventScroll: true });
   if (needsRefresh) startStreaming("exemplars");
   if (attrFilters.length > 0) startComparisonStreaming();
 }
@@ -371,9 +464,16 @@ function startStreaming(mode: StreamMode): void {
   updateStreamingUi();
   els.error.style.display = "none";
   if (mode === "replace") {
+    catalogExpanded = false;
+    spanTypes = [];
+    lastCoverage = null;
+    exemplarScopeByUid.clear();
     els.loading.classList.remove("hidden");
+    els.stats.textContent = "Loading span statistics…";
     els.catalogWrap.style.display = "none";
-    els.detailPanel.className = "detail-panel empty";
+    // The new time scope has no authoritative detail yet. Retire its old
+    // analysis request and remove stale graph actions until a snapshot arrives.
+    renderDetailNow(true);
   }
 
   const token = ++streamToken;
@@ -489,6 +589,8 @@ function startStreaming(mode: StreamMode): void {
           (mode === "exemplars" && !exemplarSnapshotAdopted
             ? " · exemplar refresh incomplete"
             : " · refined");
+      } else if (mode === "replace") {
+        showError("No span statistics returned for this source.");
       }
       if (mode === "replace" || mode === "refine") {
         refreshComparisonAfterBaseline();
@@ -655,6 +757,8 @@ function refreshComparisonAfterBaseline(): void {
 
 // ── Event handlers ──
 
+window.addEventListener("popstate", restoreUrl);
+
 els.btnApply.addEventListener("click", () => {
   maxFiles = null;
   syncUrl();
@@ -677,14 +781,16 @@ els.btnStop.addEventListener("click", () => {
   stopComparisonStreaming(false);
   if (stoppedComparison) comparisonError = "Comparison stopped.";
   if (stoppedMode !== "exemplars") exemplarRefreshPending = false;
+  if (stoppedMode === "replace" && spanTypes.length === 0) {
+    showError("Span statistics loading cancelled.");
+  }
   renderFilterBarNow();
   renderDetailNow();
   if (stoppedMode != null) els.stats.textContent = `${statsBadge()} · stopped`;
 });
 
 els.btnCopyLink.addEventListener("click", async () => {
-  const url =
-    window.location.origin + window.location.pathname + window.location.search;
+  const url = window.location.href;
   const orig = els.btnCopyLink.textContent;
   try {
     await navigator.clipboard.writeText(url);
@@ -704,6 +810,15 @@ els.catalog.querySelector("thead")?.addEventListener("click", (e) => {
   sort = nextSort(sort, key as SortKey);
   renderCatalogNow();
 });
+
+function toggleCatalog(): void {
+  catalogExpanded = !catalogExpanded;
+  renderCatalogNow();
+  renderDetailNow();
+  if (catalogExpanded) {
+    els.catalogBody.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
+  }
+}
 
 // ── Boot ──
 

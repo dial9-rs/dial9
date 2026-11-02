@@ -859,6 +859,7 @@ mod tests {
                 local_queue: 3,
                 task_id: 0,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::QueueSampleEvent(QueueSampleEvent {
                 timestamp_ns: 2_000_000,
@@ -917,6 +918,7 @@ mod tests {
                 local_queue: 10,
                 task_id: 0,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 2_000_000,
@@ -1055,6 +1057,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 3_000_000,
@@ -1066,6 +1069,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 2,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 4_500_000,
@@ -1088,6 +1092,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 0,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 1_500_000,
@@ -1107,6 +1112,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
@@ -1114,6 +1120,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 2,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 5_000_000,
@@ -1236,6 +1243,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 1_600_000,
@@ -1264,6 +1272,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 1_100_000,
@@ -1289,6 +1298,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 2_000_100_000,
@@ -1308,6 +1318,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::CpuSampleEvent(CpuSampleEvent {
                 timestamp_ns: 1_500_000,
@@ -1348,6 +1359,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 0,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 2_000_000,
@@ -1367,6 +1379,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 0,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 2_000_000,
@@ -1402,6 +1415,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 7,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             Dial9Event::CpuSampleEvent(CpuSampleEvent {
                 timestamp_ns: 1_500_000,
@@ -1444,6 +1458,7 @@ mod tests {
                 local_queue: 0,
                 task_id: 9,
                 spawn_loc: String::new(),
+                scheduling_delay_ns: None,
             }),
             // Sample's tid (100) isn't in the map, but the wire worker_id is real.
             Dial9Event::CpuSampleEvent(CpuSampleEvent {

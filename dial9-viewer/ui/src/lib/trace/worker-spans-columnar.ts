@@ -29,12 +29,12 @@ import type {
 /** Keyed by worker id (stringified, as object keys always are). */
 type ByWorker<T> = Record<string, T>;
 
-const defaultMeta = { taskId: 0, spawnLocId: 0 as number | string | null, spawnLoc: null as string | null };
+const defaultMeta = { taskId: 0, spawnLocId: 0 as number | string | null, spawnLoc: null as string | null, schedulingDelay: undefined as number | undefined };
 
 /** Sink for reconstructed spans. `schedWait` omitted (undefined) => the
  * trace-end park close, which the frozen path pushes WITHOUT a schedWait key. */
 interface SpanEmitter {
-  poll(w: number, start: number, end: number, taskId: number, spawnLocId: number | string | null, spawnLoc: string | null, openEnded: boolean): void;
+  poll(w: number, start: number, end: number, taskId: number, spawnLocId: number | string | null, spawnLoc: string | null, openEnded: boolean, schedulingDelay?: number): void;
   park(w: number, start: number, end: number, schedWait?: number | null): void;
   active(w: number, start: number, end: number, ratio: number): void;
 }
@@ -45,8 +45,15 @@ class FatSpanEmitter implements SpanEmitter {
   ensure(w: number): void {
     if (this.workerSpans[w] === undefined) this.workerSpans[w] = { polls: [], parks: [], actives: [], cpuSampleTimes: [] };
   }
-  poll(w: number, start: number, end: number, taskId: number, spawnLocId: number | string | null, spawnLoc: string | null, openEnded: boolean): void {
-    const poll: PollSpan = { start, end, taskId, spawnLocId, spawnLoc };
+  poll(w: number, start: number, end: number, taskId: number, spawnLocId: number | string | null, spawnLoc: string | null, openEnded: boolean, schedulingDelay?: number): void {
+    const poll: PollSpan = {
+      start,
+      end,
+      taskId,
+      spawnLocId,
+      spawnLoc,
+      schedulingDelay,
+    };
     if (openEnded) poll.openEnded = true;
     this.workerSpans[w]!.polls.push(poll);
   }
@@ -65,8 +72,8 @@ class StoreSpanEmitter implements SpanEmitter {
   constructor(b: ColumnarWorkerSpansBuilder) {
     this.b = b;
   }
-  poll(w: number, start: number, end: number, taskId: number, _spawnLocId: number | string | null, spawnLoc: string | null, openEnded: boolean): void {
-    this.b.pushPoll(w, start, end, taskId, spawnLoc, openEnded);
+  poll(w: number, start: number, end: number, taskId: number, _spawnLocId: number | string | null, spawnLoc: string | null, openEnded: boolean, schedulingDelay?: number): void {
+    this.b.pushPoll(w, start, end, taskId, spawnLoc, openEnded, schedulingDelay);
   }
   park(w: number, start: number, end: number, schedWait?: number | null): void {
     this.b.pushPark(w, start, end, schedWait ?? null);
@@ -107,7 +114,7 @@ function* reconstructChunked(
   const openPoll: ByWorker<number | null> = {};
   const openPark: ByWorker<number | null> = {};
   const openUnpark: ByWorker<{ timestamp: number; cpuTime: number } | null> = {};
-  const openPollMeta: ByWorker<{ taskId: number; spawnLocId: number | string | null; spawnLoc: string | null }> = {};
+  const openPollMeta: ByWorker<{ taskId: number; spawnLocId: number | string | null; spawnLoc: string | null; schedulingDelay?: number | undefined }> = {};
 
   const gapsByW: ByWorker<BlockInPlaceGap[]> = {};
   if (blockInPlaceGaps && blockInPlaceGaps.length > 0) {
@@ -189,7 +196,7 @@ function* reconstructChunked(
       if (et === EVT.PollStart) {
         if (openPoll[workerKey] != null) {
           const meta = openPollMeta[workerKey] || defaultMeta;
-          emit.poll(w, openPoll[workerKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, true);
+          emit.poll(w, openPoll[workerKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, true, meta.schedulingDelay);
         }
         openPoll[workerKey] = t;
         const sl = store.spawnLocAt(i);
@@ -198,17 +205,18 @@ function* reconstructChunked(
           taskId: ti < 0 ? 0 : taskIds[ti]!,
           spawnLocId: sl,
           spawnLoc: sl,
+          schedulingDelay: store.schedulingDelayAt(i),
         };
       } else if (et === EVT.PollEnd) {
         if (openPoll[workerKey] != null) {
           const meta = openPollMeta[workerKey] || defaultMeta;
-          emit.poll(w, openPoll[workerKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, false);
+          emit.poll(w, openPoll[workerKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, false, meta.schedulingDelay);
           openPoll[workerKey] = null;
         }
       } else if (et === EVT.WorkerPark) {
         if (openPoll[workerKey] != null) {
           const meta = openPollMeta[workerKey] || defaultMeta;
-          emit.poll(w, openPoll[workerKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, true);
+          emit.poll(w, openPoll[workerKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, true, meta.schedulingDelay);
           openPoll[workerKey] = null;
         }
         openPark[workerKey] = t;

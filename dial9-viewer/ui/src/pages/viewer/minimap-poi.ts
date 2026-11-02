@@ -66,13 +66,17 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   // identical ticks.
   const { lanes, schedDelays, hasWorkerCpuTime } = sharedDetectorInputs(trace);
 
-  // Applicable detectors: long-poll always; the sched-derived ones only when
-  // the trace carries sched-wait data; uninstrumented only when the trace
-  // tracked per-task instrumentation (its required input); off-cpu-active only
-  // when the worker CPU-time readings are real.
+  // Applicable detectors: long-poll always; sched only when the trace carries
+  // sched-wait data; wake-delay when scheduling-delay data exists;
+  // uninstrumented only when the trace tracked per-task instrumentation (its
+  // required input); off-cpu-active only when the worker CPU-time readings are
+  // real.
   const types: PointOfInterestType[] = ["long-poll"];
   if (trace.hasSchedWait) {
-    types.push("sched", "wake-delay");
+    types.push("sched");
+  }
+  if (schedDelays.length > 0) {
+    types.push("wake-delay");
   }
   if (trace.taskInstrumented.size > 0) {
     types.push("uninstrumented");

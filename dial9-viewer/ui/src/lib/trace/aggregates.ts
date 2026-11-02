@@ -264,9 +264,9 @@ export interface LongPoll extends PollExemplar {
  * How a poll's ready time was established (server `SchedulingDelayKind`,
  * serialized snake_case). `"spawn"` = spawn -> first poll; `"wake"` = an idle
  * wake -> the next poll; `"wake_during_poll"` = a wake mid-poll, made effective
- * at the poll's explicit end.
+ * at the poll's explicit end; `"task_meta"` = Tokio's direct measurement.
  */
-export type SchedulingDelayKind = "spawn" | "wake" | "wake_during_poll";
+export type SchedulingDelayKind = "spawn" | "wake" | "wake_during_poll" | "task_meta";
 
 /**
  * One measured runnable-to-poll delay for the "Scheduling delay" rollup (server
@@ -296,10 +296,11 @@ export interface SchedulingDelay {
 
 /**
  * Measurement coverage for the scheduling-delay rollup (server
- * `SchedulingDelayCoverage`): how many polls carried usable readiness evidence
- * versus not, and why the unmeasured ones could not be inferred. Lets the UI
- * qualify the top-N with an honest denominator rather than implying every poll
- * was measured. All fields default to 0 on a server predating the rollup.
+ * `SchedulingDelayCoverage`): how many polls had a direct measurement or usable
+ * readiness evidence versus not, and why the unmeasured ones could not be
+ * inferred. Lets the UI qualify the top-N with an honest denominator rather
+ * than implying every poll was measured. All fields default to 0 on a server
+ * predating the rollup.
  */
 export interface SchedulingDelayCoverage {
   observed_polls: number;
@@ -308,6 +309,7 @@ export interface SchedulingDelayCoverage {
   spawn_inferred_polls: number;
   wake_observed_polls: number;
   wake_during_poll_polls: number;
+  task_meta_observed_polls?: number;
   uninstrumented_unmeasured_polls: number;
   instrumentation_unknown_unmeasured_polls: number;
   missing_readiness_unmeasured_polls: number;

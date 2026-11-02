@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 9523,
+  "total_samples": 7861,
   "by_source": {
-    "0": 84,
-    "1": 9439
+    "0": 141,
+    "1": 7720
   },
   "on_off_all": {
-    "on_runtime": 9508,
-    "off_runtime": 15
+    "on_runtime": 7852,
+    "off_runtime": 9
   },
   "on_off_by_source": {
     "0": {
-      "on": 69,
-      "off": 15
+      "on": 132,
+      "off": 9
     },
     "1": {
-      "on": 9439,
+      "on": 7720,
       "off": 0
     }
   },
@@ -26,52 +26,52 @@
     3
   ],
   "cpu_profile": {
-    "count": 84,
-    "distinct_stacks": 68,
-    "stack_sig_digest": "d645eae97c0696cd",
-    "ts_count": 84,
-    "ts_span_ns": 3904353959,
-    "ts_delta_digest": "bcd9ef17ac315379",
+    "count": 141,
+    "distinct_stacks": 119,
+    "stack_sig_digest": "9a2d23baa4f3f818",
+    "ts_count": 141,
+    "ts_span_ns": 3202002919,
+    "ts_delta_digest": "d040939879b68c59",
     "top_stacks": [
       {
-        "count": 9,
-        "depth": 1,
-        "leaf": "__libc_write"
+        "count": 4,
+        "depth": 101,
+        "leaf": "[unknown] 0xffff890dde60"
       },
       {
-        "count": 5,
-        "depth": 1,
-        "leaf": "_Unwind_IteratePhdrCallback"
+        "count": 3,
+        "depth": 101,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 3,
+        "depth": 92,
+        "leaf": "[unknown] 0xffff890dde58"
+      },
+      {
+        "count": 3,
+        "depth": 101,
+        "leaf": "[unknown] 0xffff890dde58"
+      },
+      {
+        "count": 3,
+        "depth": 101,
+        "leaf": "[unknown] 0xffff88f0d200"
       },
       {
         "count": 2,
-        "depth": 87,
-        "leaf": "uw_frame_state_for"
+        "depth": 71,
+        "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 2,
-        "depth": 3,
-        "leaf": "get_cie"
+        "depth": 101,
+        "leaf": "[unknown] 0xffff890ddea0"
       },
       {
         "count": 2,
-        "depth": 1,
-        "leaf": "uw_update_context_1"
-      },
-      {
-        "count": 2,
-        "depth": 2,
-        "leaf": "execute_cfa_program"
-      },
-      {
-        "count": 1,
-        "depth": 104,
-        "leaf": "<aws_smithy_runtime::client::http::body::minimum_throughput::MaybeUploadThroughputCheckFuture as core::future::future::Future>::poll"
-      },
-      {
-        "count": 1,
-        "depth": 47,
-        "leaf": "epoll_wait"
+        "depth": 92,
+        "leaf": "[unknown] 0xffff890dde54"
       }
     ]
   }

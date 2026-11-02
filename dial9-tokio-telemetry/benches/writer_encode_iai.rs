@@ -54,6 +54,8 @@ fn encode(workers: Vec<usize>) -> Vec<u8> {
                     local_queue: 3,
                     task_id: task,
                     spawn_loc: loc,
+                    #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
+                    scheduling_delay_ns: 0,
                 });
                 enc.write_infallible(&PollEndEvent {
                     timestamp_ns: base + 205 + i * 10,

@@ -86,7 +86,8 @@ function frozenCoreDevInterop(): Plugin {
       });
       if (resolved === null) return null;
       const clean = resolved.id.split("?")[0] ?? resolved.id;
-      if (clean.includes("/src/") || !clean.endsWith(`/${base}.js`)) return null;
+      // A workspace ancestor named src is not part of the UI source tree.
+      if (path.relative(uiRoot, clean).startsWith(`src${path.sep}`) || !clean.endsWith(`/${base}.js`)) return null;
       return `${VIRT}${clean}`;
     },
     load(id) {

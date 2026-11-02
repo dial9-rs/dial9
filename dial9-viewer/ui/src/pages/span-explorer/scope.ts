@@ -42,6 +42,44 @@ export interface ViewState {
   maxFiles: number | null;
 }
 
+/** Durable analysis controls; duration bounds stay in the existing ViewState. */
+export interface TailViewState {
+  percentile: 95 | 99 | 99.9;
+  groupKey: string | null;
+  groupValue: string | null;
+  property: string | null;
+  mode: "stacked" | "overlay";
+  elapsedScale: "log" | "linear";
+  allFields: boolean;
+}
+
+export const TAIL_VIEW_QUERY_PARAMS = [
+  "tail_percentile", "tail_group_key", "tail_group_value", "tail_property",
+  "tail_mode", "tail_x_scale", "tail_fields",
+] as const;
+
+export const SPAN_EXPLORER_QUERY_PARAMS = [
+  "trace", "api", "data_dir", "bucket", "aws_region", "aws_role_arn",
+  "credential_mode", "prefix", "service", "host", "start_ns", "end_ns",
+  "span_type_uid", "min_span_ns", "max_span_ns", "attr", "max_files",
+  ...TAIL_VIEW_QUERY_PARAMS,
+] as const;
+
+export function readTailView(params: URLSearchParams): TailViewState {
+  const percentile = params.get("tail_percentile");
+  const key = params.get("tail_group_key");
+  const grouped = key != null && key !== "" && params.has("tail_group_value");
+  return {
+    percentile: percentile === "95" ? 95 : percentile === "99.9" ? 99.9 : 99,
+    groupKey: grouped ? key : null,
+    groupValue: grouped ? params.get("tail_group_value") : null,
+    property: params.get("tail_property") || null,
+    mode: params.get("tail_mode") === "overlay" ? "overlay" : "stacked",
+    elapsedScale: params.get("tail_x_scale") === "linear" ? "linear" : "log",
+    allFields: params.get("tail_fields") === "all",
+  };
+}
+
 export function readScope(
   params: URLSearchParams,
   fallback: SourceScope = EMPTY_SOURCE_SCOPE,
@@ -126,8 +164,15 @@ export function buildApiUrl(
  * RAW mode keeps its `trace` param and never gains `api=1`, so reloading or
  * sharing the URL preserves the selected trace and mode.
  */
-export function buildBrowserQuery(scope: PageScope, view: ViewState): string {
-  const p = new URLSearchParams();
+export function buildBrowserQuery(
+  scope: PageScope,
+  view: ViewState,
+  analysis: TailViewState = readTailView(new URLSearchParams()),
+  existing: URLSearchParams = new URLSearchParams(),
+): string {
+  const p = new URLSearchParams(existing);
+  // Retain unrelated query state, but remove owned values before rewriting.
+  for (const key of SPAN_EXPLORER_QUERY_PARAMS) p.delete(key);
   if (scope.trace != null) p.set("trace", scope.trace);
   else p.set("api", "1");
   // Address-bar link: carries the role (aws_role_arn) so a fresh tab opened
@@ -142,6 +187,15 @@ export function buildBrowserQuery(scope: PageScope, view: ViewState): string {
   if (view.bandMaxNs != null) p.set("max_span_ns", String(view.bandMaxNs));
   for (const a of formatAttrFilterParams(view.attrFilters)) p.append("attr", a);
   setMaxFilesParam(p, view.maxFiles);
+  if (analysis.percentile !== 99) p.set("tail_percentile", String(analysis.percentile));
+  if (analysis.groupKey != null && analysis.groupValue != null) {
+    p.set("tail_group_key", analysis.groupKey);
+    p.set("tail_group_value", analysis.groupValue);
+  }
+  if (analysis.property != null) p.set("tail_property", analysis.property);
+  if (analysis.mode !== "stacked") p.set("tail_mode", analysis.mode);
+  if (analysis.elapsedScale !== "log") p.set("tail_x_scale", analysis.elapsedScale);
+  if (analysis.allFields) p.set("tail_fields", "all");
   return p.toString();
 }
 

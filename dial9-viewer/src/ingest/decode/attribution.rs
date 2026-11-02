@@ -184,6 +184,7 @@ mod tests {
             details_complete: true,
             concurrent: false,
             parent_span_uid: None,
+            attribute_units: Vec::new(),
             attributes: Vec::new(),
             on_cpu_ns_est: Some(10),
             blocked_ns_est: None,
