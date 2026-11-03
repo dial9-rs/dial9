@@ -168,6 +168,9 @@ pub struct AppState {
     /// aggregation: any S3 bucket can run the `/api/flamegraph` refinement loop,
     /// but a local-directory source cannot.
     pub allow_byo_creds: bool,
+    /// Reject caller-selected S3 source reads that provide neither BYOC
+    /// credentials nor an assumed-role ARN.
+    require_explicit_source_identity: bool,
     /// Whether source keys use the production date-partitioned S3 layout.
     ///
     /// This controls time-scoped browse and service-discovery listings. It is
@@ -218,6 +221,7 @@ impl AppState {
             agg: None,
             uploads: None,
             allow_byo_creds: false,
+            require_explicit_source_identity: false,
             time_partitioned_source: false,
             #[cfg(feature = "s3")]
             ephemeral_s3: None,
@@ -267,6 +271,11 @@ impl AppState {
         if allow {
             self.time_partitioned_source = true;
         }
+        self
+    }
+
+    pub(crate) fn with_require_explicit_source_identity(mut self, require: bool) -> Self {
+        self.require_explicit_source_identity = require;
         self
     }
 
