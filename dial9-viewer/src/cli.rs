@@ -415,19 +415,24 @@ pub async fn run() -> anyhow::Result<()> {
                     .build();
                 crate::simulator::build_simulator_app(config).await?
             } else {
-                crate::build_app(crate::ViewerConfig {
-                    bucket,
-                    prefix,
-                    local_dir,
-                    dev,
-                    agg,
-                    agg_source_dir,
-                    agg_output_dir,
-                    agg_output_bucket,
-                    agg_output_prefix,
-                    agg_segment_secs,
-                    enable_upload,
-                })
+                crate::build_app_with_options(
+                    crate::ViewerConfig {
+                        bucket,
+                        prefix,
+                        local_dir,
+                        dev,
+                        agg,
+                        agg_source_dir,
+                        agg_output_dir,
+                        agg_output_bucket,
+                        agg_output_prefix,
+                        agg_segment_secs,
+                        enable_upload,
+                    },
+                    crate::ViewerAppOptions::builder()
+                        .allow_ambient_source_identity(true)
+                        .build(),
+                )
                 .await?
             };
 
