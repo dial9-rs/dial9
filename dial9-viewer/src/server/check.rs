@@ -18,6 +18,9 @@ use crate::server::AppState;
 use crate::server::credentials::{CredError, CredSource, MaybeCreds};
 use crate::storage::build_credentialed_client;
 
+pub(crate) const CREDENTIALS_REQUIRED: &str =
+    "credentials required: supply x-dial9-aws-* headers or a role ARN";
+
 #[derive(Deserialize)]
 pub struct CheckParams {
     pub bucket: Option<String>,
@@ -55,10 +58,7 @@ pub async fn check_credentials(
             state.assume(&role_arn, region.as_deref()).await?
         }
         Ok(CredSource::Default) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "credentials required: supply x-dial9-aws-* headers or a role ARN".to_string(),
-            ));
+            return Err((StatusCode::BAD_REQUEST, CREDENTIALS_REQUIRED.to_string()));
         }
         Err(
             e @ (CredError::Incomplete

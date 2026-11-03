@@ -134,6 +134,13 @@ impl AppState {
             // BYO disabled (local-dir) — credentials are meaningless here.
             CredSource::Static(_) | CredSource::AssumeRole { .. } => Ok(self.backend.clone()),
             CredSource::Default => {
+                if self.require_explicit_source_identity {
+                    tracing::info!("rejecting source read without explicit AWS identity");
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        check::CREDENTIALS_REQUIRED.to_string(),
+                    ));
+                }
                 if self.allow_byo_creds {
                     if let Some(region) = ambient_region {
                         tracing::debug!(%region, "using ambient credentials in request region");
