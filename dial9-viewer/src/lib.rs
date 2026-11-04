@@ -111,6 +111,23 @@ impl Default for ViewerConfig {
     }
 }
 
+/// Source-identity policy for [`build_app_with_options`]. Caller-selected S3
+/// reads require BYOC credentials or an assumed-role ARN by default.
+#[derive(Debug, Clone, bon::Builder)]
+pub struct ViewerAppOptions {
+    /// Permit caller-selected S3 source reads to fall back to the server's AWS
+    /// identity. Off by default. The CLI enables this explicitly for its
+    /// operator-configured ambient mode.
+    #[builder(default = false)]
+    allow_ambient_source_identity: bool,
+}
+
+impl Default for ViewerAppOptions {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
 /// Initialize the process-global tracing subscriber: JSON logs by default (so
 /// they render cleanly in CloudWatch), human-readable under `local`. Call once,
 /// before serving. Logging is the binary's concern, so it is separate from
@@ -136,6 +153,11 @@ pub fn init_tracing(local: bool) {
 /// and optional demand-driven aggregation — and return it as an [`axum::Router`],
 /// which is also a `tower::Service`.
 ///
+/// Caller-selected S3 source reads require BYOC credentials or an assumed-role
+/// ARN by default. An embedder that intentionally uses its process identity for
+/// sources must call [`build_app_with_options`] and explicitly allow ambient
+/// source identity.
+///
 /// Binding is the caller's responsibility: add routes with [`axum::Router::merge`],
 /// wrap middleware such as auth with [`axum::Router::layer`], pick a
 /// server/listener/TLS, then serve. Two other process-global concerns are the
@@ -145,7 +167,15 @@ pub fn init_tracing(local: bool) {
 ///     (the standard EMF/local sink) or supply your own metrique sink, and hold
 ///     the returned handle for the life of the server.
 pub async fn build_app(config: ViewerConfig) -> anyhow::Result<axum::Router> {
-    build_app_from(config, None).await
+    build_app_with_options(config, ViewerAppOptions::default()).await
+}
+
+/// [`build_app`] with source-identity policy from [`ViewerAppOptions`].
+pub async fn build_app_with_options(
+    config: ViewerConfig,
+    options: ViewerAppOptions,
+) -> anyhow::Result<axum::Router> {
+    build_app_from(config, None, options).await
 }
 
 /// [`build_app`] over a storage backend you supply, for an object store the
@@ -185,7 +215,7 @@ pub async fn build_app_with_backend(
     config: ViewerConfig,
     backend: std::sync::Arc<dyn storage::StorageBackend>,
 ) -> anyhow::Result<axum::Router> {
-    build_app_from(config, Some(backend)).await
+    build_app_from(config, Some(backend), ViewerAppOptions::default()).await
 }
 
 async fn build_app_from(
@@ -203,6 +233,9 @@ async fn build_app_from(
         enable_upload,
     }: ViewerConfig,
     supplied_backend: Option<std::sync::Arc<dyn storage::StorageBackend>>,
+    ViewerAppOptions {
+        allow_ambient_source_identity,
+    }: ViewerAppOptions,
 ) -> anyhow::Result<axum::Router> {
     match &supplied_backend {
         // A supplied backend answers for the source, so the built-in source
@@ -348,7 +381,8 @@ async fn build_app_from(
     app_state = app_state
         .with_byo_creds(source_is_s3)
         .with_agg_output(agg_output)
-        .with_agg_segment_secs(agg_segment_secs);
+        .with_agg_segment_secs(agg_segment_secs)
+        .with_require_explicit_source_identity(source_is_s3 && !allow_ambient_source_identity);
     // For an S3 source, also offer the assume-role path: a request may name a
     // role ARN and the viewer assumes it with its own (ambient) identity via
     // STS. Same gate as BYOC — both require an S3 source; this additionally
@@ -377,6 +411,37 @@ pub async fn shutdown_signal() {
         .await
         .expect("failed to install CTRL+C handler");
     tracing::info!("shutting down");
+}
+
+#[cfg(all(test, feature = "s3"))]
+mod app_options_tests {
+    use super::{ViewerAppOptions, ViewerConfig, build_app};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    #[test]
+    fn ambient_source_identity_requires_explicit_opt_in() {
+        assert!(!ViewerAppOptions::default().allow_ambient_source_identity);
+        assert!(
+            ViewerAppOptions::builder()
+                .allow_ambient_source_identity(true)
+                .build()
+                .allow_ambient_source_identity
+        );
+    }
+
+    #[tokio::test]
+    async fn build_app_rejects_ambient_source_identity_by_default() {
+        let app = build_app(ViewerConfig::default()).await.unwrap();
+
+        let response = app
+            .oneshot(Request::get("/api/buckets").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 #[cfg(test)]
