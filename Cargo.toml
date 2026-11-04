@@ -32,6 +32,7 @@ repository = "https://github.com/dial9-rs/dial9"
 
 [workspace.dependencies]
 libc = "0.2"
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }
 dial9-core = { version = "0.5.6", path = "dial9-core" }
 dial9-utils = { version = "0.5.6", path = "dial9-utils" }
 dial9-destinations-s3 = { version = "0.5.6", path = "dial9-destinations-s3" }

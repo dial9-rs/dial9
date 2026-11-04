@@ -179,25 +179,15 @@ fn derive_max_file_size(max_total_size: u64) -> u64 {
 /// Whether `path` is on a tmpfs mount, where written segments are held in RAM.
 #[cfg(target_os = "linux")]
 fn is_tmpfs(path: &Path) -> std::io::Result<bool> {
-    use std::os::unix::ffi::OsStrExt;
-
     // An empty base path means the current directory; `statfs("")` is ENOENT.
     let path = if path.as_os_str().is_empty() {
         Path::new(".")
     } else {
         path
     };
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: `c_path` is NUL-terminated and `stat` is a valid out-pointer.
-    if unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `statfs` returned 0, so `stat` is initialized.
-    let stat = unsafe { stat.assume_init() };
+    let stat = rustix::fs::statfs(path)?;
     // TMPFS_MAGIC from linux/magic.h. Untyped so it matches `f_type` on every target.
-    Ok(stat.f_type == 0x0102_1994)
+    Ok(stat.f_type as u64 == 0x0102_1994)
 }
 
 /// Sets the rotation period from the observed byte rate, so segments land near
