@@ -8,12 +8,17 @@ run_shuttle_tests() {
   local pkg="$1"
   shift
   local output
-  output=$("$@" 2>&1 | tee /dev/stderr)
+  # Appending preserves earlier package output when stderr is a redirected file.
+  output=$("$@" 2>&1 | tee -a /dev/stderr)
   if grep -qE '^running 0 tests$' <<<"$output"; then
     echo "error: shuttle tests for '$pkg' matched 0 tests — shuttle coverage for this crate has silently regressed to nothing" >&2
     exit 1
   fi
 }
+
+run_shuttle_tests dial9-sampling \
+  env RUSTFLAGS="--cfg shuttle" \
+  cargo test -p dial9-sampling --lib -- shuttle "$@"
 
 run_shuttle_tests dial9-core \
   env RUSTFLAGS="--cfg shuttle" \

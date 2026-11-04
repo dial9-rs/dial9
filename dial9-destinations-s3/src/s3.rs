@@ -158,8 +158,18 @@ impl std::fmt::Debug for S3Config {
 
 impl S3Config {
     /// The S3 bucket name.
-    pub(crate) fn bucket(&self) -> &str {
+    pub fn bucket(&self) -> &str {
         &self.bucket
+    }
+
+    /// The service identity included in trace metadata and S3 object keys.
+    pub fn service_name(&self) -> &str {
+        &self.service_name
+    }
+
+    /// Optional prefix used before the versioned trace key layout.
+    pub fn prefix(&self) -> Option<&str> {
+        self.prefix.as_deref()
     }
 
     /// Override the boot_id so S3 keys match the on-disk namespace directory.
@@ -182,13 +192,13 @@ impl S3Config {
         .chain(self.region.as_ref().map(|r| ("region", r.as_str())))
     }
 
-    /// Optional region override for the S3 client.
-    pub(crate) fn region(&self) -> Option<&str> {
+    /// Region override for the S3 client
+    pub fn region(&self) -> Option<&str> {
         self.region.as_deref()
     }
 
-    /// Per-attempt timeout applied to the client dial9 builds itself.
-    pub(crate) fn operation_attempt_timeout(&self) -> Duration {
+    /// Configured timeout for a single request attempt to S3
+    pub fn operation_attempt_timeout(&self) -> Duration {
         self.operation_attempt_timeout
     }
 

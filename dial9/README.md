@@ -22,6 +22,8 @@ For more information see [Analyzing Trace Files](#analyzing-trace-files)
 
 If you are integrating dial9 into a production service, see the [`production_use` example](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/production_use.rs).
 
+For a fleet where only some processes should record, see [Startup sampling](#startup-sampling).
+
 You can also find a full [example service](https://github.com/dial9-rs/dial9/blob/HEAD/examples).
 
 dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime: poll spans, task spawn and terminate, and per-worker queue depth. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder. These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
@@ -190,6 +192,46 @@ such as `dial9::spawn`):
 See [Task dumps](#task-dumps-linux-only) for setup and usage details.
 
 Missing variables use defaults. Blank, invalid, or non-Unicode values emit a warning and are treated as missing. Some numeric defaults come from the underlying config builders and are listed here as the current `recorder_from_env` behavior.
+
+## Startup sampling
+
+Use `dial9-sampling` to sample at the host/process level:
+
+```rust,no_run
+# #[cfg(feature = "worker-s3")]
+# fn example() -> std::io::Result<()> {
+use dial9::{MemoryBuffer, s3::S3Config};
+use dial9_sampling::{Sampling, StartupFailure, s3::S3SamplingStore};
+
+let s3 = S3Config::builder()
+    .bucket("dial9-traces-my-service")
+    .service_name("checkout")
+    .build();
+
+Sampling::builder()
+    .num_target_profilers(15)
+    .if_failed(StartupFailure::disabled())
+    .build()
+    .with_storage(async {
+        S3SamplingStore::builder().config(s3.clone()).build().await
+    })
+    .start_application(|sampler| {
+        let recorder = if sampler.enabled {
+            dial9::recorder(MemoryBuffer::new(16 * 1024 * 1024)?).build()
+        } else {
+            dial9::recorder_disabled()
+        };
+        sampler.register_recorder(&recorder);
+        // Build your runtime, run main, and shut down the recorder here.
+        Ok(())
+    })
+# }
+# fn main() {}
+```
+
+`dial9-sampling` uses S3 or another similar object store to allow you to pick a target of number of hosts to enable profiling on. It will be fully managed by dial9 itself.
+
+See the [standalone guide](../dial9-sampling/README.md) and the [application entry-point example](examples/manual_sampling.rs).
 
 ## Why dial9?
 
