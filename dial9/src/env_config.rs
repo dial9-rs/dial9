@@ -57,7 +57,6 @@ const ENV_DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS: &str =
 const ENV_DIAL9_GC_DEAD_NAMESPACES: &str = "DIAL9_GC_DEAD_NAMESPACES";
 
 const DEFAULT_ENABLED: bool = false;
-// Not /tmp: it is tmpfs on some hosts (e.g. Amazon Linux 2023), which holds segments in RAM.
 const DEFAULT_TRACE_DIR: &str = "/var/tmp/dial9-traces";
 const DEFAULT_S3_PREFIX: &str = "dial9-traces";
 const DEFAULT_MAX_DISK_USAGE_MB: u64 = 1024;
