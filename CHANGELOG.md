@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.7...dial9-v0.5.8) - 2026-11-05
+
+### Added
+
+- discover sampling populations with a bounded S3 census ([#1093](https://github.com/dial9-rs/dial9/pull/1093))
+
+### Fixed
+
+- *(viewer)* require explicit source identity ([#1103](https://github.com/dial9-rs/dial9/pull/1103))
+
 ## [0.5.7](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.6...dial9-v0.5.7) - 2026-10-31
 
 ### Added
