@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-destinations-s3"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "assert2",
  "async-trait",
@@ -2082,7 +2082,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-utils"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "axum 0.7.9",
  "axum 0.8.9",
@@ -2182,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "arrow",
