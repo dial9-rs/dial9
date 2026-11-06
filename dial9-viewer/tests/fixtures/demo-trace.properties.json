@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 7861,
+  "total_samples": 8765,
   "by_source": {
-    "0": 141,
-    "1": 7720
+    "0": 211,
+    "1": 8554
   },
   "on_off_all": {
-    "on_runtime": 7852,
+    "on_runtime": 8756,
     "off_runtime": 9
   },
   "on_off_by_source": {
     "0": {
-      "on": 132,
+      "on": 202,
       "off": 9
     },
     "1": {
-      "on": 7720,
+      "on": 8554,
       "off": 0
     }
   },
@@ -26,52 +26,52 @@
     3
   ],
   "cpu_profile": {
-    "count": 141,
-    "distinct_stacks": 119,
-    "stack_sig_digest": "9a2d23baa4f3f818",
-    "ts_count": 141,
-    "ts_span_ns": 3202002919,
-    "ts_delta_digest": "d040939879b68c59",
+    "count": 211,
+    "distinct_stacks": 189,
+    "stack_sig_digest": "14157fef27e1af12",
+    "ts_count": 211,
+    "ts_span_ns": 4142702782,
+    "ts_delta_digest": "2a25a96ae67a546b",
     "top_stacks": [
       {
         "count": 4,
-        "depth": 101,
-        "leaf": "[unknown] 0xffff890dde60"
+        "depth": 111,
+        "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 3,
-        "depth": 101,
+        "depth": 69,
         "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 3,
         "depth": 92,
-        "leaf": "[unknown] 0xffff890dde58"
+        "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 3,
-        "depth": 101,
-        "leaf": "[unknown] 0xffff890dde58"
+        "depth": 92,
+        "leaf": "[unknown] 0xffff9900de58"
       },
       {
         "count": 3,
-        "depth": 101,
-        "leaf": "[unknown] 0xffff88f0d200"
-      },
-      {
-        "count": 2,
         "depth": 71,
         "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 2,
         "depth": 101,
-        "leaf": "[unknown] 0xffff890ddea0"
+        "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 2,
         "depth": 92,
-        "leaf": "[unknown] 0xffff890dde54"
+        "leaf": "[unknown] 0xffff9900de98"
+      },
+      {
+        "count": 2,
+        "depth": 101,
+        "leaf": "[unknown] 0xffff9900de8c"
       }
     ]
   }

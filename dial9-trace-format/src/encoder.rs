@@ -373,19 +373,21 @@ impl<W: Write> Encoder<W> {
                 ),
             ));
         }
+        let id = self.register_schema_entry((*schema.entry).clone())?;
+        self.schema_ids.insert(key, id);
+        Ok(id)
+    }
+
+    /// Emit a schema at a fresh dynamic wire ID, independent of its name.
+    fn register_schema_entry(&mut self, entry: SchemaEntry) -> io::Result<WireTypeId> {
         let id = self.registry.next_type_id();
-        codec::encode_schema(id, &schema.entry, &mut self.state.writer)?;
-        if !schema.entry.annotations.is_empty() {
-            codec::encode_schema_annotations(
-                id,
-                &schema.entry.annotations,
-                &mut self.state.writer,
-            )?;
+        codec::encode_schema(id, &entry, &mut self.state.writer)?;
+        if !entry.annotations.is_empty() {
+            codec::encode_schema_annotations(id, &entry.annotations, &mut self.state.writer)?;
         }
         self.registry
-            .register(id, (*schema.entry).clone())
+            .register(id, entry)
             .expect("schema registration failed");
-        self.schema_ids.insert(key, id);
         Ok(id)
     }
 
@@ -459,6 +461,7 @@ impl<W: Write> Encoder<W> {
     }
 
     /// Write a derived TraceEvent. Auto-registers the schema on first call for this type.
+    /// Distinct Rust types have independent wire IDs, even when their event names match.
     /// Handles timestamp encoding: emits TimestampReset if needed, packs u24 delta in header.
     pub fn write<T: TraceEvent>(&mut self, event: &T) -> io::Result<()> {
         let slot = T::type_slot();
@@ -496,8 +499,8 @@ impl<W: Write> Encoder<W> {
         let tid = if let Some(&existing) = self.schema_ids.get(&key) {
             existing
         } else {
-            let schema = Schema::from_entry(T::schema_entry());
-            let id = self.ensure_registered(&schema)?;
+            // The Rust type identifies this schema; its display name need not be unique.
+            let id = self.register_schema_entry(T::schema_entry())?;
             self.schema_ids.insert(key, id);
             id
         };
