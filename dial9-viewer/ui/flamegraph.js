@@ -38,6 +38,21 @@
     setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
+  // A frame's docsUrl derives from trace-controlled data, so only an absolute
+  // https://docs.rs/ URL may become a link or be opened. Anything else is null.
+  function safeDocsRsUrl(raw) {
+    if (typeof raw !== "string" || !raw.startsWith("https://docs.rs/")) return null;
+    let url;
+    try {
+      url = new URL(raw);
+    } catch (_e) {
+      return null;
+    }
+    if (url.protocol !== "https:" || url.hostname !== "docs.rs") return null;
+    if (url.username || url.password || url.port) return null;
+    return url.href;
+  }
+
   // Like flattenFlamegraph in trace_analysis.js but attaches treeNode refs
   // for click-to-zoom. Filters out nodes < 0.1% of total.
   // `ancestors` is an optional array of tree nodes forming the parent chain
@@ -1182,7 +1197,16 @@
       return { hit: null, hitKey: key };
     }
 
-    function buildTooltipHtml(hit, pinned) {
+    function tooltipSpan(text, cssText) {
+      const span = document.createElement("span");
+      if (cssText) span.style.cssText = cssText;
+      span.textContent = text;
+      return span;
+    }
+
+    // Tooltip text (frame names, locations) comes from the trace, so the
+    // content is built with DOM nodes and textContent, never HTML strings.
+    function renderTooltipContent(hit, pinned) {
       const node = hit.node;
       const tn = node.treeNode || {};
       const isAncestor = !!node.isAncestor;
@@ -1190,44 +1214,73 @@
       const total = isAncestor ? (hit.rootTotal || hit.totalSamples || 1) : (hit.totalSamples || 1);
       const pct = ((node.count / total) * 100).toFixed(1);
       const selfPct = ((node.self / total) * 100).toFixed(1);
+      const lineBreak = () => tooltip.appendChild(document.createElement("br"));
+      tooltip.textContent = "";
       const nameElt = document.createElement("b");
-      nameElt.innerText = node.name;
-      let h = nameElt.outerHTML;
+      nameElt.textContent = node.name;
+      tooltip.appendChild(nameElt);
       if (tn.fullName && tn.fullName !== node.name) {
-        const fullElt = document.createElement("span");
-        fullElt.innerText = tn.fullName;
-        h += '<br><span style="color:#aaa">' + fullElt.innerHTML + '</span>';
+        lineBreak();
+        tooltip.appendChild(tooltipSpan(tn.fullName, "color:#aaa"));
       }
       if (tn.location) {
         const locShort = tn.location.replace(/^.*\/([^/]+(?::\d+)?)$/, "$1");
         const hasFullPath = tn.location !== locShort;
+        lineBreak();
         if (hasFullPath) {
-          const locEsc = document.createElement("span");
-          locEsc.innerText = tn.location;
-          h += '<br><span class="fg-loc-toggle" style="color:#888;cursor:pointer">' +
-            locShort + ' <span style="color:#555">\u25b6</span></span>' +
-            '<span class="fg-loc-full" style="color:#888;display:none;overflow-wrap:anywhere">' +
-            locEsc.innerHTML + '</span>';
+          const toggle = tooltipSpan(locShort + " ", "color:#888;cursor:pointer");
+          toggle.className = "fg-loc-toggle";
+          const arrow = tooltipSpan("\u25b6", "color:#555");
+          toggle.appendChild(arrow);
+          const full = tooltipSpan(tn.location, "color:#888;display:none;overflow-wrap:anywhere");
+          full.className = "fg-loc-full";
+          tooltip.appendChild(toggle);
+          tooltip.appendChild(full);
+          if (pinned) {
+            // Wire up expandable location
+            toggle.addEventListener("click", function () {
+              if (full.style.display === "none") {
+                full.textContent = tn.location;
+                full.style.display = "block";
+                arrow.textContent = "\u25bc";
+              } else {
+                full.style.display = "none";
+                arrow.textContent = "\u25b6";
+              }
+            });
+          }
         } else {
-          h += '<br><span style="color:#888">' + locShort + '</span>';
+          tooltip.appendChild(tooltipSpan(locShort, "color:#888"));
         }
       }
-      h += '<br>' + (formatCount ? formatCount(node.count, total, node.self, tn) : node.count + ' samples (' + pct + '%) \u00b7 ' + node.self + ' self (' + selfPct + '%)');
-      if (pinned && tn.docsUrl) {
-        h += '<br><a href="' + tn.docsUrl + '" target="_blank" rel="noopener" style="color:#6c63ff;text-decoration:underline">docs.rs \u2197</a>';
-      } else if (tn.docsUrl) {
-        h += '<br><span style="color:#6c63ff">docs.rs \u2197</span>' +
-          '<span style="color:#555"> (' + (isMac ? '\u2318' : 'Ctrl') + ' + click)</span>';
+      lineBreak();
+      tooltip.appendChild(document.createTextNode(
+        formatCount ? formatCount(node.count, total, node.self, tn) : node.count + ' samples (' + pct + '%) \u00b7 ' + node.self + ' self (' + selfPct + '%)'
+      ));
+      const docsUrl = safeDocsRsUrl(tn.docsUrl);
+      if (pinned && docsUrl) {
+        lineBreak();
+        const link = document.createElement("a");
+        link.href = docsUrl;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.style.cssText = "color:#6c63ff;text-decoration:underline";
+        link.textContent = "docs.rs \u2197";
+        tooltip.appendChild(link);
+      } else if (docsUrl) {
+        lineBreak();
+        tooltip.appendChild(tooltipSpan("docs.rs \u2197", "color:#6c63ff"));
+        tooltip.appendChild(tooltipSpan(" (" + (isMac ? "\u2318" : "Ctrl") + " + click)", "color:#555"));
       }
       if (!pinned) {
-        h += '<br><span style="color:#555">' + (isMac ? '\u2325' : 'Alt') +
-          ' + click to pin \u00b7 right-click to inspect</span>';
+        lineBreak();
+        tooltip.appendChild(tooltipSpan((isMac ? "\u2325" : "Alt") +
+          " + click to pin \u00b7 right-click to inspect", "color:#555"));
       }
-      return h;
     }
 
     function showTooltip(hit, x, y, pinned) {
-      tooltip.innerHTML = buildTooltipHtml(hit, pinned);
+      renderTooltipContent(hit, pinned);
       tooltip.style.pointerEvents = pinned ? "auto" : "none";
       tooltip.style.display = "block";
       // Position at top of the flamegraph container so it never covers hovered frames
@@ -1236,24 +1289,6 @@
       const tipY = Math.max(8, containerRect.top);
       tooltip.style.left = tipX + "px";
       tooltip.style.top = tipY + "px";
-      if (pinned) {
-        // Wire up expandable location
-        const toggle = tooltip.querySelector(".fg-loc-toggle");
-        const full = tooltip.querySelector(".fg-loc-full");
-        if (toggle && full) {
-          const tn = hit.node.treeNode || {};
-          toggle.addEventListener("click", function () {
-            if (full.style.display === "none") {
-              full.textContent = tn.location;
-              full.style.display = "block";
-              toggle.querySelector("span").textContent = "\u25bc";
-            } else {
-              full.style.display = "none";
-              toggle.querySelector("span").textContent = "\u25b6";
-            }
-          });
-        }
-      }
     }
 
     function unpinTooltip() {
@@ -1298,8 +1333,9 @@
       const { hit } = hitTest(e);
       if (!hit) { unpinTooltip(); return; }
       const tn = hit.node.treeNode || {};
-      if ((e.metaKey || e.ctrlKey) && tn.docsUrl) {
-        const w = window.open(tn.docsUrl, "_blank");
+      const docsUrl = safeDocsRsUrl(tn.docsUrl);
+      if ((e.metaKey || e.ctrlKey) && docsUrl) {
+        const w = window.open(docsUrl, "_blank");
         if (w) w.focus();
       } else if (e.altKey) {
         tooltipPinned = true;
