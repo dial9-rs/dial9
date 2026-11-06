@@ -381,3 +381,46 @@ fn js_decodes_dynamic_list_and_map() {
     assert_eq!(props[0][0], "key");
     assert_eq!(props[0][1], "99");
 }
+
+#[test]
+fn js_decodes_same_named_types_with_different_fields() {
+    mod a {
+        #[derive(dial9_trace_format::TraceEvent)]
+        pub struct Ev {
+            #[traceevent(timestamp)]
+            pub ts: u64,
+            pub x: u64,
+        }
+    }
+    mod b {
+        #[derive(dial9_trace_format::TraceEvent)]
+        pub struct Ev {
+            #[traceevent(timestamp)]
+            pub ts: u64,
+            pub y: u64,
+            pub z: u64,
+        }
+    }
+    let mut enc = Encoder::new();
+    enc.write_infallible(&a::Ev { ts: 1, x: 10 });
+    enc.write_infallible(&b::Ev {
+        ts: 2,
+        y: 20,
+        z: 30,
+    });
+    enc.write_infallible(&a::Ev { ts: 3, x: 40 });
+    let json = js_decode(&enc.finish());
+    let frames = json["frames"].as_array().unwrap();
+    let schemas: Vec<_> = frames.iter().filter(|f| f["type"] == "schema").collect();
+    assert_eq!(schemas.len(), 2);
+    assert_eq!(schemas[0]["name"], "Ev");
+    assert_eq!(schemas[1]["name"], "Ev");
+    let events: Vec<_> = frames.iter().filter(|f| f["type"] == "event").collect();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["values"], serde_json::json!({"x": "10"}));
+    assert_eq!(
+        events[1]["values"],
+        serde_json::json!({"y": "20", "z": "30"})
+    );
+    assert_eq!(events[2]["values"], serde_json::json!({"x": "40"}));
+}

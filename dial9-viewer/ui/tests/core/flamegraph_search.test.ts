@@ -194,14 +194,14 @@ describe("demo-trace anchors (#593 measurements)", () => {
   // and confirm the old anchors still reproduce. Then sanity-check the
   // new values before copying: poll/tokio should dominate, spawn should
   // stay tiny, and shifts should be explainable by the capture.
-  // Re-measured after regenerating the TaskMeta-enabled demo trace. This
-  // capture has 132 worker CPU samples.
+  // Re-measured after regenerating the demo trace. This
+  // capture has 202 worker CPU samples.
   const ANCHORS: Array<[string, number, string]> = [
-    ["poll", 146, "100.0"],
-    ["tokio", 190, "100.0"],
-    ["axum", 19, "88.6"],
-    ["dispatcher", 23, "72.0"],
-    ["framebuf", 9, "60.6"],
+    ["poll", 156, "100.0"],
+    ["tokio", 200, "100.0"],
+    ["axum", 42, "87.6"],
+    ["dispatcher", 26, "72.3"],
+    ["framebuf", 8, "44.1"],
     ["spawn", 3, "100.0"],
   ];
 
