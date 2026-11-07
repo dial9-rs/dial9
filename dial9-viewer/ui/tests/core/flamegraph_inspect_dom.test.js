@@ -23,16 +23,36 @@ function makeCtx() {
 // dispatchEvent to their registered handlers. Returns { document, registry,
 // elements, restore }. `elements` collects every element by className so the
 // test can find the canvases and menu after construction.
+// `style.cssText = "a-b:c"` sets `style.aB`, as in a browser.
+function makeStyle() {
+  const style = {};
+  Object.defineProperty(style, "cssText", {
+    set(v) {
+      for (const decl of String(v).split(";")) {
+        const i = decl.indexOf(":");
+        if (i < 0) continue;
+        const key = decl.slice(0, i).trim().replace(/-([a-z])/g, (_m, c) => c.toUpperCase());
+        style[key] = decl.slice(i + 1).trim();
+      }
+    },
+  });
+  return style;
+}
+
 function makeDom() {
   const registry = {};
   const byClass = {};
+  // Non-empty innerHTML writes, so tests can require trace text never takes that path.
+  const htmlWrites = [];
+  const opened = [];
 
   function makeEl(tag) {
     const listeners = {};
+    let innerHTML = "";
     const el = {
       tagName: tag || "div",
       _listeners: listeners,
-      style: {},
+      style: makeStyle(),
       dataset: {},
       children: [],
       _className: "",
@@ -46,8 +66,19 @@ function makeDom() {
           (byClass[cls] = byClass[cls] || []).push(el);
         }
       },
-      innerHTML: "",
-      textContent: "",
+      // innerHTML is stored, not parsed. Both setters replace the children, as
+      // in a browser, and textContent reads back through the children.
+      get innerHTML() { return innerHTML; },
+      set innerHTML(v) {
+        innerHTML = String(v);
+        if (innerHTML) htmlWrites.push({ el, html: innerHTML });
+        el.children = [];
+      },
+      get textContent() { return el.children.map((c) => c.textContent).join(""); },
+      set textContent(v) {
+        innerHTML = "";
+        el.children = String(v) ? [makeText(v)] : [];
+      },
       title: "",
       value: "",
       offsetWidth: 1200,
@@ -86,6 +117,10 @@ function makeDom() {
     return el;
   }
 
+  function makeText(data) {
+    return { nodeType: 3, data: String(data), get textContent() { return this.data; } };
+  }
+
   const prevDocument = global.document;
   const prevNavigatorDesc = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const prevWindow = global.window;
@@ -94,6 +129,7 @@ function makeDom() {
   const doc = makeEl();
   doc.body = makeEl();
   doc.createElement = (tag) => makeEl(tag);
+  doc.createTextNode = makeText;
   const docListeners = {};
   doc.addEventListener = (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn); };
   doc.removeEventListener = (type, fn) => {
@@ -107,7 +143,7 @@ function makeDom() {
     writable: true,
   });
   global.window = {
-    innerWidth: 1600, innerHeight: 900, open() { return null; },
+    innerWidth: 1600, innerHeight: 900, open(url) { opened.push(url); return null; },
     addEventListener() {}, removeEventListener() {},
   };
   global.devicePixelRatio = 1;
@@ -122,7 +158,7 @@ function makeDom() {
     global.devicePixelRatio = prevDpr;
   }
 
-  return { document: doc, registry, byClass, makeEl, restore };
+  return { document: doc, registry, byClass, htmlWrites, opened, makeEl, restore };
 }
 
 function tree(name, count, self, children) {
@@ -369,6 +405,107 @@ test("captureSlash: false drops / from the search placeholder and help", () => {
     );
     const help = dom.byClass["fg-help-overlay"][0];
     assert.ok(!help.innerHTML.includes("Ctrl + F or /"), "help drops the / row");
+  } finally {
+    dom.restore();
+  }
+});
+
+// Tooltip frame name/fullName/location and docsUrl come from the trace, so the
+// tooltip must render them as text and only link an absolute https://docs.rs/ URL.
+function elementsUnder(el) {
+  return el.children.flatMap((c) => (c.nodeType === 3 ? [] : [c, ...elementsUnder(c)]));
+}
+
+// Show a single-frame tree and hover the worker canvas until the tooltip names
+// the frame; optionally Alt-click to pin it. Returns the tooltip and a click helper.
+function showTooltip(dom, frame, pinned) {
+  const { createFlamegraph } = require("../../flamegraph.js");
+  const fg = createFlamegraph(dom.makeEl());
+  const leaf = { children: new Map(), count: 10, self: 10, ...frame };
+  fg.setTreeDirect({ ...tree("", 10, 0, []), children: new Map([[leaf.fullName, leaf]]) }, 10);
+  const tooltip = dom.byClass["fg-tooltip"][0];
+  const canvas = dom.byClass["fg-canvas"][0];
+  for (let y = 0; y < 400; y += 2) {
+    fire(canvas, "mousemove", { clientY: y });
+    const b = tooltip.children.find((c) => c.tagName === "b");
+    if (tooltip.style.display !== "block" || !b || b.textContent !== frame.name) continue;
+    const click = (props) => fire(canvas, "click", { clientY: y, ...props });
+    if (pinned) click({ altKey: true });
+    const tooltipHtml = () =>
+      dom.htmlWrites.filter((w) => w.el === tooltip || elementsUnder(tooltip).includes(w.el));
+    return { tooltip, click, tooltipHtml };
+  }
+  throw new Error("no canvas row shows frame " + JSON.stringify(frame.name));
+}
+
+test("tooltip renders hostile frame text inertly; pinned location toggle works", () => {
+  const dom = makeDom();
+  try {
+    const frame = {
+      name: '<img src=x onerror="globalThis.__d9xss=1">',
+      fullName: "</span><script>globalThis.__d9xss=1</script>",
+      location: "/src/<img src=x onerror=alert(1)>/lib.rs:7",
+    };
+    const { tooltip, tooltipHtml } = showTooltip(dom, frame, true);
+
+    assert.deepStrictEqual(tooltipHtml(), [], "no tooltip innerHTML writes");
+    const els = elementsUnder(tooltip);
+    assert.ok(!els.some((e) => e.tagName === "img" || e.tagName === "script"));
+    assert.ok(tooltip.textContent.includes(frame.name), "name shown verbatim");
+    assert.ok(tooltip.textContent.includes(frame.fullName), "fullName shown verbatim");
+
+    const toggle = els.find((e) => e.className === "fg-loc-toggle");
+    const full = els.find((e) => e.className === "fg-loc-full");
+    assert.strictEqual(toggle.textContent, "lib.rs:7 \u25b6");
+    assert.strictEqual(full.style.display, "none");
+    fire(toggle, "click");
+    assert.strictEqual(full.style.display, "block");
+    assert.strictEqual(full.textContent, frame.location, "full location kept as text");
+    assert.strictEqual(toggle.textContent, "lib.rs:7 \u25bc");
+    fire(toggle, "click");
+    assert.strictEqual(full.style.display, "none");
+    assert.strictEqual(globalThis.__d9xss, undefined);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("tooltip links a docs.rs URL when pinned and Ctrl-click opens it", () => {
+  const dom = makeDom();
+  try {
+    const docsUrl = "https://docs.rs/tokio/1.40.0/src/tokio/lib.rs.html#10";
+    const { tooltip, click, tooltipHtml } =
+      showTooltip(dom, { name: "f", fullName: "f", location: null, docsUrl }, false);
+    assert.ok(tooltip.textContent.includes("docs.rs \u2197 (Ctrl + click)"), "unpinned hint");
+
+    click({ ctrlKey: true });
+    assert.deepStrictEqual(dom.opened, [docsUrl]);
+
+    click({ altKey: true });
+    assert.deepStrictEqual(tooltipHtml(), []);
+    const links = elementsUnder(tooltip).filter((e) => e.tagName === "a");
+    assert.strictEqual(links.length, 1);
+    assert.strictEqual(links[0].href, docsUrl);
+    assert.strictEqual(links[0].rel, "noopener");
+  } finally {
+    dom.restore();
+  }
+});
+
+test.each([
+  "javascript:alert(1)",
+  "https://docs.rs.evil.example/tokio",
+])("tooltip rejects untrusted docsUrl %j", (docsUrl) => {
+  const dom = makeDom();
+  try {
+    const { tooltip, click } =
+      showTooltip(dom, { name: "f", fullName: "f", location: null, docsUrl }, false);
+    click({ ctrlKey: true });
+    assert.deepStrictEqual(dom.opened, [], "Ctrl-click opens nothing");
+
+    click({ altKey: true });
+    assert.ok(!elementsUnder(tooltip).some((e) => e.tagName === "a"), "no link");
+    assert.ok(!tooltip.textContent.includes("docs.rs \u2197"), "no docs text");
   } finally {
     dom.restore();
   }
