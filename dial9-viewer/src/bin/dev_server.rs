@@ -147,7 +147,10 @@ async fn main() -> anyhow::Result<()> {
         http_client,
         endpoint_url: Some("http://localhost:0".to_string()),
         force_path_style: true,
-    });
+    })
+    // The s3s fake's `test` credentials mean nothing to STS, so report one
+    // fixed account and keep aggregation offline.
+    .with_caller_identity_resolver(std::sync::Arc::new(FixedCallerIdentity));
 
     // Serve the BUILT UI (ui/dist) from disk, not the ui/ sources: the
     // servable set is the vite build output (root assets such as
@@ -276,4 +279,32 @@ fn gunzip_bytes(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).unwrap();
     out
+}
+
+/// Reports one fixed account for every caller, in place of STS.
+struct FixedCallerIdentity;
+
+impl dial9_viewer::server::credentials::CallerIdentityResolver for FixedCallerIdentity {
+    fn caller_identity<'a>(
+        &'a self,
+        _credentials: &'a dial9_viewer::server::credentials::TempCredentials,
+        _region: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        dial9_viewer::server::credentials::CallerIdentity,
+                        dial9_viewer::server::credentials::CallerIdentityError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Ok(dial9_viewer::server::credentials::CallerIdentity::new(
+                "000000000000",
+                "arn:aws:sts::000000000000:assumed-role/dev/dev-server",
+            ))
+        })
+    }
 }

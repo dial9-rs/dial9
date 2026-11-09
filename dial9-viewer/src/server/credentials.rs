@@ -101,6 +101,25 @@ impl RoleArn {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The ARN's partition (`aws`, `aws-cn`, or `aws-us-gov`).
+    pub(crate) fn partition(&self) -> &str {
+        self.field(1)
+    }
+
+    /// The role's 12-digit account id.
+    pub(crate) fn account_id(&self) -> &str {
+        self.field(4)
+    }
+
+    /// The `index`th `:`-separated field; construction through
+    /// [`is_valid_role_arn`] guarantees all six exist.
+    fn field(&self, index: usize) -> &str {
+        self.0
+            .splitn(6, ':')
+            .nth(index)
+            .expect("a validated role ARN has six fields")
+    }
 }
 
 /// How a request asked us to authenticate its S3 access. Exactly one variant is
@@ -228,7 +247,7 @@ fn is_valid_role_arn(arn: &str) -> bool {
 /// require a leading letter, a non-hyphen final character, and no consecutive
 /// hyphens, so degenerate inputs like `-`, `us--east-`, or `us-east-` are
 /// rejected.
-fn is_valid_region(region: &str) -> bool {
+pub(crate) fn is_valid_region(region: &str) -> bool {
     if region.is_empty() || region.len() > 40 {
         return false;
     }
@@ -484,6 +503,204 @@ impl RoleAssumer for StsRoleAssumer {
     }
 }
 
+/// The identity `GetCallerIdentity` reported for a set of credentials: the
+/// account id and principal ARN, as unvalidated strings. The aggregate cache
+/// validates them before deriving its namespace and fails closed when either is
+/// malformed.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct CallerIdentity {
+    account: String,
+    arn: String,
+}
+
+impl CallerIdentity {
+    pub fn new(account: impl Into<String>, arn: impl Into<String>) -> Self {
+        Self {
+            account: account.into(),
+            arn: arn.into(),
+        }
+    }
+
+    pub(crate) fn account(&self) -> &str {
+        &self.account
+    }
+
+    pub(crate) fn arn(&self) -> &str {
+        &self.arn
+    }
+}
+
+/// Opaque caller-identity lookup failure. Like [`AssumeRoleError`], the detail
+/// is logged server-side and never reflected to the client.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct CallerIdentityError {
+    message: String,
+    rejected: bool,
+}
+
+impl CallerIdentityError {
+    /// STS rejected the credentials themselves.
+    pub fn rejected(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            rejected: true,
+        }
+    }
+
+    /// The account could not be determined for another reason: no response,
+    /// throttling, a service fault, or a malformed identity.
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            rejected: false,
+        }
+    }
+
+    pub(crate) fn is_rejected(&self) -> bool {
+        self.rejected
+    }
+}
+
+impl std::fmt::Display for CallerIdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "caller identity lookup failed: {}", self.message)
+    }
+}
+impl std::error::Error for CallerIdentityError {}
+
+/// STS error codes that specifically mean the request credentials could not
+/// authenticate. Other errors, including an unrecognized 4xx response, do not
+/// prove that the credentials are invalid.
+const STS_CREDENTIAL_REJECTION_CODES: &[&str] = &[
+    "ExpiredToken",
+    "IncompleteSignature",
+    "InvalidClientTokenId",
+    "MissingAuthenticationToken",
+    "SignatureDoesNotMatch",
+    "UnrecognizedClientException",
+];
+
+/// Whether a `GetCallerIdentity` failure specifically rejects the credentials.
+/// `response` is the HTTP status and error code, or `None` when no service
+/// response arrived. Unknown and malformed responses fail closed as unavailable.
+fn rejects_credentials(response: Option<(u16, Option<&str>)>) -> bool {
+    response.is_some_and(|(status, code)| {
+        (400..500).contains(&status)
+            && code.is_some_and(|code| STS_CREDENTIAL_REJECTION_CODES.contains(&code))
+    })
+}
+
+/// Resolves the AWS account behind the credentials that sign a request's source
+/// reads, so aggregate output can be namespaced by account. An injectable seam
+/// like [`RoleAssumer`]: production uses `StsCallerIdentityResolver`; tests
+/// inject a fake.
+///
+/// Not called for assumed roles, whose account comes from the validated role
+/// ARN, nor for the ambient chain or sources without an AWS identity, which
+/// use fixed namespaces.
+#[doc(hidden)]
+pub trait CallerIdentityResolver: Send + Sync {
+    /// Look up the caller identity of `credentials`. `region` is the request's
+    /// validated region.
+    fn caller_identity<'a>(
+        &'a self,
+        credentials: &'a TempCredentials,
+        region: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<CallerIdentity, CallerIdentityError>>
+                + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// Per-attempt and overall `GetCallerIdentity` timeouts, bounding how long an
+/// unreachable STS endpoint can stall an aggregate request.
+const STS_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const STS_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Production [`CallerIdentityResolver`]: one STS `GetCallerIdentity` call per
+/// lookup, against the SDK's standard STS endpoint for the region. Supplied
+/// credentials are used as a static provider, never mixed with the ambient
+/// chain. The account is not cached.
+pub(crate) struct StsCallerIdentityResolver;
+
+impl StsCallerIdentityResolver {
+    fn client(credentials: &TempCredentials, region: Option<&str>) -> aws_sdk_sts::Client {
+        let timeouts = aws_sdk_sts::config::timeout::TimeoutConfig::builder()
+            .operation_attempt_timeout(STS_ATTEMPT_TIMEOUT)
+            .operation_timeout(STS_OPERATION_TIMEOUT)
+            .build();
+        let config = aws_sdk_sts::Config::builder()
+            .behavior_version(aws_sdk_sts::config::BehaviorVersion::latest())
+            .credentials_provider(credentials.credentials.clone())
+            .region(aws_sdk_sts::config::Region::new(sts_region(region)))
+            .timeout_config(timeouts)
+            .build();
+        aws_sdk_sts::Client::from_conf(config)
+    }
+}
+
+/// The STS region for a lookup: the request's validated region, else the same
+/// default the S3 clients use.
+fn sts_region(request: Option<&str>) -> String {
+    request
+        .unwrap_or(crate::storage::DEFAULT_REGION)
+        .to_string()
+}
+
+/// A `GetCallerIdentity` response as a [`CallerIdentity`]; an error when either
+/// field is missing.
+fn caller_identity_from(
+    account: Option<&str>,
+    arn: Option<&str>,
+) -> Result<CallerIdentity, CallerIdentityError> {
+    match (account, arn) {
+        (Some(account), Some(arn)) => Ok(CallerIdentity::new(account, arn)),
+        _ => Err(CallerIdentityError::unavailable(
+            "response is missing the account or ARN",
+        )),
+    }
+}
+
+impl CallerIdentityResolver for StsCallerIdentityResolver {
+    fn caller_identity<'a>(
+        &'a self,
+        credentials: &'a TempCredentials,
+        region: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<CallerIdentity, CallerIdentityError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let output = Self::client(credentials, region)
+                .get_caller_identity()
+                .send()
+                .await
+                .map_err(|e| {
+                    let response = e.as_service_error().and_then(|service| {
+                        use aws_sdk_sts::error::ProvideErrorMetadata;
+                        let status = e.raw_response()?.status().as_u16();
+                        Some((status, service.code()))
+                    });
+                    let message = aws_sdk_sts::error::DisplayErrorContext(&e).to_string();
+                    if rejects_credentials(response) {
+                        CallerIdentityError::rejected(message)
+                    } else {
+                        CallerIdentityError::unavailable(message)
+                    }
+                })?;
+            caller_identity_from(output.account(), output.arn())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,6 +941,62 @@ mod tests {
         ] {
             assert!(!is_valid_role_arn(arn), "expected {arn:?} to be rejected");
         }
+    }
+
+    #[rstest::rstest]
+    #[case::request_wins(Some("us-gov-west-1"), "us-gov-west-1")]
+    #[case::default_fallback(None, "us-east-1")]
+    fn sts_region_prefers_the_request(#[case] request: Option<&str>, #[case] want: &str) {
+        assert_eq!(sts_region(request), want);
+    }
+
+    #[rstest::rstest]
+    #[case::complete(Some("123456789012"), Some("arn:aws:iam::123456789012:root"), true)]
+    #[case::missing_account(None, Some("arn:aws:iam::123456789012:root"), false)]
+    #[case::missing_arn(Some("123456789012"), None, false)]
+    fn caller_identity_requires_account_and_arn(
+        #[case] account: Option<&str>,
+        #[case] arn: Option<&str>,
+        #[case] ok: bool,
+    ) {
+        let identity = caller_identity_from(account, arn);
+        assert_eq!(identity.is_ok(), ok, "{identity:?}");
+        match identity {
+            Ok(identity) => {
+                assert_eq!(identity.account(), "123456789012");
+                assert_eq!(identity.arn(), "arn:aws:iam::123456789012:root");
+            }
+            Err(e) => assert!(!e.is_rejected(), "a malformed identity is unavailable"),
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::invalid_token(Some((403, Some("InvalidClientTokenId"))), true)]
+    #[case::expired_token(Some((400, Some("ExpiredToken"))), true)]
+    #[case::bad_signature(Some((403, Some("SignatureDoesNotMatch"))), true)]
+    #[case::no_response(None, false)]
+    #[case::malformed_4xx(Some((400, None)), false)]
+    #[case::access_denied(Some((403, Some("AccessDenied"))), false)]
+    #[case::request_expired(Some((400, Some("RequestExpired"))), false)]
+    #[case::throttled(Some((400, Some("Throttling"))), false)]
+    #[case::service_fault(Some((500, Some("InternalFailure"))), false)]
+    fn sts_failure_classification(
+        #[case] response: Option<(u16, Option<&str>)>,
+        #[case] rejected: bool,
+    ) {
+        assert_eq!(rejects_credentials(response), rejected);
+    }
+
+    #[rstest::rstest]
+    #[case::commercial("arn:aws:iam::123456789012:role/r", "aws")]
+    #[case::gov_with_path("arn:aws-us-gov:iam::123456789012:role/a/b:c", "aws-us-gov")]
+    fn role_arn_exposes_partition_and_account(#[case] arn: &str, #[case] partition: &str) {
+        let role_arn = match parse_cred_inputs(&headers(&[(HEADER_ROLE_ARN, arn)]), None) {
+            Ok(CredSource::AssumeRole { role_arn, .. }) => role_arn,
+            other => panic!("expected AssumeRole, got {other:?}"),
+        };
+        assert_eq!(role_arn.partition(), partition);
+        assert_eq!(role_arn.account_id(), "123456789012");
     }
 
     #[test]

@@ -165,6 +165,9 @@ pub async fn build_simulator_app(config: SimulatorConfig) -> anyhow::Result<axum
     );
 
     let mut state = AppState::new(source, Some(bucket), Some(prefix))
+        .with_source_identity(crate::server::ServerSourceIdentity::Fixed(
+            crate::ingest::cache_namespace::CacheNamespace::simulator(),
+        ))
         .with_time_partitioned_source()
         .with_agg(agg)
         .with_agg_output(output)

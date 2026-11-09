@@ -65,10 +65,12 @@ free.
   zero-sample files, which are rare). Acceptable versus re-fetching them
   forever.
 - The output tree is namespaced by `SAMPLES_FORMAT_VERSION`
-  (`{output_prefix}/v{N}/samples/…`); a format bump points at a fresh
-  empty tree that repopulates lazily.
+  (`{output_prefix}/account={namespace}/v{N}/samples/…`); a format bump
+  points at a fresh empty tree that repopulates lazily (`account=`: see
+  [ADR-0005]).
 - `ORDER_VERSION` is NOT part of any output path — the folded part-files
   are order-independent and must survive an ordering change untouched.
 
 [CONTEXT.md]: ../../CONTEXT.md
 [order key]: ../../CONTEXT.md
+[ADR-0005]: 0005-aggregate-cache-account-namespace.md

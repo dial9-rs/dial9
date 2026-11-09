@@ -40,7 +40,7 @@ pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }-
 [features]
 default = ["s3"]
 ## S3 storage, bring-your-own AWS credentials, and assume-role support.
-s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
+s3 = ["dep:aws-config", "dep:aws-sdk-s3", "dep:aws-sdk-sts"]
 dev-server = ["s3", "dep:s3s", "dep:s3s-fs", "dep:s3s-aws", "dep:tempfile"]
 
 [[bin]]
@@ -95,6 +95,8 @@ dial9-utils = { workspace = true, features = ["span"] }
 time = "0.3"
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
 aws-sdk-s3 = { version = "1.145", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "sigv4a"], optional = true }
+# Resolves the AWS account that namespaces cached aggregate output.
+aws-sdk-sts = { version = "1.110", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"], optional = true }
 anyhow = "1"
 bon = "3"
 s3s = { version = "0.14.1", optional = true }

@@ -262,6 +262,7 @@ async fn build_app_from(
     // retains the persistent S3 behavior; otherwise output uses a process-local
     // temporary directory that is removed when the server drops it.
     use crate::ingest::aggregate::AggContext;
+    use crate::ingest::cache_namespace::CacheNamespace;
     let agg_output = s3::aggregate_output(agg_output_bucket.as_deref(), &agg_output_prefix).await?;
     tracing::info!(
         output = %agg_output.location(),
@@ -345,12 +346,20 @@ async fn build_app_from(
         // credentials; a local-directory source does not, and neither does a
         // supplied backend — its store is not S3 whatever it addresses.
         let source_is_s3 = !agg.source_is_local && supplied_backend.is_none();
+        let identity = if supplied_backend.is_some() {
+            server::ServerSourceIdentity::Fixed(CacheNamespace::supplied())
+        } else if agg.source_is_local {
+            server::ServerSourceIdentity::Fixed(CacheNamespace::local())
+        } else {
+            s3::ambient_source_identity()
+        };
         let state = server::AppState::new(
             std::sync::Arc::clone(&agg.source),
             Some(agg.source_bucket.clone()),
             prefix.clone(),
         )
-        .with_agg(agg.clone());
+        .with_agg(agg.clone())
+        .with_source_identity(identity);
         (state, source_is_s3)
     } else if let Some(backend) = &supplied_backend {
         tracing::info!(?bucket, "serving traces from a supplied storage backend");
@@ -358,7 +367,10 @@ async fn build_app_from(
             std::sync::Arc::clone(backend),
             bucket.clone(),
             prefix.clone(),
-        );
+        )
+        .with_source_identity(server::ServerSourceIdentity::Fixed(
+            CacheNamespace::supplied(),
+        ));
         (state, false)
     } else if let Some(dir) = &local_dir {
         let dir = std::fs::canonicalize(dir)?;
@@ -368,7 +380,8 @@ async fn build_app_from(
             std::sync::Arc::new(backend),
             Some("local".into()),
             prefix.clone(),
-        );
+        )
+        .with_source_identity(server::ServerSourceIdentity::Fixed(CacheNamespace::local()));
         (state, false)
     } else {
         s3::app_state(bucket.as_deref(), prefix.as_deref()).await?

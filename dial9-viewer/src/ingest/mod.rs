@@ -8,6 +8,7 @@
 //! endpoint.
 
 pub mod aggregate;
+pub(crate) mod cache_namespace;
 pub(crate) mod decode;
 pub(crate) mod parquet_writer;
 pub(crate) mod refine;
