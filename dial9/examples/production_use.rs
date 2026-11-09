@@ -130,7 +130,7 @@
 //! | Name                              | Default                         | Meaning                                                       |
 //! | --------------------------------- | ------------------------------- | ------------------------------------------------------------- |
 //! | `DIAL9_ENABLED`                   | `false`                         | Master switch. `true`/`false` only (Rust `bool::from_str`).   |
-//! | `DIAL9_TRACE_DIR`                 | `/tmp/dial9-traces`             | Directory to write rotated trace segments into.               |
+//! | `DIAL9_TRACE_DIR`                 | `/var/tmp/dial9-traces`         | Directory to write rotated trace segments into.               |
 //! | `DIAL9_ROTATION_SECS`             | `60`                            | Rotation period in seconds, measured monotonically from writer start. |
 //! | `DIAL9_MAX_DISK_USAGE_MB`         | `1024`                          | Upper bound on total on-disk bytes (old files evicted).       |
 //! | `DIAL9_S3_BUCKET`                 | unset / empty                   | When set, sealed segments are gzip-uploaded to this bucket.   |
@@ -195,7 +195,7 @@ struct Dial9Opts {
     enabled: bool,
 
     /// Directory to write rotated trace segments into.
-    #[arg(long, env = "DIAL9_TRACE_DIR", default_value = "/tmp/dial9-traces")]
+    #[arg(long, env = "DIAL9_TRACE_DIR", default_value = "/var/tmp/dial9-traces")]
     trace_dir: String,
 
     /// Rotation period in seconds, measured monotonically from writer start.
