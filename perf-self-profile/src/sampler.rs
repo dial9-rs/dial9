@@ -45,7 +45,12 @@ pub struct SamplerConfig {
     /// per-thread mode. Prevents unbounded fd/mmap growth if cleanup fails.
     /// Default: 256.
     pub(crate) max_tracked_threads: usize,
+    /// Requested data size of each perf ring buffer, in bytes.
+    pub(crate) ring_buffer_bytes: usize,
 }
+
+/// Default perf ring buffer size.
+pub(crate) const DEFAULT_RING_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 
 impl Default for SamplerConfig {
     fn default() -> Self {
@@ -54,6 +59,7 @@ impl Default for SamplerConfig {
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
             max_tracked_threads: 256,
+            ring_buffer_bytes: DEFAULT_RING_BUFFER_BYTES,
         }
     }
 }
@@ -83,6 +89,21 @@ impl SamplerConfig {
     /// of opening another fd. Default: 256.
     pub fn max_tracked_threads(mut self, max: usize) -> Self {
         self.max_tracked_threads = max;
+        self
+    }
+
+    /// Data size of each perf ring buffer, in bytes, rounded up to a power of
+    /// two pages. Must not be 0. Default: 2 MiB.
+    ///
+    /// One ring is mapped per CPU in process-wide mode and per tracked thread
+    /// in per-thread mode. Unprivileged rings count against the perf mlock
+    /// budget (`kernel.perf_event_mlock_kb` per CPU plus `RLIMIT_MEMLOCK`).
+    /// A ring that fills before it is drained drops samples; see
+    /// [`PerfSampler::take_lost_samples`](crate::PerfSampler::take_lost_samples).
+    ///
+    /// Ignored by the ctimer backend.
+    pub fn ring_buffer_size(mut self, bytes: usize) -> Self {
+        self.ring_buffer_bytes = bytes;
         self
     }
 }

@@ -6,7 +6,7 @@
 use std::io;
 
 use super::ctimer_sampler::CtimerSampler;
-use super::perf_sampler::{PerfSamplerImpl, excludes_kernel};
+use super::perf_sampler::{PerfSamplerImpl, RingMlockBudgetError, excludes_kernel};
 use crate::sampler::{ActiveCpuBackend, EventSource, Sample, SamplerConfig};
 
 pub(super) trait SamplerBackend: Send {
@@ -15,6 +15,8 @@ pub(super) trait SamplerBackend: Send {
     fn has_pending(&self) -> bool;
     fn for_each_sample(&mut self, f: &mut dyn FnMut(&Sample));
     fn drain_samples(&mut self) -> Vec<Sample>;
+    /// Samples dropped on a full buffer since the last call.
+    fn take_lost(&mut self) -> u64;
     fn disable(&self);
     fn enable(&self);
     fn active_backend(&self) -> ActiveCpuBackend;
@@ -58,13 +60,16 @@ fn error_to_hint_text(err: &io::Error, config: &SamplerConfig) -> Option<&'stati
     })
 }
 
-/// Returns `true` if the error indicates `perf_event_open` is blocked by
-/// the kernel (seccomp, perf_event_paranoid, missing syscall).
+/// Returns `true` if the error indicates perf sampling is blocked by the
+/// kernel: `perf_event_open` refused (seccomp, perf_event_paranoid, missing
+/// syscall) or the ring buffer over the perf mlock budget.
 pub(crate) fn is_perf_blocked(err: &io::Error) -> bool {
     matches!(
         err.raw_os_error(),
         Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP)
-    )
+    ) || err
+        .get_ref()
+        .is_some_and(|inner| inner.is::<RingMlockBudgetError>())
 }
 
 impl PerfSampler {
@@ -138,7 +143,7 @@ impl PerfSampler {
                     );
                 }
                 tracing::warn!(
-                    "perf_event_open failed ({e}), falling back to ctimer-based \
+                    "perf sampling unavailable ({e}), falling back to ctimer-based \
                      CPU profiling (userspace frame-pointer unwinding)"
                 );
                 Self::ctimer_fallback(&config)
@@ -253,6 +258,14 @@ impl PerfSampler {
 
     pub fn drain_samples(&mut self) -> Vec<Sample> {
         self.inner.drain_samples()
+    }
+
+    /// Number of samples dropped because a buffer filled up before it was
+    /// drained, since the last call. Counted while draining, so call this
+    /// after [`for_each_sample`](Self::for_each_sample) or
+    /// [`drain_samples`](Self::drain_samples).
+    pub fn take_lost_samples(&mut self) -> u64 {
+        self.inner.take_lost()
     }
 
     /// Pause collection. Reversible via `enable`.

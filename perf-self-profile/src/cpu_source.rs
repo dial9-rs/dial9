@@ -6,14 +6,21 @@
 //! - [`CpuProfiler`] — process-wide frequency-based CPU sampling.
 //! - [`SchedProfiler`] — per-worker-thread context-switch capture.
 
+use crate::sampler::DEFAULT_RING_BUFFER_BYTES;
 use crate::{ActiveCpuBackend, EventSource, PerfSampler, SamplerConfig, SamplingMode, sys};
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
+use dial9_core::rate_limited;
 use dial9_core::source::{FlushContext, Source};
 use dial9_trace_format::encoder::FxHashMap;
 use dial9_trace_format::types::{EventEncoder, FieldType};
 use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
 use std::io::{self, Write};
 use std::sync::Arc;
+
+/// Default per-thread sched ring: with its metadata page at 4 KiB pages,
+/// exactly the 516 KiB one CPU contributes to the default
+/// `kernel.perf_event_mlock_kb` budget.
+const DEFAULT_SCHED_RING_BYTES: usize = 512 * 1024;
 
 // ── Wire sentinel ───────────────────────────────────────────────────────────
 
@@ -180,6 +187,7 @@ pub struct CpuProfilingConfig {
     event_source: EventSource,
     include_kernel: bool,
     snapshot_kallsyms: bool,
+    ring_buffer_bytes: Option<usize>,
 }
 
 impl Default for CpuProfilingConfig {
@@ -190,6 +198,7 @@ impl Default for CpuProfilingConfig {
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
             snapshot_kallsyms: false,
+            ring_buffer_bytes: None,
         }
     }
 }
@@ -264,6 +273,16 @@ impl CpuProfilingConfig {
         self.snapshot_kallsyms = yes;
         self
     }
+
+    /// Size of each per-CPU perf ring buffer, in bytes. Default: 2 MiB. See
+    /// [`SamplerConfig::ring_buffer_size`]. Dropped samples are counted in the
+    /// `cpu.profile.lost_samples` segment metadata.
+    ///
+    /// Ignored by [`Ctimer`](CpuBackend::Ctimer).
+    pub fn ring_buffer_size(mut self, bytes: usize) -> Self {
+        self.ring_buffer_bytes = Some(bytes);
+        self
+    }
 }
 
 /// Configuration for per-thread sched event capture (context switches).
@@ -271,10 +290,14 @@ impl CpuProfilingConfig {
 /// Uses `perf_event_open` with `SwContextSwitches` in per-thread mode, so each
 /// tracked thread gets its own perf fd: Tokio workers on their first poll/park,
 /// other threads when they call `Dial9Handle::track_current_thread`.
+///
+/// Each tracked thread also gets its own perf ring buffer, sized by
+/// [`ring_buffer_size`](Self::ring_buffer_size).
 #[derive(Debug, Clone, Default)]
 pub struct SchedEventConfig {
     sampling_interval: Option<u64>,
     include_kernel: bool,
+    ring_buffer_bytes: Option<usize>,
 }
 
 impl SchedEventConfig {
@@ -288,6 +311,60 @@ impl SchedEventConfig {
     pub fn include_kernel(mut self, yes: bool) -> Self {
         self.include_kernel = yes;
         self
+    }
+
+    /// Size of each tracked thread's perf ring buffer, in bytes. Default:
+    /// 512 KiB. See [`SamplerConfig::ring_buffer_size`]. Dropped context
+    /// switches are counted in the `sched.profile.lost_samples` segment metadata.
+    pub fn ring_buffer_size(mut self, bytes: usize) -> Self {
+        self.ring_buffer_bytes = Some(bytes);
+        self
+    }
+}
+
+/// Running count of samples a profiler's buffers dropped, reported as a
+/// segment-metadata entry when it grows.
+#[derive(Debug, Default)]
+struct LostSamples {
+    total: u64,
+    reported: u64,
+    last_report: Option<std::time::Instant>,
+}
+
+/// Minimum time between metadata reports: each one rewrites the segment
+/// metadata, and a ring that keeps overflowing changes the total every flush.
+const LOST_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl LostSamples {
+    /// Add the samples `sampler` dropped since the last call. Call after a drain.
+    fn collect(&mut self, sampler: &mut PerfSampler, source: &'static str) {
+        let lost = sampler.take_lost_samples();
+        if lost == 0 {
+            return;
+        }
+        self.total = self.total.saturating_add(lost);
+        rate_limited!(std::time::Duration::from_secs(60), key = source, {
+            tracing::warn!(
+                "{source} profiler dropped {lost} samples: sample buffer filled before it was \
+                 flushed ({} dropped in total)",
+                self.total
+            );
+        });
+    }
+
+    /// Append the cumulative total under `key` if it changed since last
+    /// reported, at most once per [`LOST_REPORT_INTERVAL`].
+    fn segment_metadata(&mut self, key: &str, out: &mut Vec<(String, String)>) {
+        if self.total == self.reported
+            || self
+                .last_report
+                .is_some_and(|at| at.elapsed() < LOST_REPORT_INTERVAL)
+        {
+            return;
+        }
+        self.reported = self.total;
+        self.last_report = Some(std::time::Instant::now());
+        out.push((key.to_string(), self.total.to_string()));
     }
 }
 
@@ -320,6 +397,8 @@ pub struct CpuProfiler {
     kallsyms_snapshot: Option<bool>,
     /// CPU samples from this process drained since start.
     samples_drained: u64,
+    /// Samples dropped on full sample buffers.
+    lost: LostSamples,
 }
 
 impl std::fmt::Debug for CpuProfiler {
@@ -338,18 +417,23 @@ impl CpuProfiler {
 
     /// Start the process-wide CPU profiler with the given config.
     pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
+        let ring_bytes = config
+            .ring_buffer_bytes
+            .unwrap_or(DEFAULT_RING_BUFFER_BYTES);
         let sampler = match config.backend {
             CpuBackend::Auto => PerfSampler::start(
                 SamplerConfig::default()
                     .event_source(config.event_source)
                     .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(config.include_kernel),
+                    .include_kernel(config.include_kernel)
+                    .ring_buffer_size(ring_bytes),
             )?,
             CpuBackend::Perf => PerfSampler::start_perf_only(
                 SamplerConfig::default()
                     .event_source(config.event_source)
                     .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(config.include_kernel),
+                    .include_kernel(config.include_kernel)
+                    .ring_buffer_size(ring_bytes),
             )?,
             CpuBackend::Ctimer => PerfSampler::start_ctimer_only(
                 SamplerConfig::default()
@@ -369,6 +453,7 @@ impl CpuProfiler {
             metadata_emitted: false,
             kallsyms_snapshot: None,
             samples_drained: 0,
+            lost: LostSamples::default(),
         })
     }
 
@@ -381,6 +466,12 @@ impl CpuProfiler {
     /// thread each flush cycle while recording; unchanged while paused.
     pub fn samples_drained(&self) -> u64 {
         self.samples_drained
+    }
+
+    /// Samples dropped since start because a sample buffer filled before it
+    /// was drained. Updated like [`samples_drained`](Self::samples_drained).
+    pub fn samples_lost(&self) -> u64 {
+        self.lost.total
     }
 
     /// Drain all pending perf samples as raw (tid, callchain) tuples.
@@ -411,6 +502,7 @@ impl CpuProfiler {
                 thread_name,
             );
         });
+        self.lost.collect(&mut self.sampler, "CPU");
         self.evict_stopped_names();
     }
 
@@ -481,6 +573,7 @@ impl Source for CpuProfiler {
     }
 
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        self.lost.segment_metadata("cpu.profile.lost_samples", out);
         if self.metadata_emitted {
             return;
         }
@@ -543,6 +636,8 @@ pub struct SchedProfiler {
     metadata_emitted: bool,
     /// Scheduler samples drained since start.
     samples_drained: u64,
+    /// Samples dropped on full ring buffers.
+    lost: LostSamples,
 }
 
 impl std::fmt::Debug for SchedProfiler {
@@ -560,13 +655,15 @@ impl SchedProfiler {
             SamplerConfig::default()
                 .event_source(EventSource::SwContextSwitches)
                 .sampling(SamplingMode::Period(config.sampling_interval.unwrap_or(1)))
-                .include_kernel(config.include_kernel),
+                .include_kernel(config.include_kernel)
+                .ring_buffer_size(config.ring_buffer_bytes.unwrap_or(DEFAULT_SCHED_RING_BYTES)),
         )?;
         Ok(Self {
             sampler,
             config,
             metadata_emitted: false,
             samples_drained: 0,
+            lost: LostSamples::default(),
         })
     }
 
@@ -574,6 +671,13 @@ impl SchedProfiler {
     /// flush cycle while recording; unchanged while paused.
     pub fn samples_drained(&self) -> u64 {
         self.samples_drained
+    }
+
+    /// Context switches dropped since start because a thread's ring buffer
+    /// filled before it was drained. Updated like
+    /// [`samples_drained`](Self::samples_drained).
+    pub fn samples_lost(&self) -> u64 {
+        self.lost.total
     }
 
     pub(crate) fn track_current_thread(&mut self) -> io::Result<()> {
@@ -595,6 +699,7 @@ impl SchedProfiler {
                 cpu: sample.cpu,
             });
         });
+        self.lost.collect(&mut self.sampler, "sched event");
     }
 }
 
@@ -626,6 +731,8 @@ impl Source for SchedProfiler {
     }
 
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        self.lost
+            .segment_metadata("sched.profile.lost_samples", out);
         if self.metadata_emitted {
             return;
         }
@@ -638,6 +745,35 @@ impl Source for SchedProfiler {
             "sched.profile.sample_interval".to_string(),
             effective_interval.to_string(),
         ));
+    }
+}
+
+#[cfg(test)]
+mod lost_samples_tests {
+    use super::LostSamples;
+
+    #[test]
+    fn metadata_reports_the_total_when_it_changes_at_most_once_per_interval() {
+        const KEY: &str = "sched.profile.lost_samples";
+        let report = |lost: &mut LostSamples| {
+            let mut out = Vec::new();
+            lost.segment_metadata(KEY, &mut out);
+            out
+        };
+        let entry = |total: &str| vec![(KEY.to_string(), total.to_string())];
+        let mut lost = LostSamples::default();
+
+        assert_eq!(report(&mut lost), [], "nothing lost, nothing reported");
+
+        lost.total = 7;
+        assert_eq!(report(&mut lost), entry("7"));
+        assert_eq!(report(&mut lost), [], "unchanged total reported again");
+
+        lost.total = 9;
+        assert_eq!(report(&mut lost), [], "reported again within the interval");
+
+        lost.last_report = None;
+        assert_eq!(report(&mut lost), entry("9"));
     }
 }
 
