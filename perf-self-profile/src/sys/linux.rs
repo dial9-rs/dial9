@@ -1,5 +1,11 @@
 mod ctimer_sampler;
 pub(crate) mod fp_profiler;
+// Only the aarch64 walks read the function-start table, so elsewhere every item
+// is unreachable. It is still compiled everywhere, because the ELF and
+// /proc/self/maps parsing and its tests are architecture-independent and are
+// worth keeping under x86-64 clippy and the x86-64-only ASan job.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub(crate) mod func_starts;
 mod kallsyms;
 pub(crate) mod offline_symbolize;
 mod perf_sampler;
