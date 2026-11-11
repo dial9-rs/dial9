@@ -87,7 +87,6 @@ impl PerfSampler {
     /// A denied open's error says how to allow it.
     #[cfg(feature = "cpu-profiling")]
     pub(crate) fn start_perf_only(config: SamplerConfig) -> io::Result<Self> {
-        config.validate()?;
         let perf =
             PerfSamplerImpl::start_for_pid(0, &config).map_err(|e| {
                 match error_to_hint_text(&e, &config) {
@@ -108,7 +107,6 @@ impl PerfSampler {
     /// period-based configurations.
     #[cfg(feature = "cpu-profiling")]
     pub(crate) fn start_ctimer_only(config: SamplerConfig) -> io::Result<Self> {
-        config.validate()?;
         Self::ctimer_fallback(&config)
     }
 
@@ -117,8 +115,6 @@ impl PerfSampler {
     /// `pid=0` means the current process. `pid=-1` means all processes (requires root).
     pub fn start_for_pid(pid: i32, config: SamplerConfig) -> io::Result<Self> {
         use crate::SamplingMode;
-
-        config.validate()?;
 
         if std::env::var_os("DIAL9_FORCE_CTIMER").is_some() {
             match config.sampling {
@@ -163,8 +159,6 @@ impl PerfSampler {
     /// `perf_event_open` and cannot fall back — returns an error if blocked.
     pub fn new_per_thread(config: SamplerConfig) -> io::Result<Self> {
         use crate::SamplingMode;
-
-        config.validate()?;
 
         if std::env::var_os("DIAL9_FORCE_CTIMER").is_some() {
             match config.sampling {
@@ -297,18 +291,6 @@ mod tests {
             .event_source(source)
             .sampling(sampling)
             .include_kernel(include_kernel)
-    }
-
-    /// A zero ring size is rejected whichever backend would run.
-    #[cfg(feature = "cpu-profiling")]
-    #[rstest]
-    #[case::auto(PerfSampler::start)]
-    #[case::per_thread(PerfSampler::new_per_thread)]
-    #[case::perf(PerfSampler::start_perf_only)]
-    #[case::ctimer(PerfSampler::start_ctimer_only)]
-    fn zero_ring_size_is_rejected(#[case] start: fn(SamplerConfig) -> io::Result<PerfSampler>) {
-        let err = start(SamplerConfig::default().ring_buffer_size(0)).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
     }
 
     /// A denied `perf_event_open` error says how to allow it. It names

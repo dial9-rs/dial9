@@ -8,6 +8,7 @@ use dial9_core::recorder::recorder;
 use dial9_core::source::Source;
 use dial9_core::test_util::drain_encoded_batches;
 use dial9_perf_self_profile::{SchedEventConfig, SchedProfiler};
+use std::num::NonZeroUsize;
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
@@ -35,12 +36,13 @@ fn context_switch_burst() {
 #[test]
 fn overflowing_ring_reports_lost_samples() {
     // Rounded up to a single page.
-    let sched = match SchedProfiler::new(SchedEventConfig::default().ring_buffer_size(1)) {
-        Ok(sched) => sched,
-        // perf_event_open blocked (e.g. restricted CI); nothing to verify.
-        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return,
-        Err(e) => panic!("failed to create sched profiler: {e}"),
-    };
+    let sched =
+        match SchedProfiler::new(SchedEventConfig::default().ring_buffer_size(NonZeroUsize::MIN)) {
+            Ok(sched) => sched,
+            // perf_event_open blocked (e.g. restricted CI); nothing to verify.
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return,
+            Err(e) => panic!("failed to create sched profiler: {e}"),
+        };
 
     // Paused so the flush thread does not drain the ring; this test drives
     // `flush_sources` by hand.

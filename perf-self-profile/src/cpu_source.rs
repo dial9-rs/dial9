@@ -15,6 +15,7 @@ use dial9_trace_format::encoder::FxHashMap;
 use dial9_trace_format::types::{EventEncoder, FieldType};
 use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
 use std::io::{self, Write};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 // ── Wire sentinel ───────────────────────────────────────────────────────────
@@ -182,7 +183,7 @@ pub struct CpuProfilingConfig {
     event_source: EventSource,
     include_kernel: bool,
     snapshot_kallsyms: bool,
-    ring_buffer_bytes: Option<usize>,
+    ring_buffer_bytes: Option<NonZeroUsize>,
 }
 
 impl Default for CpuProfilingConfig {
@@ -274,7 +275,7 @@ impl CpuProfilingConfig {
     /// `cpu.profile.lost_samples` segment metadata.
     ///
     /// Ignored by [`Ctimer`](CpuBackend::Ctimer).
-    pub fn ring_buffer_size(mut self, bytes: usize) -> Self {
+    pub fn ring_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
         self.ring_buffer_bytes = Some(bytes);
         self
     }
@@ -292,7 +293,7 @@ impl CpuProfilingConfig {
 pub struct SchedEventConfig {
     sampling_interval: Option<u64>,
     include_kernel: bool,
-    ring_buffer_bytes: Option<usize>,
+    ring_buffer_bytes: Option<NonZeroUsize>,
 }
 
 impl SchedEventConfig {
@@ -311,7 +312,7 @@ impl SchedEventConfig {
     /// Size of each tracked thread's perf ring buffer, in bytes. Default:
     /// 512 KiB. See [`SamplerConfig::ring_buffer_size`]. Dropped context
     /// switches are counted in the `sched.profile.lost_samples` segment metadata.
-    pub fn ring_buffer_size(mut self, bytes: usize) -> Self {
+    pub fn ring_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
         self.ring_buffer_bytes = Some(bytes);
         self
     }

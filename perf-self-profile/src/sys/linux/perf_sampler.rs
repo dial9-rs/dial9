@@ -5,6 +5,7 @@
 //! are parsed via `perf-event-data`.
 
 use std::io;
+use std::num::NonZeroUsize;
 use std::ptr;
 
 use perf_event_data::Record;
@@ -40,10 +41,10 @@ impl Drop for PerfEvent {
 }
 
 /// Data pages for a ring holding at least `bytes`. perf requires a power of two.
-fn ring_page_count(bytes: usize, page_size: usize) -> io::Result<usize> {
+fn ring_page_count(bytes: NonZeroUsize, page_size: usize) -> io::Result<usize> {
     bytes
+        .get()
         .div_ceil(page_size)
-        .max(1)
         .checked_next_power_of_two()
         // The metadata page and the byte size must fit in `usize` too.
         .filter(|pages| {
@@ -621,16 +622,17 @@ mod tests {
         let default = crate::sampler::DEFAULT_RING_BUFFER_BYTES;
         assert_eq!(ring_page_count(default, 4096).unwrap(), 128);
         assert_eq!(ring_page_count(default, 65536).unwrap(), 8);
-        assert_eq!(ring_page_count(1, 4096).unwrap(), 1);
-        assert_eq!(ring_page_count(4096, 4096).unwrap(), 1);
-        assert_eq!(ring_page_count(4097, 4096).unwrap(), 2);
-        assert_eq!(ring_page_count(3 * 4096, 4096).unwrap(), 4);
+        let pages = |bytes| ring_page_count(NonZeroUsize::new(bytes).unwrap(), 4096).unwrap();
+        assert_eq!(pages(1), 1);
+        assert_eq!(pages(4096), 1);
+        assert_eq!(pages(4097), 2);
+        assert_eq!(pages(3 * 4096), 4);
     }
 
     #[test]
     fn ring_page_count_rejects_sizes_that_overflow() {
         for bytes in [usize::MAX, usize::MAX - 4096] {
-            let err = ring_page_count(bytes, 4096).unwrap_err();
+            let err = ring_page_count(NonZeroUsize::new(bytes).unwrap(), 4096).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         }
     }
@@ -694,8 +696,12 @@ mod tests {
             eprintln!("skipping: mlock budget of {budget} bytes is too large to exceed");
             return;
         }
-        let config = SamplerConfig::default()
-            .ring_buffer_size(usize::try_from(ring_bytes).expect("ring size fits usize"));
+        let config = SamplerConfig::default().ring_buffer_size(
+            usize::try_from(ring_bytes)
+                .ok()
+                .and_then(NonZeroUsize::new)
+                .expect("ring size fits usize"),
+        );
 
         let err = match PerfSamplerImpl::start_for_pid(0, &config) {
             // root, CAP_IPC_LOCK and perf_event_paranoid=-1 are exempt.

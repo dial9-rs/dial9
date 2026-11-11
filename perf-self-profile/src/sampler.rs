@@ -1,5 +1,7 @@
 //! Shared types for the sampler: event source, configuration, and sample data.
 
+use std::num::NonZeroUsize;
+
 /// Which event source to sample on.
 // TODO: these variants are currently Linux-specific (perf_event_open constants),
 // consider cfg-gating individual variants when adding other platform backends.
@@ -46,13 +48,13 @@ pub struct SamplerConfig {
     /// Default: 256.
     pub(crate) max_tracked_threads: usize,
     /// Requested data size of each perf ring buffer, in bytes.
-    pub(crate) ring_buffer_bytes: usize,
+    pub(crate) ring_buffer_bytes: NonZeroUsize,
 }
 
 /// Default perf ring buffer size: with its metadata page at 4 KiB pages,
 /// exactly the 516 KiB one CPU contributes to the default
 /// `kernel.perf_event_mlock_kb` budget.
-pub(crate) const DEFAULT_RING_BUFFER_BYTES: usize = 512 * 1024;
+pub(crate) const DEFAULT_RING_BUFFER_BYTES: NonZeroUsize = NonZeroUsize::new(512 * 1024).unwrap();
 
 impl Default for SamplerConfig {
     fn default() -> Self {
@@ -95,7 +97,7 @@ impl SamplerConfig {
     }
 
     /// Data size of each perf ring buffer, in bytes, rounded up to a power of
-    /// two pages. Must not be 0. Default: 512 KiB.
+    /// two pages. Default: 512 KiB.
     ///
     /// One ring is mapped per CPU in process-wide mode and per tracked thread
     /// in per-thread mode. Unprivileged rings count against the perf mlock
@@ -104,28 +106,9 @@ impl SamplerConfig {
     /// [`PerfSampler::take_lost_samples`](crate::PerfSampler::take_lost_samples).
     ///
     /// Ignored by the ctimer backend.
-    pub fn ring_buffer_size(mut self, bytes: usize) -> Self {
+    pub fn ring_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
         self.ring_buffer_bytes = bytes;
         self
-    }
-
-    /// Reject settings no backend accepts, so a bad config fails the same way
-    /// whichever backend ends up running.
-    #[cfg_attr(
-        not(any(
-            target_os = "linux",
-            all(target_os = "android", target_arch = "aarch64")
-        )),
-        allow(dead_code)
-    )]
-    pub(crate) fn validate(&self) -> std::io::Result<()> {
-        if self.ring_buffer_bytes == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "perf ring buffer size must be >= 1 byte",
-            ));
-        }
-        Ok(())
     }
 }
 
