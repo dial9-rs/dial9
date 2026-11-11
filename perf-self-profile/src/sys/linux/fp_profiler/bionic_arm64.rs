@@ -32,13 +32,13 @@ pub unsafe fn android_ucontext_set_result_reg(ucontext: *mut c_void, value: u64)
     unsafe { (*ucontext.cast::<struct_ucontext>()).uc_mcontext.regs[0] = value };
 }
 
-/// Read `(pc, fp, sp)` from an Android aarch64 ucontext. `fp` is `x29` (the
-/// AAPCS64 frame pointer register).
+/// Read `(pc, fp, sp, lr)` from an Android aarch64 ucontext. `fp` is `x29`,
+/// `lr` is `x30`, needed to recover a frameless leaf's immediate caller.
 #[inline]
-pub unsafe fn android_ucontext_pc_fp_sp(ucontext: *mut c_void) -> (u64, u64, u64) {
+pub unsafe fn android_ucontext_pc_fp_sp_lr(ucontext: *mut c_void) -> (u64, u64, u64, u64) {
     unsafe {
         let mc = &(*ucontext.cast::<struct_ucontext>()).uc_mcontext;
-        (mc.pc, mc.regs[29], mc.sp)
+        (mc.pc, mc.regs[29], mc.sp, mc.regs[30])
     }
 }
 
