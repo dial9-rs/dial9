@@ -9,12 +9,13 @@ use dial9_core::source::Source;
 use dial9_core::test_util::drain_encoded_batches;
 use dial9_perf_self_profile::{SchedEventConfig, SchedProfiler};
 use std::sync::mpsc::sync_channel;
-use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 /// Deschedule the calling thread often enough to overflow a one-page ring,
 /// 64 KiB pages included: a context-switch record with its callchain is over
-/// 100 bytes. Each rendezvous blocks until the peer thread answers.
+/// 100 bytes. A rendezvous blocks until the peer thread answers, unless the
+/// peer is quick enough to answer while the channel still spins, hence the
+/// generous count.
 fn context_switch_burst() {
     let (ping, pings) = sync_channel::<()>(0);
     let (pong, pongs) = sync_channel::<()>(0);
@@ -23,7 +24,7 @@ fn context_switch_burst() {
             pong.send(()).expect("burst thread alive");
         }
     });
-    for _ in 0..1000 {
+    for _ in 0..20_000 {
         ping.send(()).expect("peer alive");
         pongs.recv().expect("peer alive");
     }
@@ -34,8 +35,12 @@ fn context_switch_burst() {
 #[test]
 fn overflowing_ring_reports_lost_samples() {
     // Rounded up to a single page.
-    let sched = SchedProfiler::new(SchedEventConfig::default().ring_buffer_size(1))
-        .expect("sched profiler");
+    let sched = match SchedProfiler::new(SchedEventConfig::default().ring_buffer_size(1)) {
+        Ok(sched) => sched,
+        // perf_event_open blocked (e.g. restricted CI); nothing to verify.
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return,
+        Err(e) => panic!("failed to create sched profiler: {e}"),
+    };
 
     // Paused so the flush thread does not drain the ring; this test drives
     // `flush_sources` by hand.
@@ -46,52 +51,32 @@ fn overflowing_ring_reports_lost_samples() {
     let handle = rec.handle().clone();
     let shared = rec.shared().expect("enabled recorder").clone();
 
-    let step = Arc::new(Barrier::new(2));
-    let worker = {
-        let handle = handle.clone();
-        let step = Arc::clone(&step);
-        std::thread::spawn(move || {
-            let _tracking = handle.track_current_thread().expect("track thread");
-            context_switch_burst();
-            step.wait(); // ring is full
-            step.wait(); // main drained it
-            // The kernel writes the lost count with the next record that fits.
-            context_switch_burst();
-            step.wait();
-            // Hold the guard until the main thread has drained again.
-            step.wait();
-        })
-    };
-
-    let metadata = || {
-        handle
-            .with_source::<SchedProfiler, _>(|sched| {
-                let mut out = Vec::new();
-                sched.segment_metadata(&mut out);
-                out
-            })
-            .expect("sched source registered")
-    };
-    let lost_samples = |entries: &[(String, String)]| {
-        entries
-            .iter()
-            .find(|(key, _)| key == "sched.profile.lost_samples")
-            .map(|(_, value)| value.parse::<u64>().expect("lost count is a number"))
-    };
-
-    step.wait();
+    let tracking = handle.track_current_thread().expect("track thread");
+    context_switch_burst();
     shared.flush_sources();
-    step.wait();
-    step.wait();
+    // The kernel writes the lost count with the next record that fits.
+    context_switch_burst();
     shared.flush_sources();
     drain_encoded_batches(&shared);
+    drop(tracking);
 
-    let lost = lost_samples(&metadata());
+    let (metadata, samples_lost) = handle
+        .with_source::<SchedProfiler, _>(|sched| {
+            let mut out = Vec::new();
+            sched.segment_metadata(&mut out);
+            (out, sched.samples_lost())
+        })
+        .expect("sched source registered");
+    let reported = metadata
+        .iter()
+        .find(|(key, _)| key == "sched.profile.lost_samples")
+        .map(|(_, value)| value.parse::<u64>().expect("lost count is a number"));
+
     assert!(
-        lost.is_some_and(|lost| lost > 0),
-        "expected lost samples from a one-page ring, got {lost:?}"
+        samples_lost > 0,
+        "expected lost samples from a one-page ring"
     );
-    step.wait();
-    worker.join().expect("worker thread");
+    assert_eq!(reported, Some(samples_lost));
+
     rec.graceful_shutdown(Duration::ZERO);
 }

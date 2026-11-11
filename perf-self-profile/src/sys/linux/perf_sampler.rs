@@ -41,14 +41,9 @@ impl Drop for PerfEvent {
 
 /// Data pages for a ring holding at least `bytes`. perf requires a power of two.
 fn ring_page_count(bytes: usize, page_size: usize) -> io::Result<usize> {
-    if bytes == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "perf ring buffer size must be >= 1 byte",
-        ));
-    }
     bytes
         .div_ceil(page_size)
+        .max(1)
         .checked_next_power_of_two()
         // The metadata page and the byte size must fit in `usize` too.
         .filter(|pages| {
@@ -633,8 +628,8 @@ mod tests {
     }
 
     #[test]
-    fn ring_page_count_rejects_zero_and_sizes_that_overflow() {
-        for bytes in [0, usize::MAX, usize::MAX - 4096] {
+    fn ring_page_count_rejects_sizes_that_overflow() {
+        for bytes in [usize::MAX, usize::MAX - 4096] {
             let err = ring_page_count(bytes, 4096).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         }
@@ -687,9 +682,11 @@ mod tests {
             eprintln!("skipping: perf mlock limits unreadable");
             return;
         };
+        // `rlim_t` is 32 bits wide on some targets.
+        #[allow(clippy::unnecessary_cast)]
         let budget = (mlock_kb * 1024)
             .saturating_mul(online_cpus)
-            .saturating_add(memlock);
+            .saturating_add(memlock as u64);
         // One ring larger than the whole budget fails on its own, without
         // first using up the budget other perf users of this uid share.
         let ring_bytes = budget.saturating_add(1);

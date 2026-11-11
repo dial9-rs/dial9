@@ -108,6 +108,25 @@ impl SamplerConfig {
         self.ring_buffer_bytes = bytes;
         self
     }
+
+    /// Reject settings no backend accepts, so a bad config fails the same way
+    /// whichever backend ends up running.
+    #[cfg_attr(
+        not(any(
+            target_os = "linux",
+            all(target_os = "android", target_arch = "aarch64")
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn validate(&self) -> std::io::Result<()> {
+        if self.ring_buffer_bytes == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "perf ring buffer size must be >= 1 byte",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A single sample captured from perf events.
