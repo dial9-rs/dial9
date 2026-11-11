@@ -624,8 +624,8 @@ mod tests {
     #[test]
     fn ring_page_count_defaults_and_rounds_up_to_power_of_two_pages() {
         let default = crate::sampler::DEFAULT_RING_BUFFER_BYTES;
-        assert_eq!(ring_page_count(default, 4096).unwrap(), 512);
-        assert_eq!(ring_page_count(default, 65536).unwrap(), 32);
+        assert_eq!(ring_page_count(default, 4096).unwrap(), 128);
+        assert_eq!(ring_page_count(default, 65536).unwrap(), 8);
         assert_eq!(ring_page_count(1, 4096).unwrap(), 1);
         assert_eq!(ring_page_count(4096, 4096).unwrap(), 1);
         assert_eq!(ring_page_count(4097, 4096).unwrap(), 2);

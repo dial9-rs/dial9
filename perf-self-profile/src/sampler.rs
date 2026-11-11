@@ -49,8 +49,10 @@ pub struct SamplerConfig {
     pub(crate) ring_buffer_bytes: usize,
 }
 
-/// Default perf ring buffer size.
-pub(crate) const DEFAULT_RING_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+/// Default perf ring buffer size: with its metadata page at 4 KiB pages,
+/// exactly the 516 KiB one CPU contributes to the default
+/// `kernel.perf_event_mlock_kb` budget.
+pub(crate) const DEFAULT_RING_BUFFER_BYTES: usize = 512 * 1024;
 
 impl Default for SamplerConfig {
     fn default() -> Self {
@@ -93,7 +95,7 @@ impl SamplerConfig {
     }
 
     /// Data size of each perf ring buffer, in bytes, rounded up to a power of
-    /// two pages. Must not be 0. Default: 2 MiB.
+    /// two pages. Must not be 0. Default: 512 KiB.
     ///
     /// One ring is mapped per CPU in process-wide mode and per tracked thread
     /// in per-thread mode. Unprivileged rings count against the perf mlock

@@ -17,11 +17,6 @@ use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceF
 use std::io::{self, Write};
 use std::sync::Arc;
 
-/// Default per-thread sched ring: with its metadata page at 4 KiB pages,
-/// exactly the 516 KiB one CPU contributes to the default
-/// `kernel.perf_event_mlock_kb` budget.
-const DEFAULT_SCHED_RING_BYTES: usize = 512 * 1024;
-
 // ── Wire sentinel ───────────────────────────────────────────────────────────
 
 /// Worker ID sentinel used when the sample's worker is not yet known.
@@ -274,7 +269,7 @@ impl CpuProfilingConfig {
         self
     }
 
-    /// Size of each per-CPU perf ring buffer, in bytes. Default: 2 MiB. See
+    /// Size of each per-CPU perf ring buffer, in bytes. Default: 512 KiB. See
     /// [`SamplerConfig::ring_buffer_size`]. Dropped samples are counted in the
     /// `cpu.profile.lost_samples` segment metadata.
     ///
@@ -656,7 +651,11 @@ impl SchedProfiler {
                 .event_source(EventSource::SwContextSwitches)
                 .sampling(SamplingMode::Period(config.sampling_interval.unwrap_or(1)))
                 .include_kernel(config.include_kernel)
-                .ring_buffer_size(config.ring_buffer_bytes.unwrap_or(DEFAULT_SCHED_RING_BYTES)),
+                .ring_buffer_size(
+                    config
+                        .ring_buffer_bytes
+                        .unwrap_or(DEFAULT_RING_BUFFER_BYTES),
+                ),
         )?;
         Ok(Self {
             sampler,

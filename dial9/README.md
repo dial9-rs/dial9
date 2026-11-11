@@ -435,7 +435,7 @@ depend on those hooks will not observe runtime context. Hooks you pass via
     sudo sysctl kernel.perf_event_paranoid=1
     ```
 
-- perf mlock budget: perf ring buffers are pinned memory, limited without `CAP_IPC_LOCK` to `kernel.perf_event_mlock_kb` per CPU plus `RLIMIT_MEMLOCK`. dial9 maps a 2 MiB ring per CPU for perf CPU profiling and a 512 KiB ring per tracked thread for `sched_events`. Past the budget, CPU profiling falls back to ctimer (or fails to start if the perf backend was requested explicitly) and tracking another thread fails; the error names both limits. Raise a limit, or shrink the rings with `ring_buffer_size` on `CpuProfilingConfig` / `SchedEventConfig`. Samples dropped by a full ring are counted in the `cpu.profile.lost_samples` / `sched.profile.lost_samples` segment metadata.
+- perf mlock budget: perf ring buffers are pinned memory, limited without `CAP_IPC_LOCK` to `kernel.perf_event_mlock_kb` per CPU plus `RLIMIT_MEMLOCK`. dial9 maps a 512 KiB ring per CPU for perf CPU profiling and per tracked thread for `sched_events`. Past the budget, CPU profiling falls back to ctimer (or fails to start if the perf backend was requested explicitly) and tracking another thread fails; the error names both limits. Raise a limit, or shrink the rings with `ring_buffer_size` on `CpuProfilingConfig` / `SchedEventConfig`. Samples dropped by a full ring are counted in the `cpu.profile.lost_samples` / `sched.profile.lost_samples` segment metadata.
     ```bash
     cat /proc/sys/kernel/perf_event_mlock_kb
     ulimit -l
