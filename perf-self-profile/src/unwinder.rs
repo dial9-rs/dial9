@@ -146,6 +146,21 @@ impl Unwinder {
             .map_err(SelfTestError::Spawn)?;
         join.join().map_err(SelfTestError::from_panic_payload)
     }
+
+    /// Whether *leaf* functions in this binary carry a frame record.
+    ///
+    /// [`self_test_frame_pointers`](Self::self_test_frame_pointers) cannot
+    /// answer this: its recursion helper makes a call, so under
+    /// `-C force-frame-pointers=non-leaf` (the aarch64 default) the self-test
+    /// passes while leaves stay frameless.
+    ///
+    /// `Some(false)` means leaf samples lose their immediate caller unless the
+    /// unwinder recovers it from LR. `None` on an unrecognised architecture.
+    ///
+    /// Reads a few instructions of this crate's own code; not for hot paths.
+    pub fn leaf_frame_pointers_present() -> Option<bool> {
+        crate::leaf_probe::leaf_frame_pointers_present()
+    }
 }
 
 /// Error from [`Unwinder::self_test_frame_pointers`] when the self-test

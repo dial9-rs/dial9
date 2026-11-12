@@ -17,6 +17,12 @@ pub(crate) use linux::fp_profiler;
     target_os = "linux",
     all(target_os = "android", target_arch = "aarch64")
 ))]
+#[cfg_attr(not(target_arch = "aarch64"), allow(unused_imports))]
+pub(crate) use linux::func_starts;
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "android", target_arch = "aarch64")
+))]
 pub(crate) use linux::offline_symbolize::SymbolizeContainers;
 #[cfg(any(
     target_os = "linux",

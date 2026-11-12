@@ -450,6 +450,66 @@ jobs:
             --features cpu-profiling --test call_site_inline_stack \
             -- ctimer_inline_stack_points_to_call_site
 
+  leaf-caller-recovery:
+    name: Frameless leaves report their caller (aarch64)
+    runs-on: ubuntu-24.04-arm
+    env:
+      RUST_BACKTRACE: 1
+      # Deliberately omits `-C force-frame-pointers=yes`, which is what every
+      # other job (and .cargo/config.toml) sets. With that flag leaves carry a
+      # frame record, the kernel's x29 chain already names the immediate caller,
+      # and these tests pass whether or not the LR recovery exists. This job is
+      # the only aarch64 job that runs a release build without it, and so the
+      # only one that fails if the recovery is reverted. A release build is
+      # also required: at opt-level=0 even leaves get frame pointers.
+      RUSTFLAGS: "--cfg tokio_unstable"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Enable perf_event_open for the perf backend
+        run: sudo sysctl kernel.perf_event_paranoid=1
+      - name: perf backend (the on-CPU default)
+        env:
+          DIAL9_NO_SKIP: 1
+          DIAL9_EXPECT_LEAVES: frameless
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          cargo test --release \
+            -p dial9-perf-self-profile --features cpu-profiling \
+            --test perf_backend_leaf_caller -- --nocapture
+      - name: ctimer backend (the SIGPROF fallback)
+        env:
+          DIAL9_FORCE_CTIMER: 1
+          DIAL9_NO_SKIP: 1
+          DIAL9_EXPECT_LEAVES: frameless
+        run: |
+          cargo test --release \
+            -p dial9-perf-self-profile --features cpu-profiling \
+            --test leaf_caller_recovery -- --nocapture
+      # Both backends apply the rule with their own `chain_ret`, so both need
+      # checking for a duplicated frame, not just the perf one.
+      - name: No duplicate frame when leaves are framed (perf)
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
+          DIAL9_NO_SKIP: 1
+          DIAL9_EXPECT_LEAVES: framed
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          cargo test --release -p dial9-perf-self-profile --features cpu-profiling \
+            --test perf_backend_leaf_caller -- --nocapture
+      - name: No duplicate frame when leaves are framed (ctimer)
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
+          DIAL9_FORCE_CTIMER: 1
+          DIAL9_NO_SKIP: 1
+          DIAL9_EXPECT_LEAVES: framed
+        run: |
+          cargo test --release -p dial9-perf-self-profile --features cpu-profiling \
+            --test leaf_caller_recovery -- --nocapture
+
   frame-pointer-detection:
     name: Missing frame pointers are detected
     runs-on: ubuntu-latest
@@ -615,7 +675,7 @@ jobs:
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [release-published, fmt, clippy, build, min-versions, android-aarch64-build, feature-check, no-tokio-unstable, check-docs, trace-integrity, ui, asan, ecs-sim, frame-pointer-detection, shuttle, package, doctests, fuzz]
+    needs: [release-published, fmt, clippy, build, min-versions, android-aarch64-build, feature-check, no-tokio-unstable, check-docs, trace-integrity, ui, asan, ecs-sim, frame-pointer-detection, leaf-caller-recovery, shuttle, package, doctests, fuzz]
     if: always()
     steps:
       - run: |

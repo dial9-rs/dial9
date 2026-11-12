@@ -17,6 +17,18 @@
 //! Either way: dereference fp to get the next fp, and fp+8 to get the return
 //! address. Both reads go through safe_access::load so a corrupted chain
 //! aborts the walk instead of crashing.
+//!
+//! # Frameless frames and the link register (aarch64)
+//!
+//! A function with no frame record leaves `x29` pointing at its *caller's*
+//! record, so `*(fp + 8)` is the return address into the caller's caller and
+//! the chain drops one frame. This applies to every leaf under
+//! `-C force-frame-pointers=non-leaf` (the aarch64 default) and to any
+//! function sampled before its prologue runs.
+//!
+//! The missing return address is live in `x30` (LR), so [`unwind_with_lr`]
+//! inserts it, using `func_starts` (aarch64 only) to decide when LR is the
+//! caller rather than a stale value.
 
 use super::{SAFE_LOAD_FAULT, load};
 use crate::unwinder::CaptureResult;
@@ -144,6 +156,63 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> Ca
     }
 }
 
+/// Like [`unwind`], but recovers the immediate caller from `lr` when the
+/// sampled function has no frame record, per
+/// `func_starts::lr_is_missing_caller` (aarch64 only). See the module docs.
+///
+/// # Safety
+/// Same requirements as [`unwind`].
+pub unsafe fn unwind_with_lr(
+    pc: usize,
+    fp: usize,
+    sp: usize,
+    lr: usize,
+    out: &mut [u64],
+) -> CaptureResult {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let limit = out.len().min(MAX_FRAMES);
+        // Needs room for pc plus the recovered frame, a readable record, and an
+        // `fp` that cannot overflow the slot addition below.
+        if limit >= 2
+            && fp >= sp
+            && fp & (core::mem::size_of::<usize>() - 1) == 0
+            && fp <= usize::MAX - core::mem::size_of::<usize>()
+        {
+            let slot = (fp + core::mem::size_of::<usize>()) as *const usize;
+            // SAFETY: guarded by `load`, which recovers from a faulting read.
+            let chain_ret = strip_pac(unsafe { load(slot) });
+            let lr = strip_pac(lr);
+            // Compare call sites, not return addresses: the perf path does the
+            // same, and a `bl` as a function's last instruction leaves a return
+            // address that resolves to the *next* function.
+            if chain_ret != SAFE_LOAD_FAULT
+                && crate::sys::func_starts::lr_is_missing_caller(
+                    pc as u64,
+                    crate::sys::linux::call_site_addr(lr as u64),
+                    Some(crate::sys::linux::call_site_addr(chain_ret as u64)),
+                    // Signal context: read the table, never build it.
+                    crate::sys::func_starts::get(),
+                )
+            {
+                out[0] = pc as u64;
+                // The nested walk writes `lr` at out[1], then continues from
+                // `fp` with `chain_ret` at out[2].
+                // SAFETY: same contract as this function.
+                let rest = unsafe { unwind(lr, fp, sp, &mut out[1..]) };
+                return CaptureResult {
+                    frames_written: 1 + rest.frames_written,
+                    truncated: rest.truncated,
+                };
+            }
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = lr;
+    // SAFETY: same contract as this function.
+    unsafe { unwind(pc, fp, sp, out) }
+}
+
 /// Unwind from inside a signal handler given the raw ucontext.
 ///
 /// See [`unwind`] for details on the return value.
@@ -154,12 +223,17 @@ pub(crate) unsafe fn unwind_from_ucontext(
     ucontext: *mut libc::c_void,
     out: &mut [u64],
 ) -> CaptureResult {
-    let (pc, fp, sp) = unsafe { read_pc_fp_sp(ucontext) };
-    unsafe { unwind(pc, fp, sp, out) }
+    let (pc, fp, sp, lr) = unsafe { read_pc_fp_sp_lr(ucontext) };
+    unsafe { unwind_with_lr(pc, fp, sp, lr, out) }
 }
 
+/// x86-64 has no link register, so the fourth element is always 0 and the
+/// recovery path is gated off. Not a gap: rustc's x86_64 target omits frame
+/// pointers entirely and `-fno-omit-frame-pointer` covers leaves there, so
+/// there is no default build with framed callers and frameless leaves. See
+/// `docs/design/leaf-caller-recovery.md`.
 #[cfg(target_arch = "x86_64")]
-unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
+unsafe fn read_pc_fp_sp_lr(uc: *mut libc::c_void) -> (usize, usize, usize, usize) {
     let uc = uc as *mut libc::ucontext_t;
     unsafe {
         let g = &(*uc).uc_mcontext.gregs;
@@ -167,12 +241,13 @@ unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
             g[libc::REG_RIP as usize] as usize,
             g[libc::REG_RBP as usize] as usize,
             g[libc::REG_RSP as usize] as usize,
+            0,
         )
     }
 }
 
 #[cfg(all(target_arch = "aarch64", not(target_os = "android")))]
-unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
+unsafe fn read_pc_fp_sp_lr(uc: *mut libc::c_void) -> (usize, usize, usize, usize) {
     let uc = uc as *mut libc::ucontext_t;
     unsafe {
         let m = &(*uc).uc_mcontext;
@@ -180,6 +255,7 @@ unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
             m.pc as usize,
             m.regs[29] as usize, // x29 is the frame pointer
             m.sp as usize,
+            m.regs[30] as usize, // x30 is the link register
         )
     }
 }
@@ -188,11 +264,11 @@ unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
 /// sigmask padding, so we use Bionic's documented layout. See
 /// [`super::bionic_arm64`] for details.
 #[cfg(all(target_arch = "aarch64", target_os = "android"))]
-unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
+unsafe fn read_pc_fp_sp_lr(uc: *mut libc::c_void) -> (usize, usize, usize, usize) {
     // SAFETY: `uc` is the kernel-provided ucontext to a SA_SIGINFO handler;
     // `bionic_arm64::struct_ucontext` matches Bionic's layout for aarch64.
-    let (pc, fp, sp) = unsafe { super::bionic_arm64::android_ucontext_pc_fp_sp(uc) };
-    (pc as usize, fp as usize, sp as usize)
+    let (pc, fp, sp, lr) = unsafe { super::bionic_arm64::android_ucontext_pc_fp_sp_lr(uc) };
+    (pc as usize, fp as usize, sp as usize, lr as usize)
 }
 
 #[cfg(test)]
