@@ -17,6 +17,7 @@ import {
   eventClusterPage,
   computeEventTrackData,
   eventHighlightTask,
+  countHiddenByDefaultInView,
   eventMatchesFilter,
   filterVisibleEvents,
   isSameCluster,
@@ -24,6 +25,7 @@ import {
   resolveClusterTask,
   resolvePollForEvent,
   resolveTaskForEvent,
+  toggleEventName,
   upperBoundByTimestamp,
   type EventTrackData,
 } from "./events-model.js";
@@ -177,6 +179,36 @@ describe("eventMatchesFilter", () => {
     expect(eventMatchesFilter(ev("ProcessResourceUsageEvent", 1), sel)).toBe(true);
     expect(eventMatchesFilter(ev("a", 1), sel)).toBe(false);
   });
+  it("clicking the hidden chip with nothing selected adds it to the shown events", () => {
+    const names = ["ProcessResourceUsageEvent", "a", "b"];
+    const next = toggleEventName(new Set(), "ProcessResourceUsageEvent", names);
+    const data = trackData(
+      [ev("a", 10), ev("ProcessResourceUsageEvent", 20), ev("b", 30)],
+      names,
+    );
+    expect(filterVisibleEvents(data, 0, 100, next).map((e) => e.name)).toEqual([
+      "a",
+      "ProcessResourceUsageEvent",
+      "b",
+    ]);
+  });
+  it("other chips keep plain toggle semantics", () => {
+    const names = ["ProcessResourceUsageEvent", "a", "b"];
+    expect([...toggleEventName(new Set(), "a", names)]).toEqual(["a"]);
+    expect([...toggleEventName(new Set(["a", "b"]), "a", names)]).toEqual(["b"]);
+    expect([
+      ...toggleEventName(new Set(["a"]), "ProcessResourceUsageEvent", names),
+    ].sort()).toEqual(["ProcessResourceUsageEvent", "a"]);
+  });
+  it("counts hidden-by-default events in the window only when nothing is selected", () => {
+    const data = trackData(
+      [ev("ProcessResourceUsageEvent", 10), ev("a", 20), ev("ProcessResourceUsageEvent", 30)],
+      ["ProcessResourceUsageEvent", "a"],
+    );
+    expect(countHiddenByDefaultInView(data, 0, 100, new Set())).toBe(2);
+    expect(countHiddenByDefaultInView(data, 0, 15, new Set())).toBe(1);
+    expect(countHiddenByDefaultInView(data, 0, 100, new Set(["a"]))).toBe(0);
+  });
   it("filterVisibleEvents applies the name filter within the window", () => {
     const data: EventTrackData = trackData(
       [ev("a", 10), ev("b", 20), ev("a", 30)],
@@ -211,6 +243,23 @@ describe("isSameCluster", () => {
 describe("buildEventRenderModel", () => {
   const colorOf = (n: string): string => (n === "a" ? "#aaa" : "#bbb");
   const noTask = (): number | null => null;
+
+  it("reports hidden-by-default events in the info readout", () => {
+    const data = trackData(
+      [ev("a", 10), ev("ProcessResourceUsageEvent", 20), ev("ProcessResourceUsageEvent", 30)],
+      ["ProcessResourceUsageEvent", "a"],
+    );
+    const opts = {
+      data, viewStart: 0, viewEnd: 100, drawW: 100, canvasH: 40,
+      selectedNames: new Set<string>(), taskOf: noTask, colorOf,
+    };
+    const model = buildEventRenderModel(opts);
+    expect(model.info).toBe("1 events · 1 markers · 2 hidden");
+    expect(model.hiddenInView).toBe(2);
+    const empty = buildEventRenderModel({ ...opts, viewStart: 15 });
+    expect(empty.emptyReason).toBe("no-visible");
+    expect(empty.hiddenInView).toBe(2);
+  });
 
   it("clusters same-pixel events, sizes ticks, and stripes mixed names", () => {
     // viewStart=0 viewEnd=100 drawW=100 -> ns maps 1:1 to px.

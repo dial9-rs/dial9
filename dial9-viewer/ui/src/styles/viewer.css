@@ -1215,7 +1215,7 @@ body {
     flex-shrink: 0;
 }
 .d9-event-chip.on { background: var(--chip, #888); color: #fff; }
-.d9-event-chip.hidden-default { border-style: dashed; opacity: 0.6; text-decoration: line-through; }
+.d9-event-chip.hidden-default { border-style: dashed; font-style: italic; }
 .d9-events-canvas-wrap { flex: 1; min-width: 0; display: flex; }
 .d9-events-canvas { display: block; cursor: default; }
 

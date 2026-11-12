@@ -117,8 +117,9 @@ export function computeEventTrackData(
 
 /**
  * Event names left out of the track until their chip is selected. Process
- * resource samples already drive the CPU track; as periodic markers they are
- * only noise (#951).
+ * resource samples feed the CPU track; as periodic markers they are only
+ * noise (#951). The name matches PROCESS_RESOURCE_USAGE_EVENT in
+ * trace_analysis.js (frozen core, not exported).
  */
 const HIDDEN_BY_DEFAULT_EVENT_NAMES: ReadonlySet<string> = new Set([
   "ProcessResourceUsageEvent",
@@ -140,6 +141,26 @@ export function eventMatchesFilter(
 ): boolean {
   if (selectedNames.size === 0) return !isEventHiddenByDefault(ev.name);
   return selectedNames.has(ev.name);
+}
+
+/**
+ * The selection after clicking the chip for `name`. Clicking a hidden-by-default
+ * chip while nothing is selected ADDS it to what is shown: the selection
+ * becomes every name, so the other events stay visible. Otherwise the chip
+ * toggles membership.
+ */
+export function toggleEventName(
+  selectedNames: ReadonlySet<string>,
+  name: string,
+  eventNames: readonly string[],
+): Set<string> {
+  if (selectedNames.size === 0 && isEventHiddenByDefault(name)) {
+    return new Set(eventNames);
+  }
+  const next = new Set(selectedNames);
+  if (next.has(name)) next.delete(name);
+  else next.add(name);
+  return next;
 }
 
 // ── Visibility window (binary-searched at both edges) ────────────────────
@@ -204,6 +225,27 @@ export function filterVisibleEvents(
     out.push(ev);
   }
   return out;
+}
+
+/**
+ * Events in [viewStart, viewEnd] left out only because their name is hidden by
+ * default (0 whenever names are selected). Drives the "N hidden" readout.
+ */
+export function countHiddenByDefaultInView(
+  data: EventTrackData,
+  viewStart: number,
+  viewEnd: number,
+  selectedNames: ReadonlySet<string>,
+): number {
+  if (selectedNames.size > 0) return 0;
+  const { store, order } = data;
+  const lo = lowerBoundByTimestamp(data, viewStart);
+  const hi = upperBoundByTimestamp(data, viewEnd);
+  let n = 0;
+  for (let i = lo; i < hi; i++) {
+    if (isEventHiddenByDefault(store.at(order[i]!)!.name)) n++;
+  }
+  return n;
 }
 
 // ── Task / poll resolution ───────────────────────────────────────────────
@@ -365,9 +407,11 @@ export type EventEmptyReason = "no-events" | "no-visible" | null;
 /** The full per-frame render input for the events canvas + info readout. */
 export interface EventRenderModel {
   buckets: readonly EventDrawBucket[];
-  /** Panel info: `N events · M markers`. */
+  /** Panel info: `N events · M markers` (plus `· K hidden`). */
   info: string;
   emptyReason: EventEmptyReason;
+  /** Events in view hidden only by the hidden-by-default rule. */
+  hiddenInView: number;
 }
 
 export interface EventRenderModelOpts {
@@ -396,15 +440,16 @@ export interface EventRenderModelOpts {
 export function buildEventRenderModel(opts: EventRenderModelOpts): EventRenderModel {
   const { data, viewStart, viewEnd, drawW, canvasH, selectedNames, taskOf, colorOf } = opts;
   if (data.order.length === 0) {
-    return { buckets: [], info: "", emptyReason: "no-events" };
+    return { buckets: [], info: "", emptyReason: "no-events", hiddenInView: 0 };
   }
   if (drawW <= 0 || canvasH <= 0 || viewEnd <= viewStart) {
-    return { buckets: [], info: "", emptyReason: "no-visible" };
+    return { buckets: [], info: "", emptyReason: "no-visible", hiddenInView: 0 };
   }
 
   const visible = filterVisibleEvents(data, viewStart, viewEnd, selectedNames);
+  const hiddenInView = countHiddenByDefaultInView(data, viewStart, viewEnd, selectedNames);
   if (visible.length === 0) {
-    return { buckets: [], info: "", emptyReason: "no-visible" };
+    return { buckets: [], info: "", emptyReason: "no-visible", hiddenInView };
   }
 
   // Cluster events that land on the same rounded pixel column. Insertion order
@@ -461,8 +506,11 @@ export function buildEventRenderModel(opts: EventRenderModelOpts): EventRenderMo
 
   return {
     buckets,
-    info: `${visible.length} events · ${clusters.size} markers`,
+    info:
+      `${visible.length} events · ${clusters.size} markers` +
+      (hiddenInView > 0 ? ` · ${hiddenInView} hidden` : ""),
     emptyReason: null,
+    hiddenInView,
   };
 }
 

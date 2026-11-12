@@ -41,6 +41,7 @@ import {
   isEventHiddenByDefault,
   isSameCluster,
   resolveTaskForEvent,
+  toggleEventName,
   EVENT_DIM_FACTOR,
   type EventDrawBucket,
   type EventRenderModel,
@@ -170,9 +171,7 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
 
   function toggleName(name: string): void {
     const cur = state().uiPrefs.selectedEventNames;
-    const next = new Set(cur);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
+    const next = toggleEventName(cur, name, eventData().eventNames);
     store.update("uiPrefs", { selectedEventNames: next });
   }
   function clearNames(): void {
@@ -212,9 +211,7 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     lastHits = model.buckets;
     const hlTask = eventHighlightTask(s.selection);
     const oversized = anyOversized(s.segments.segments);
-    const nameFiltered =
-      s.uiPrefs.selectedEventNames.size > 0 || data.eventNames.some(isEventHiddenByDefault);
-    drawEventsCanvas(ctx, model, hlTask, drawW, canvasH, oversized, nameFiltered);
+    drawEventsCanvas(ctx, model, hlTask, drawW, canvasH, oversized, s.uiPrefs.selectedEventNames.size > 0);
     // Mirror the info readout to a DOM-queryable attribute for the row-walker,
     // matching the CPU track's `cpuReadout`.
     canvas.dataset["eventsInfo"] = model.info;
@@ -283,7 +280,8 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
                   class=${classMap({ "d9-event-chip": true, on: active, "hidden-default": hidden })}
                   type="button"
                   style="--chip:${colorOf(name)}"
-                  title=${hidden ? "Hidden by default (shown in the CPU track). Click to show." : nothing}
+                  title=${hidden ? "Hidden by default: process resource samples feed the CPU track. Click to show them too." : nothing}
+                  aria-label=${hidden ? `${name} (hidden by default)` : nothing}
                   aria-pressed=${active ? "true" : "false"}
                   @click=${() => toggleName(name)}
                 >
@@ -524,7 +522,12 @@ export function drawEventsCanvas(
     const msg =
       model.emptyReason === "no-events"
         ? "No custom events"
-        : "No events in view" + (hasNameFilter ? " (name filter active)" : "");
+        : "No events in view" +
+          (hasNameFilter
+            ? " (name filter active)"
+            : model.hiddenInView > 0
+              ? ` (${model.hiddenInView} hidden by default; click a dashed chip to show)`
+              : "");
     ctx.fillText(msg, 10, Math.min(24, canvasH / 2));
     if (oversized) drawPartialBadge(ctx, drawW, canvasH);
     return;
