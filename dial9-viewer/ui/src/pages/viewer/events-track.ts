@@ -6,8 +6,9 @@
 //
 // Heavy derivations are cached: the trace-invariant event data in a
 // store.derived over the trace slice; the per-frame render model memoized on
-// its primitive inputs, so a selection-only change (dimming) redraws with the
-// SAME cached geometry; the per-event task resolver in a WeakMap, rebuilt only
+// its viewport inputs and the name-filter set identities, so a selection-only
+// change (dimming) redraws with the SAME cached geometry; the per-event task
+// resolver in a WeakMap, rebuilt only
 // when the worker lanes change. The visible-event window is binary-searched at
 // both edges.
 //
@@ -104,7 +105,8 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     null;
 
   // Per-frame render-model memo, keyed on the derived-data reference (trace
-  // identity) + its primitive inputs so a selection-only change (dimming)
+  // identity), the viewport inputs and the name-filter sets (by identity) so a
+  // selection-only change (dimming)
   // reuses the cached geometry but a trace/viewport/filter change recomputes
   // it. NOT keyed on the selection - the draw applies the fade.
   let modelCache: {

@@ -233,7 +233,9 @@ describe("eventMatchesFilter", () => {
       rev = patch.revealedEventNames;
     };
     click("a");
-    click("ProcessResourceUsageEvent");
+    // The revealed chip was on, so it joins the new selection.
+    expect([...sel].sort()).toEqual(["ProcessResourceUsageEvent", "a"]);
+    expect([...rev]).toEqual([]);
     click("a");
     click("ProcessResourceUsageEvent");
     expect([...sel]).toEqual([]);
