@@ -125,42 +125,60 @@ const HIDDEN_BY_DEFAULT_EVENT_NAMES: ReadonlySet<string> = new Set([
   "ProcessResourceUsageEvent",
 ]);
 
-/** True when `name` is hidden unless explicitly selected in the name filter. */
+/** True when `name` is hidden from the track until the user reveals it. */
 export function isEventHiddenByDefault(name: string): boolean {
   return HIDDEN_BY_DEFAULT_EVENT_NAMES.has(name);
 }
 
+const NO_NAMES: ReadonlySet<string> = new Set();
+
 /**
- * True when `ev` passes the name-chip filter. An empty selection shows every
- * name except the hidden-by-default ones; a non-empty selection shows exactly
- * the selected names.
+ * True when `ev` passes the name-chip filter. A non-empty selection shows
+ * exactly the selected names. An empty selection shows every name except the
+ * hidden-by-default ones the user has not revealed.
  */
 export function eventMatchesFilter(
   ev: CustomTraceEvent,
   selectedNames: ReadonlySet<string>,
+  revealedNames: ReadonlySet<string> = NO_NAMES,
 ): boolean {
-  if (selectedNames.size === 0) return !isEventHiddenByDefault(ev.name);
-  return selectedNames.has(ev.name);
+  if (selectedNames.size > 0) return selectedNames.has(ev.name);
+  return !isEventHiddenByDefault(ev.name) || revealedNames.has(ev.name);
+}
+
+/** How a chip renders under the current filter state. */
+export function eventChipState(
+  name: string,
+  selectedNames: ReadonlySet<string>,
+  revealedNames: ReadonlySet<string>,
+): { on: boolean; hiddenByDefault: boolean } {
+  if (selectedNames.size > 0) return { on: selectedNames.has(name), hiddenByDefault: false };
+  if (!isEventHiddenByDefault(name)) return { on: false, hiddenByDefault: false };
+  const revealed = revealedNames.has(name);
+  return { on: revealed, hiddenByDefault: !revealed };
 }
 
 /**
- * The selection after clicking the chip for `name`. Clicking a hidden-by-default
- * chip while nothing is selected ADDS it to what is shown: the selection
- * becomes every name, so the other events stay visible. Otherwise the chip
- * toggles membership.
+ * The uiPrefs patch for a click on the chip for `name`. With nothing selected,
+ * a hidden-by-default chip toggles whether it is revealed (added to the
+ * default view), so every other event stays visible. Every other click toggles
+ * the name's membership in the selection, as before.
  */
-export function toggleEventName(
-  selectedNames: ReadonlySet<string>,
+export function eventChipClick(
   name: string,
-  eventNames: readonly string[],
-): Set<string> {
+  selectedNames: ReadonlySet<string>,
+  revealedNames: ReadonlySet<string>,
+): { selectedEventNames: Set<string> } | { revealedEventNames: Set<string> } {
+  const toggle = (set: ReadonlySet<string>): Set<string> => {
+    const next = new Set(set);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    return next;
+  };
   if (selectedNames.size === 0 && isEventHiddenByDefault(name)) {
-    return new Set(eventNames);
+    return { revealedEventNames: toggle(revealedNames) };
   }
-  const next = new Set(selectedNames);
-  if (next.has(name)) next.delete(name);
-  else next.add(name);
-  return next;
+  return { selectedEventNames: toggle(selectedNames) };
 }
 
 // ── Visibility window (binary-searched at both edges) ────────────────────
@@ -206,46 +224,39 @@ export function upperBoundByTimestamp(
 
 /**
  * Events whose timestamp is in [viewStart, viewEnd] AND which pass the name
- * filter. Custom events are point records, so BOTH edges are binary-searched:
- * the per-frame work is O(log N + windowSize), never an O(all events) scan.
+ * filter, plus how many in-window events only the hidden-by-default rule left
+ * out. Custom events are point records, so BOTH edges are binary-searched: the
+ * per-frame work is O(log N + windowSize), never an O(all events) scan.
  */
+export function scanVisibleEvents(
+  data: EventTrackData,
+  viewStart: number,
+  viewEnd: number,
+  selectedNames: ReadonlySet<string>,
+  revealedNames: ReadonlySet<string> = NO_NAMES,
+): { visible: CustomTraceEvent[]; hiddenByDefault: number } {
+  const { store, order } = data;
+  const lo = lowerBoundByTimestamp(data, viewStart);
+  const hi = upperBoundByTimestamp(data, viewEnd);
+  const visible: CustomTraceEvent[] = [];
+  let hiddenByDefault = 0;
+  for (let i = lo; i < hi; i++) {
+    const ev = store.at(order[i]!)!;
+    if (eventMatchesFilter(ev, selectedNames, revealedNames)) visible.push(ev);
+    else if (selectedNames.size === 0) hiddenByDefault++;
+  }
+  return { visible, hiddenByDefault };
+}
+
+/** The visible events of scanVisibleEvents. */
 export function filterVisibleEvents(
   data: EventTrackData,
   viewStart: number,
   viewEnd: number,
   selectedNames: ReadonlySet<string>,
+  revealedNames: ReadonlySet<string> = NO_NAMES,
 ): CustomTraceEvent[] {
-  const { store, order } = data;
-  const lo = lowerBoundByTimestamp(data, viewStart);
-  const hi = upperBoundByTimestamp(data, viewEnd);
-  const out: CustomTraceEvent[] = [];
-  for (let i = lo; i < hi; i++) {
-    const ev = store.at(order[i]!)!;
-    if (!eventMatchesFilter(ev, selectedNames)) continue;
-    out.push(ev);
-  }
-  return out;
-}
-
-/**
- * Events in [viewStart, viewEnd] left out only because their name is hidden by
- * default (0 whenever names are selected). Drives the "N hidden" readout.
- */
-export function countHiddenByDefaultInView(
-  data: EventTrackData,
-  viewStart: number,
-  viewEnd: number,
-  selectedNames: ReadonlySet<string>,
-): number {
-  if (selectedNames.size > 0) return 0;
-  const { store, order } = data;
-  const lo = lowerBoundByTimestamp(data, viewStart);
-  const hi = upperBoundByTimestamp(data, viewEnd);
-  let n = 0;
-  for (let i = lo; i < hi; i++) {
-    if (isEventHiddenByDefault(store.at(order[i]!)!.name)) n++;
-  }
-  return n;
+  return scanVisibleEvents(data, viewStart, viewEnd, selectedNames, revealedNames).visible;
 }
 
 // ── Task / poll resolution ───────────────────────────────────────────────
@@ -423,6 +434,8 @@ export interface EventRenderModelOpts {
   /** Canvas height in CSS px (the events draw area). */
   canvasH: number;
   selectedNames: ReadonlySet<string>;
+  /** Hidden-by-default names the user revealed (empty selection only). */
+  revealedNames?: ReadonlySet<string>;
   /** Memoized per-event task resolver. */
   taskOf: (ev: CustomTraceEvent) => number | null;
   /** Stable name -> color assigner (ceColor). */
@@ -439,6 +452,7 @@ export interface EventRenderModelOpts {
  */
 export function buildEventRenderModel(opts: EventRenderModelOpts): EventRenderModel {
   const { data, viewStart, viewEnd, drawW, canvasH, selectedNames, taskOf, colorOf } = opts;
+  const revealedNames = opts.revealedNames ?? NO_NAMES;
   if (data.order.length === 0) {
     return { buckets: [], info: "", emptyReason: "no-events", hiddenInView: 0 };
   }
@@ -446,8 +460,13 @@ export function buildEventRenderModel(opts: EventRenderModelOpts): EventRenderMo
     return { buckets: [], info: "", emptyReason: "no-visible", hiddenInView: 0 };
   }
 
-  const visible = filterVisibleEvents(data, viewStart, viewEnd, selectedNames);
-  const hiddenInView = countHiddenByDefaultInView(data, viewStart, viewEnd, selectedNames);
+  const { visible, hiddenByDefault: hiddenInView } = scanVisibleEvents(
+    data,
+    viewStart,
+    viewEnd,
+    selectedNames,
+    revealedNames,
+  );
   if (visible.length === 0) {
     return { buckets: [], info: "", emptyReason: "no-visible", hiddenInView };
   }

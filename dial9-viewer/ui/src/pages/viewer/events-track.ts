@@ -38,10 +38,10 @@ import {
   buildPinnedEvent,
   computeEventTrackData,
   eventHighlightTask,
-  isEventHiddenByDefault,
+  eventChipClick,
+  eventChipState,
   isSameCluster,
   resolveTaskForEvent,
-  toggleEventName,
   EVENT_DIM_FACTOR,
   type EventDrawBucket,
   type EventRenderModel,
@@ -143,12 +143,14 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     canvasH: number,
   ): EventRenderModel {
     const selectedNames = s.uiPrefs.selectedEventNames;
+    const revealedNames = s.uiPrefs.revealedEventNames;
     const key = [
       s.viewport.viewStart,
       s.viewport.viewEnd,
       drawW,
       canvasH,
       [...selectedNames].sort().join(","),
+      [...revealedNames].sort().join(","),
     ].join("|");
     if (modelCache !== null && modelCache.data === data && modelCache.key === key) {
       return modelCache.model;
@@ -160,6 +162,7 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
       drawW,
       canvasH,
       selectedNames,
+      revealedNames,
       taskOf: taskResolver(),
       colorOf,
     });
@@ -170,9 +173,8 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
   // ── Store dispatch helpers ─────────────────────────────────────────────
 
   function toggleName(name: string): void {
-    const cur = state().uiPrefs.selectedEventNames;
-    const next = toggleEventName(cur, name, eventData().eventNames);
-    store.update("uiPrefs", { selectedEventNames: next });
+    const { selectedEventNames, revealedEventNames } = state().uiPrefs;
+    store.update("uiPrefs", eventChipClick(name, selectedEventNames, revealedEventNames));
   }
   function clearNames(): void {
     store.update("uiPrefs", { selectedEventNames: new Set<string>() });
@@ -273,14 +275,17 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
             data.eventNames,
             (name) => name,
             (name) => {
-              const active = selectedNames.has(name);
-              const hidden = selectedNames.size === 0 && isEventHiddenByDefault(name);
+              const { on: active, hiddenByDefault: hidden } = eventChipState(
+                name,
+                selectedNames,
+                state().uiPrefs.revealedEventNames,
+              );
               return html`
                 <button
                   class=${classMap({ "d9-event-chip": true, on: active, "hidden-default": hidden })}
                   type="button"
                   style="--chip:${colorOf(name)}"
-                  title=${hidden ? "Hidden by default: process resource samples feed the CPU track. Click to show them too." : nothing}
+                  title=${hidden ? "Hidden by default. Click to show these events too." : nothing}
                   aria-label=${hidden ? `${name} (hidden by default)` : nothing}
                   aria-pressed=${active ? "true" : "false"}
                   @click=${() => toggleName(name)}

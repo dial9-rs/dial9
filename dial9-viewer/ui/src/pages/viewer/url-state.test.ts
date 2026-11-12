@@ -53,6 +53,7 @@ function mkState(over: {
       lanesScrollTop: 0,
       selectedSpanNames: new Set<string>(),
       selectedEventNames: new Set<string>(),
+      revealedEventNames: new Set<string>(),
       spanFilter: "",
       spanPctFilter: 0,
       timeMode: "rel",
@@ -263,6 +264,14 @@ describe("viewer URL state: span filters", () => {
     );
     expect(out.spanNames).toEqual(["http, request", "poll"]);
     expect(out.eventNames).toEqual(["flush"]);
+  });
+
+  it("round-trips revealed hidden-by-default events in their own parameter", () => {
+    const { params, out } = roundTrip(
+      mkState({ uiPrefs: { revealedEventNames: new Set(["ProcessResourceUsageEvent"]) } }),
+    );
+    expect(params.has("event-names")).toBe(false);
+    expect(out.eventShow).toEqual(["ProcessResourceUsageEvent"]);
   });
 });
 

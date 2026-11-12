@@ -72,6 +72,7 @@ function initialViewerState(): StoreState {
       lanesScrollTop: 0,
       selectedSpanNames: new Set(),
       selectedEventNames: new Set(),
+      revealedEventNames: new Set(),
       spanFilter: "",
       spanPctFilter: 0,
       timeMode: "rel",
