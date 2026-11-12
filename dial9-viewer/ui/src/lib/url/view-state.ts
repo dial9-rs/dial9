@@ -128,6 +128,8 @@ export interface ViewState {
   spanNames?: readonly string[];
   /** Custom-event legend name chips toggled on for display filtering. */
   eventNames?: readonly string[];
+  /** Hidden-by-default custom-event names revealed while no name chip is on. */
+  eventShow?: readonly string[];
   /** Active rail tab and Tasks-tab ordering/cursor. */
   railTab?: string;
   taskSort?: string;
