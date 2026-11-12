@@ -208,12 +208,39 @@ describe("eventMatchesFilter", () => {
   });
   it("other chip clicks toggle the selection as before", () => {
     const none = new Set<string>();
-    expect(eventChipClick("a", none, none)).toEqual({ selectedEventNames: new Set(["a"]) });
+    expect(eventChipClick("a", none, none)).toEqual({
+      selectedEventNames: new Set(["a"]),
+      revealedEventNames: new Set(),
+    });
     expect(eventChipClick("a", new Set(["a", "b"]), none)).toEqual({
       selectedEventNames: new Set(["b"]),
+      revealedEventNames: new Set(),
     });
     expect(eventChipClick("ProcessResourceUsageEvent", new Set(["a"]), none)).toEqual({
       selectedEventNames: new Set(["a", "ProcessResourceUsageEvent"]),
+      revealedEventNames: new Set(),
+    });
+  });
+  it("starting a selection drops a reveal so it cannot resurface later", () => {
+    const revealed = new Set(["ProcessResourceUsageEvent"]);
+    // Reveal, select a, add PRUE, drop a, then drop PRUE: back to the plain
+    // default view with PRUE hidden, matching its chip.
+    let sel: ReadonlySet<string> = new Set();
+    let rev: ReadonlySet<string> = revealed;
+    const click = (name: string): void => {
+      const patch = eventChipClick(name, sel, rev);
+      if ("selectedEventNames" in patch) sel = patch.selectedEventNames;
+      rev = patch.revealedEventNames;
+    };
+    click("a");
+    click("ProcessResourceUsageEvent");
+    click("a");
+    click("ProcessResourceUsageEvent");
+    expect([...sel]).toEqual([]);
+    expect([...rev]).toEqual([]);
+    expect(eventChipState("ProcessResourceUsageEvent", sel, rev)).toEqual({
+      on: false,
+      hiddenByDefault: true,
     });
   });
   it("marks only an unrevealed hidden chip with nothing selected", () => {

@@ -612,6 +612,18 @@ describe("viewer URL state: constructible and strict values", () => {
 });
 
 describe("viewer URL state: store hydration", () => {
+  it("keeps only hidden-by-default names from event-show", () => {
+    const store = createViewerStore({ scheduler: () => {} });
+    const decoded = readViewerUrlState(
+      "?event-show=" + encodeURIComponent("v1:ProcessResourceUsageEvent\tflush"),
+    );
+    expect(decoded.eventShow).toEqual(["ProcessResourceUsageEvent", "flush"]);
+    hydrateViewerStore(store, decoded, { timeMode: "rel", timeZone: "utc" });
+    expect([...store.getState().uiPrefs.revealedEventNames]).toEqual([
+      "ProcessResourceUsageEvent",
+    ]);
+  });
+
   it("applies decoded durable controls through one boot entry point", () => {
     const store = createViewerStore({ scheduler: () => {} });
     const decoded = readViewerUrlState(

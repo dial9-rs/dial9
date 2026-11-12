@@ -39,6 +39,7 @@ import {
   type PoiAnchor,
 } from "./poi.js";
 import { INSPECTOR_TABS, preferredTab } from "./inspector-model.js";
+import { isEventHiddenByDefault } from "./events-model.js";
 import { parseSpawnPin, type SpawnPin } from "./task-flamegraph-model.js";
 import {
   FIELD_CHART_KINDS,
@@ -715,7 +716,9 @@ export function hydrateViewerStore(
     uiPrefs.selectedEventNames = new Set(urlView.eventNames);
   }
   if (urlView.eventShow !== undefined) {
-    uiPrefs.revealedEventNames = new Set(urlView.eventShow);
+    // Only hidden-by-default names can be revealed; anything else is a no-op
+    // that would otherwise pin a Clear button and stay in the URL.
+    uiPrefs.revealedEventNames = new Set(urlView.eventShow.filter(isEventHiddenByDefault));
   }
   if (urlView.collapsedRuntimes !== undefined) {
     uiPrefs.collapsedRuntimes = Object.fromEntries(

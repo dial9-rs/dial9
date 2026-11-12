@@ -162,13 +162,17 @@ export function eventChipState(
  * The uiPrefs patch for a click on the chip for `name`. With nothing selected,
  * a hidden-by-default chip toggles whether it is revealed (added to the
  * default view), so every other event stays visible. Every other click toggles
- * the name's membership in the selection, as before.
+ * the name's membership in the selection, as before, and drops any reveal: a
+ * reveal only means something in the default view, so it never lingers
+ * unseen behind a selection.
  */
 export function eventChipClick(
   name: string,
   selectedNames: ReadonlySet<string>,
   revealedNames: ReadonlySet<string>,
-): { selectedEventNames: Set<string> } | { revealedEventNames: Set<string> } {
+):
+  | { revealedEventNames: Set<string> }
+  | { selectedEventNames: Set<string>; revealedEventNames: Set<string> } {
   const toggle = (set: ReadonlySet<string>): Set<string> => {
     const next = new Set(set);
     if (next.has(name)) next.delete(name);
@@ -178,7 +182,7 @@ export function eventChipClick(
   if (selectedNames.size === 0 && isEventHiddenByDefault(name)) {
     return { revealedEventNames: toggle(revealedNames) };
   }
-  return { selectedEventNames: toggle(selectedNames) };
+  return { selectedEventNames: toggle(selectedNames), revealedEventNames: new Set() };
 }
 
 // ── Visibility window (binary-searched at both edges) ────────────────────
