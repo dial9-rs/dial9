@@ -221,23 +221,20 @@ describe("eventMatchesFilter", () => {
       revealedEventNames: new Set(),
     });
   });
-  it("starting a selection drops a reveal so it cannot resurface later", () => {
-    const revealed = new Set(["ProcessResourceUsageEvent"]);
-    // Reveal, select a, add PRUE, drop a, then drop PRUE: back to the plain
-    // default view with PRUE hidden, matching its chip.
+  it("a selection replaces a reveal, and toggling a chip twice returns to the default view", () => {
+    // Start revealed, click a twice: {a} then the plain default view, with
+    // PRUE hidden again and its chip dashed.
     let sel: ReadonlySet<string> = new Set();
-    let rev: ReadonlySet<string> = revealed;
+    let rev: ReadonlySet<string> = new Set(["ProcessResourceUsageEvent"]);
     const click = (name: string): void => {
       const patch = eventChipClick(name, sel, rev);
       if ("selectedEventNames" in patch) sel = patch.selectedEventNames;
       rev = patch.revealedEventNames;
     };
     click("a");
-    // The revealed chip was on, so it joins the new selection.
-    expect([...sel].sort()).toEqual(["ProcessResourceUsageEvent", "a"]);
+    expect([...sel]).toEqual(["a"]);
     expect([...rev]).toEqual([]);
     click("a");
-    click("ProcessResourceUsageEvent");
     expect([...sel]).toEqual([]);
     expect([...rev]).toEqual([]);
     expect(eventChipState("ProcessResourceUsageEvent", sel, rev)).toEqual({

@@ -105,10 +105,10 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     null;
 
   // Per-frame render-model memo, keyed on the derived-data reference (trace
-  // identity), the viewport inputs and the name-filter sets (by identity) so a
-  // selection-only change (dimming)
-  // reuses the cached geometry but a trace/viewport/filter change recomputes
-  // it. NOT keyed on the selection - the draw applies the fade.
+  // identity), the viewport inputs and the name-filter sets (by identity), so
+  // a selection-only change (dimming) reuses the cached geometry but a
+  // trace/viewport/filter change recomputes it. NOT keyed on the selection -
+  // the draw applies the fade.
   let modelCache: {
     data: EventTrackData;
     key: string;
