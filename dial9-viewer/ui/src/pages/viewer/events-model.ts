@@ -115,12 +115,31 @@ export function computeEventTrackData(
 
 // ── Filtering (name chips) ───────────────────────────────────────────────
 
-/** True when `ev` passes the name-chip filter (empty set = no filter). */
+/**
+ * Event names left out of the track until their chip is selected. Process
+ * resource samples already drive the CPU track; as periodic markers they are
+ * only noise (#951).
+ */
+const HIDDEN_BY_DEFAULT_EVENT_NAMES: ReadonlySet<string> = new Set([
+  "ProcessResourceUsageEvent",
+]);
+
+/** True when `name` is hidden unless explicitly selected in the name filter. */
+export function isEventHiddenByDefault(name: string): boolean {
+  return HIDDEN_BY_DEFAULT_EVENT_NAMES.has(name);
+}
+
+/**
+ * True when `ev` passes the name-chip filter. An empty selection shows every
+ * name except the hidden-by-default ones; a non-empty selection shows exactly
+ * the selected names.
+ */
 export function eventMatchesFilter(
   ev: CustomTraceEvent,
   selectedNames: ReadonlySet<string>,
 ): boolean {
-  return selectedNames.size === 0 || selectedNames.has(ev.name);
+  if (selectedNames.size === 0) return !isEventHiddenByDefault(ev.name);
+  return selectedNames.has(ev.name);
 }
 
 // ── Visibility window (binary-searched at both edges) ────────────────────

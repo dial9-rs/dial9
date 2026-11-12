@@ -38,6 +38,7 @@ import {
   buildPinnedEvent,
   computeEventTrackData,
   eventHighlightTask,
+  isEventHiddenByDefault,
   isSameCluster,
   resolveTaskForEvent,
   EVENT_DIM_FACTOR,
@@ -211,7 +212,9 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     lastHits = model.buckets;
     const hlTask = eventHighlightTask(s.selection);
     const oversized = anyOversized(s.segments.segments);
-    drawEventsCanvas(ctx, model, hlTask, drawW, canvasH, oversized, s.uiPrefs.selectedEventNames.size > 0);
+    const nameFiltered =
+      s.uiPrefs.selectedEventNames.size > 0 || data.eventNames.some(isEventHiddenByDefault);
+    drawEventsCanvas(ctx, model, hlTask, drawW, canvasH, oversized, nameFiltered);
     // Mirror the info readout to a DOM-queryable attribute for the row-walker,
     // matching the CPU track's `cpuReadout`.
     canvas.dataset["eventsInfo"] = model.info;
@@ -274,11 +277,13 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
             (name) => name,
             (name) => {
               const active = selectedNames.has(name);
+              const hidden = selectedNames.size === 0 && isEventHiddenByDefault(name);
               return html`
                 <button
-                  class=${classMap({ "d9-event-chip": true, on: active })}
+                  class=${classMap({ "d9-event-chip": true, on: active, "hidden-default": hidden })}
                   type="button"
                   style="--chip:${colorOf(name)}"
+                  title=${hidden ? "Hidden by default (shown in the CPU track). Click to show." : nothing}
                   aria-pressed=${active ? "true" : "false"}
                   @click=${() => toggleName(name)}
                 >

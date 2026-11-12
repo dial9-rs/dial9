@@ -162,6 +162,21 @@ describe("eventMatchesFilter", () => {
     expect(eventMatchesFilter(ev("keep", 1), sel)).toBe(true);
     expect(eventMatchesFilter(ev("drop", 1), sel)).toBe(false);
   });
+  // #951: process resource samples already drive the CPU track; as events
+  // they are only periodic noise, so they are hidden until asked for.
+  it("hides ProcessResourceUsageEvent when no names are selected", () => {
+    expect(eventMatchesFilter(ev("ProcessResourceUsageEvent", 1), new Set())).toBe(false);
+    const data = trackData(
+      [ev("ProcessResourceUsageEvent", 10), ev("a", 20), ev("ProcessResourceUsageEvent", 30)],
+      ["ProcessResourceUsageEvent", "a"],
+    );
+    expect(filterVisibleEvents(data, 0, 100, new Set()).map((e) => e.name)).toEqual(["a"]);
+  });
+  it("shows ProcessResourceUsageEvent once its chip is selected", () => {
+    const sel = new Set(["ProcessResourceUsageEvent"]);
+    expect(eventMatchesFilter(ev("ProcessResourceUsageEvent", 1), sel)).toBe(true);
+    expect(eventMatchesFilter(ev("a", 1), sel)).toBe(false);
+  });
   it("filterVisibleEvents applies the name filter within the window", () => {
     const data: EventTrackData = trackData(
       [ev("a", 10), ev("b", 20), ev("a", 30)],
