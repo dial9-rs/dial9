@@ -10,6 +10,7 @@
 //   - clustering + geometry, name filter, info counts, task/poll resolution,
 //     and the highlight-task derivation.
 
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   buildEventRenderModel,
@@ -17,6 +18,8 @@ import {
   eventClusterPage,
   computeEventTrackData,
   eventHighlightTask,
+  eventChipClick,
+  eventChipState,
   eventMatchesFilter,
   filterVisibleEvents,
   isSameCluster,
@@ -24,6 +27,7 @@ import {
   resolveClusterTask,
   resolvePollForEvent,
   resolveTaskForEvent,
+  scanVisibleEvents,
   upperBoundByTimestamp,
   type EventTrackData,
 } from "./events-model.js";
@@ -162,6 +166,108 @@ describe("eventMatchesFilter", () => {
     expect(eventMatchesFilter(ev("keep", 1), sel)).toBe(true);
     expect(eventMatchesFilter(ev("drop", 1), sel)).toBe(false);
   });
+  // #951: process resource samples already drive the CPU track; as events
+  // they are only periodic noise, so they are hidden until asked for.
+  it("hides ProcessResourceUsageEvent when no names are selected", () => {
+    expect(eventMatchesFilter(ev("ProcessResourceUsageEvent", 1), new Set())).toBe(false);
+    const data = trackData(
+      [ev("ProcessResourceUsageEvent", 10), ev("a", 20), ev("ProcessResourceUsageEvent", 30)],
+      ["ProcessResourceUsageEvent", "a"],
+    );
+    expect(filterVisibleEvents(data, 0, 100, new Set()).map((e) => e.name)).toEqual(["a"]);
+  });
+  it("shows ProcessResourceUsageEvent once its chip is selected", () => {
+    const sel = new Set(["ProcessResourceUsageEvent"]);
+    expect(eventMatchesFilter(ev("ProcessResourceUsageEvent", 1), sel)).toBe(true);
+    expect(eventMatchesFilter(ev("a", 1), sel)).toBe(false);
+  });
+  it("clicking the hidden chip with nothing selected reveals it alongside the rest", () => {
+    const patch = eventChipClick("ProcessResourceUsageEvent", new Set(), new Set());
+    expect(patch).toEqual({ revealedEventNames: new Set(["ProcessResourceUsageEvent"]) });
+    const revealed = (patch as { revealedEventNames: Set<string> }).revealedEventNames;
+    const data = trackData(
+      [ev("a", 10), ev("ProcessResourceUsageEvent", 20), ev("b", 30)],
+      ["ProcessResourceUsageEvent", "a", "b"],
+    );
+    expect(filterVisibleEvents(data, 0, 100, new Set(), revealed).map((e) => e.name)).toEqual([
+      "a",
+      "ProcessResourceUsageEvent",
+      "b",
+    ]);
+    // The reveal names only the hidden event, so a name first seen in a later
+    // trace is still shown.
+    expect(eventMatchesFilter(ev("c", 1), new Set(), revealed)).toBe(true);
+    expect(eventChipState("ProcessResourceUsageEvent", new Set(), revealed)).toEqual({
+      on: true,
+      hiddenByDefault: false,
+    });
+    // Clicking it again hides it again.
+    expect(eventChipClick("ProcessResourceUsageEvent", new Set(), revealed)).toEqual({
+      revealedEventNames: new Set(),
+    });
+  });
+  it("other chip clicks toggle the selection as before", () => {
+    const none = new Set<string>();
+    expect(eventChipClick("a", none, none)).toEqual({
+      selectedEventNames: new Set(["a"]),
+      revealedEventNames: new Set(),
+    });
+    expect(eventChipClick("a", new Set(["a", "b"]), none)).toEqual({
+      selectedEventNames: new Set(["b"]),
+      revealedEventNames: new Set(),
+    });
+    expect(eventChipClick("ProcessResourceUsageEvent", new Set(["a"]), none)).toEqual({
+      selectedEventNames: new Set(["a", "ProcessResourceUsageEvent"]),
+      revealedEventNames: new Set(),
+    });
+  });
+  it("a selection replaces a reveal, and toggling a chip twice returns to the default view", () => {
+    // Start revealed, click a twice: {a} then the plain default view, with
+    // PRUE hidden again and its chip dashed.
+    let sel: ReadonlySet<string> = new Set();
+    let rev: ReadonlySet<string> = new Set(["ProcessResourceUsageEvent"]);
+    const click = (name: string): void => {
+      const patch = eventChipClick(name, sel, rev);
+      if ("selectedEventNames" in patch) sel = patch.selectedEventNames;
+      rev = patch.revealedEventNames;
+    };
+    click("a");
+    expect([...sel]).toEqual(["a"]);
+    expect([...rev]).toEqual([]);
+    click("a");
+    expect([...sel]).toEqual([]);
+    expect([...rev]).toEqual([]);
+    expect(eventChipState("ProcessResourceUsageEvent", sel, rev)).toEqual({
+      on: false,
+      hiddenByDefault: true,
+    });
+  });
+  it("marks only an unrevealed hidden chip with nothing selected", () => {
+    const none = new Set<string>();
+    const prue = "ProcessResourceUsageEvent";
+    expect(eventChipState(prue, none, none)).toEqual({ on: false, hiddenByDefault: true });
+    expect(eventChipState("a", none, none)).toEqual({ on: false, hiddenByDefault: false });
+    expect(eventChipState(prue, new Set(["a"]), none)).toEqual({ on: false, hiddenByDefault: false });
+  });
+  it("counts hidden-by-default events in the window only when nothing is selected", () => {
+    const data = trackData(
+      [ev("ProcessResourceUsageEvent", 10), ev("a", 20), ev("ProcessResourceUsageEvent", 30)],
+      ["ProcessResourceUsageEvent", "a"],
+    );
+    expect(scanVisibleEvents(data, 0, 100, new Set()).hiddenByDefault).toBe(2);
+    expect(scanVisibleEvents(data, 0, 15, new Set()).hiddenByDefault).toBe(1);
+    expect(scanVisibleEvents(data, 0, 100, new Set(["a"])).hiddenByDefault).toBe(0);
+    const revealed = new Set(["ProcessResourceUsageEvent"]);
+    expect(scanVisibleEvents(data, 0, 100, new Set(), revealed)).toMatchObject({
+      hiddenByDefault: 0,
+    });
+  });
+  it("hides the same name the CPU track reads in trace_analysis.js", () => {
+    const src = readFileSync(new URL("../../../trace_analysis.js", import.meta.url), "utf8");
+    const m = /PROCESS_RESOURCE_USAGE_EVENT = "([^"]+)"/.exec(src);
+    expect(m).not.toBeNull();
+    expect(eventMatchesFilter(ev(m![1]!, 1), new Set())).toBe(false);
+  });
   it("filterVisibleEvents applies the name filter within the window", () => {
     const data: EventTrackData = trackData(
       [ev("a", 10), ev("b", 20), ev("a", 30)],
@@ -196,6 +302,23 @@ describe("isSameCluster", () => {
 describe("buildEventRenderModel", () => {
   const colorOf = (n: string): string => (n === "a" ? "#aaa" : "#bbb");
   const noTask = (): number | null => null;
+
+  it("reports hidden-by-default events in the info readout", () => {
+    const data = trackData(
+      [ev("a", 10), ev("ProcessResourceUsageEvent", 20), ev("ProcessResourceUsageEvent", 30)],
+      ["ProcessResourceUsageEvent", "a"],
+    );
+    const opts = {
+      data, viewStart: 0, viewEnd: 100, drawW: 100, canvasH: 40,
+      selectedNames: new Set<string>(), taskOf: noTask, colorOf,
+    };
+    const model = buildEventRenderModel(opts);
+    expect(model.info).toBe("1 events · 1 markers · 2 hidden");
+    expect(model.hiddenInView).toBe(2);
+    const empty = buildEventRenderModel({ ...opts, viewStart: 15 });
+    expect(empty.emptyReason).toBe("no-visible");
+    expect(empty.hiddenInView).toBe(2);
+  });
 
   it("clusters same-pixel events, sizes ticks, and stripes mixed names", () => {
     // viewStart=0 viewEnd=100 drawW=100 -> ns maps 1:1 to px.

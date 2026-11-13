@@ -84,6 +84,7 @@ export function initialViewerState(): StoreState {
       lanesScrollTop: 0,
       selectedSpanNames: new Set<string>(),
       selectedEventNames: new Set<string>(),
+      revealedEventNames: new Set<string>(),
       // Span filter resting state: no text, no percentile floor.
       spanFilter: "",
       spanPctFilter: 0,

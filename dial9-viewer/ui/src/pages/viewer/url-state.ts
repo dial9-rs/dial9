@@ -39,6 +39,7 @@ import {
   type PoiAnchor,
 } from "./poi.js";
 import { INSPECTOR_TABS, preferredTab } from "./inspector-model.js";
+import { isEventHiddenByDefault } from "./events-model.js";
 import { parseSpawnPin, type SpawnPin } from "./task-flamegraph-model.js";
 import {
   FIELD_CHART_KINDS,
@@ -75,6 +76,7 @@ const P_ISSUE_ANCHOR = "issue-anchor";
 const P_SPAN_PCT = "span-pct";
 const P_SPAN_NAMES = "span-names";
 const P_EVENT_NAMES = "event-names";
+const P_EVENT_SHOW = "event-show";
 const P_RAIL_TAB = "rail";
 const P_TASK_SORT = "task-sort";
 const P_TASK_INDEX = "task-index";
@@ -199,6 +201,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     lanesScrollTop: url(P_LANES_SCROLL),
     selectedSpanNames: url(P_SPAN_NAMES),
     selectedEventNames: url(P_EVENT_NAMES),
+    revealedEventNames: url(P_EVENT_SHOW),
     spanFilter: url(P_SPAN_FILTER),
     spanPctFilter: url(P_SPAN_PCT),
     timeMode: url("#tm"),
@@ -352,6 +355,9 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (state.uiPrefs.selectedEventNames.size > 0) {
     vs.eventNames = [...state.uiPrefs.selectedEventNames].sort();
   }
+  if (state.uiPrefs.revealedEventNames.size > 0) {
+    vs.eventShow = [...state.uiPrefs.revealedEventNames].sort();
+  }
   if (poi.railTab !== "issues") vs.railTab = poi.railTab;
   if (poi.taskSort !== "total" || poi.taskSortDir !== "desc") {
     vs.taskSort = `${poi.taskSort},${poi.taskSortDir}`;
@@ -477,6 +483,7 @@ export function mirrorViewerToQuery(
   set(params, P_SPAN_PCT, vs.spanPct != null ? String(vs.spanPct) : null);
   set(params, P_SPAN_NAMES, encodeList(vs.spanNames));
   set(params, P_EVENT_NAMES, encodeList(vs.eventNames));
+  set(params, P_EVENT_SHOW, encodeList(vs.eventShow));
   set(params, P_RAIL_TAB, vs.railTab ?? null);
   set(params, P_TASK_SORT, vs.taskSort ?? null);
   set(params, P_TASK_INDEX, finiteString(vs.taskIndex));
@@ -648,6 +655,7 @@ export interface ViewerUrlState {
   spanPct?: number;
   spanNames?: string[];
   eventNames?: string[];
+  eventShow?: string[];
   railTab?: "issues" | "tasks";
   taskSort?: { key: TaskSortKey; dir: "asc" | "desc" };
   taskIndex?: number;
@@ -706,6 +714,11 @@ export function hydrateViewerStore(
   }
   if (urlView.eventNames !== undefined) {
     uiPrefs.selectedEventNames = new Set(urlView.eventNames);
+  }
+  if (urlView.eventShow !== undefined) {
+    // Only hidden-by-default names can be revealed; anything else is a no-op
+    // that would otherwise pin a Clear button and stay in the URL.
+    uiPrefs.revealedEventNames = new Set(urlView.eventShow.filter(isEventHiddenByDefault));
   }
   if (urlView.collapsedRuntimes !== undefined) {
     uiPrefs.collapsedRuntimes = Object.fromEntries(
@@ -901,6 +914,8 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (spanNames != null) out.spanNames = spanNames;
   const eventNames = decodeList(p.get(P_EVENT_NAMES));
   if (eventNames != null) out.eventNames = eventNames;
+  const eventShow = decodeList(p.get(P_EVENT_SHOW));
+  if (eventShow != null) out.eventShow = eventShow;
 
   const rail = p.get(P_RAIL_TAB);
   if (rail === "issues" || rail === "tasks") out.railTab = rail;

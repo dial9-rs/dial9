@@ -405,6 +405,7 @@ describe("viewer deep-link reconstruction", () => {
       lanesScrollTop: 96,
       selectedSpanNames: new Set(["http, request", "poll"]),
       selectedEventNames: new Set(["flush"]),
+      revealedEventNames: new Set(["ProcessResourceUsageEvent"]),
       spanFilter: "request_id",
       spanPctFilter: 99,
       timeMode: "abs",

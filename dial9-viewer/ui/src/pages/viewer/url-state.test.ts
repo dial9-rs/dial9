@@ -53,6 +53,7 @@ function mkState(over: {
       lanesScrollTop: 0,
       selectedSpanNames: new Set<string>(),
       selectedEventNames: new Set<string>(),
+      revealedEventNames: new Set<string>(),
       spanFilter: "",
       spanPctFilter: 0,
       timeMode: "rel",
@@ -263,6 +264,14 @@ describe("viewer URL state: span filters", () => {
     );
     expect(out.spanNames).toEqual(["http, request", "poll"]);
     expect(out.eventNames).toEqual(["flush"]);
+  });
+
+  it("round-trips revealed hidden-by-default events in their own parameter", () => {
+    const { params, out } = roundTrip(
+      mkState({ uiPrefs: { revealedEventNames: new Set(["ProcessResourceUsageEvent"]) } }),
+    );
+    expect(params.has("event-names")).toBe(false);
+    expect(out.eventShow).toEqual(["ProcessResourceUsageEvent"]);
   });
 });
 
@@ -603,6 +612,18 @@ describe("viewer URL state: constructible and strict values", () => {
 });
 
 describe("viewer URL state: store hydration", () => {
+  it("keeps only hidden-by-default names from event-show", () => {
+    const store = createViewerStore({ scheduler: () => {} });
+    const decoded = readViewerUrlState(
+      "?event-show=" + encodeURIComponent("v1:ProcessResourceUsageEvent\tflush"),
+    );
+    expect(decoded.eventShow).toEqual(["ProcessResourceUsageEvent", "flush"]);
+    hydrateViewerStore(store, decoded, { timeMode: "rel", timeZone: "utc" });
+    expect([...store.getState().uiPrefs.revealedEventNames]).toEqual([
+      "ProcessResourceUsageEvent",
+    ]);
+  });
+
   it("applies decoded durable controls through one boot entry point", () => {
     const store = createViewerStore({ scheduler: () => {} });
     const decoded = readViewerUrlState(

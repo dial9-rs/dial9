@@ -218,6 +218,7 @@ function twoClusterModel(): EventRenderModel {
     buckets: [bucket([ev("a", 10)], 1, 10), bucket([ev("b", 50)], 2, 50)],
     info: "2 events · 2 markers",
     emptyReason: null,
+    hiddenInView: 0,
   };
 }
 
@@ -248,7 +249,7 @@ describe("drawEventsCanvas dimming", () => {
     const { ctx, texts } = recordingCtx();
     drawEventsCanvas(
       ctx,
-      { buckets: [], info: "", emptyReason: "no-events" },
+      { buckets: [], info: "", emptyReason: "no-events", hiddenInView: 0 },
       null,
       100,
       40,
@@ -256,6 +257,22 @@ describe("drawEventsCanvas dimming", () => {
       false,
     );
     expect(texts).toContain("No custom events");
+  });
+
+  it("explains an empty view caused only by hidden-by-default events", () => {
+    const { ctx, texts } = recordingCtx();
+    drawEventsCanvas(
+      ctx,
+      { buckets: [], info: "", emptyReason: "no-visible", hiddenInView: 3 },
+      null,
+      100,
+      40,
+      false,
+      false,
+    );
+    expect(texts).toContain(
+      "No events in view (3 hidden by default; click a dashed chip to show)",
+    );
   });
 });
 

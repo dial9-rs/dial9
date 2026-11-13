@@ -6,8 +6,9 @@
 //
 // Heavy derivations are cached: the trace-invariant event data in a
 // store.derived over the trace slice; the per-frame render model memoized on
-// its primitive inputs, so a selection-only change (dimming) redraws with the
-// SAME cached geometry; the per-event task resolver in a WeakMap, rebuilt only
+// its viewport inputs and the name-filter set identities, so a selection-only
+// change (dimming) redraws with the SAME cached geometry; the per-event task
+// resolver in a WeakMap, rebuilt only
 // when the worker lanes change. The visible-event window is binary-searched at
 // both edges.
 //
@@ -38,6 +39,8 @@ import {
   buildPinnedEvent,
   computeEventTrackData,
   eventHighlightTask,
+  eventChipClick,
+  eventChipState,
   isSameCluster,
   resolveTaskForEvent,
   EVENT_DIM_FACTOR,
@@ -102,10 +105,17 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     null;
 
   // Per-frame render-model memo, keyed on the derived-data reference (trace
-  // identity) + its primitive inputs so a selection-only change (dimming)
-  // reuses the cached geometry but a trace/viewport/filter change recomputes
-  // it. NOT keyed on the selection - the draw applies the fade.
-  let modelCache: { data: EventTrackData; key: string; model: EventRenderModel } | null =
+  // identity), the viewport inputs and the name-filter sets (by identity), so
+  // a selection-only change (dimming) reuses the cached geometry but a
+  // trace/viewport/filter change recomputes it. NOT keyed on the selection -
+  // the draw applies the fade.
+  let modelCache: {
+    data: EventTrackData;
+    key: string;
+    selectedNames: ReadonlySet<string>;
+    revealedNames: ReadonlySet<string>;
+    model: EventRenderModel;
+  } | null =
     null;
   // The buckets last painted, for canvas hit-testing (hover + click).
   let lastHits: readonly EventDrawBucket[] = [];
@@ -141,14 +151,17 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     canvasH: number,
   ): EventRenderModel {
     const selectedNames = s.uiPrefs.selectedEventNames;
-    const key = [
-      s.viewport.viewStart,
-      s.viewport.viewEnd,
-      drawW,
-      canvasH,
-      [...selectedNames].sort().join(","),
-    ].join("|");
-    if (modelCache !== null && modelCache.data === data && modelCache.key === key) {
+    const revealedNames = s.uiPrefs.revealedEventNames;
+    // The name sets are replaced, never mutated, on every update, so set
+    // identity is the cache key for the filter.
+    const key = [s.viewport.viewStart, s.viewport.viewEnd, drawW, canvasH].join("|");
+    if (
+      modelCache !== null &&
+      modelCache.data === data &&
+      modelCache.key === key &&
+      modelCache.selectedNames === selectedNames &&
+      modelCache.revealedNames === revealedNames
+    ) {
       return modelCache.model;
     }
     const model = buildEventRenderModel({
@@ -158,24 +171,25 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
       drawW,
       canvasH,
       selectedNames,
+      revealedNames,
       taskOf: taskResolver(),
       colorOf,
     });
-    modelCache = { data, key, model };
+    modelCache = { data, key, selectedNames, revealedNames, model };
     return model;
   }
 
   // ── Store dispatch helpers ─────────────────────────────────────────────
 
   function toggleName(name: string): void {
-    const cur = state().uiPrefs.selectedEventNames;
-    const next = new Set(cur);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
-    store.update("uiPrefs", { selectedEventNames: next });
+    const { selectedEventNames, revealedEventNames } = state().uiPrefs;
+    store.update("uiPrefs", eventChipClick(name, selectedEventNames, revealedEventNames));
   }
   function clearNames(): void {
-    store.update("uiPrefs", { selectedEventNames: new Set<string>() });
+    store.update("uiPrefs", {
+      selectedEventNames: new Set<string>(),
+      revealedEventNames: new Set<string>(),
+    });
   }
 
   /** Pin (or toggle off) a clicked cluster; see dispatchEventPin. */
@@ -234,7 +248,9 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
           <span class="d9-track-name">${track.label}</span>
         </div>
         <div class="d9-track-body d9-events-body">
-          ${hasEvents ? legendTemplate(data, selectedNames) : nothing}
+          ${hasEvents
+            ? legendTemplate(data, selectedNames, s.uiPrefs.revealedEventNames)
+            : nothing}
           <div class="d9-events-canvas-wrap">
             <canvas
               class="d9-track-canvas d9-events-canvas"
@@ -255,10 +271,11 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
   function legendTemplate(
     data: EventTrackData,
     selectedNames: ReadonlySet<string>,
+    revealedNames: ReadonlySet<string>,
   ): TemplateResult {
     return html`
       <div class="d9-events-legend" role="group" aria-label="Event name filter">
-        ${selectedNames.size > 0
+        ${selectedNames.size > 0 || revealedNames.size > 0
           ? html`<button
               class="d9-event-btn"
               type="button"
@@ -273,12 +290,18 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
             data.eventNames,
             (name) => name,
             (name) => {
-              const active = selectedNames.has(name);
+              const { on: active, hiddenByDefault: hidden } = eventChipState(
+                name,
+                selectedNames,
+                revealedNames,
+              );
               return html`
                 <button
-                  class=${classMap({ "d9-event-chip": true, on: active })}
+                  class=${classMap({ "d9-event-chip": true, on: active, "hidden-default": hidden })}
                   type="button"
                   style="--chip:${colorOf(name)}"
+                  title=${hidden ? "Hidden by default. Click to show these events too." : nothing}
+                  aria-label=${hidden ? `${name} (hidden by default)` : nothing}
                   aria-pressed=${active ? "true" : "false"}
                   @click=${() => toggleName(name)}
                 >
@@ -519,7 +542,12 @@ export function drawEventsCanvas(
     const msg =
       model.emptyReason === "no-events"
         ? "No custom events"
-        : "No events in view" + (hasNameFilter ? " (name filter active)" : "");
+        : "No events in view" +
+          (hasNameFilter
+            ? " (name filter active)"
+            : model.hiddenInView > 0
+              ? ` (${model.hiddenInView} hidden by default; click a dashed chip to show)`
+              : "");
     ctx.fillText(msg, 10, Math.min(24, canvasH / 2));
     if (oversized) drawPartialBadge(ctx, drawW, canvasH);
     return;

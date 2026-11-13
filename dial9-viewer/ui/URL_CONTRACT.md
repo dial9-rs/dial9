@@ -145,6 +145,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `span-pct` | `50` \| `90` \| `95` \| `99` | Span percentile floor. |
 | `span-names` | `v1:` + TAB-joined names | Enabled span legend chips. |
 | `event-names` | same | Enabled custom-event legend chips. |
+| `event-show` | same | Hidden-by-default custom events (e.g. `ProcessResourceUsageEvent`) revealed while no `event-names` chip is enabled. |
 | `rail` | `issues` \| `tasks` | Visible rail tab. |
 | `task-sort` | `<id\|loc\|polls\|total\|longest\|lifetime>,<asc\|desc>` | Tasks ordering. |
 | `task-index` | non-negative integer | Current Tasks cursor. |
