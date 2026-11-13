@@ -64,6 +64,10 @@ impl PerfSampler {
         Vec::new()
     }
 
+    pub fn take_lost_samples(&mut self) -> u64 {
+        0
+    }
+
     pub fn disable(&self) {}
 
     pub fn enable(&self) {}
