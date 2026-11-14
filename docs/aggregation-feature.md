@@ -52,9 +52,9 @@ A **fold** decodes one source file's CPU samples and writes them as a
 deterministically-named Parquet part-file:
 
 ```
-{output_prefix}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/samples/service=…/date=…/host=…/{blake3(source_key)}.parquet
-{output_prefix}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/dict/stacks/{blake3(source_key)}.parquet
-{output_prefix}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/polls/{blake3(source_key)}.parquet
+{output_prefix}/account={namespace}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/samples/service=…/date=…/host=…/{blake3(source_key)}.parquet
+{output_prefix}/account={namespace}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/dict/stacks/{blake3(source_key)}.parquet
+{output_prefix}/account={namespace}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/polls/{blake3(source_key)}.parquet
 ```
 
 The part-file's **existence is the record that the file is folded** — there is
@@ -103,7 +103,7 @@ literal "how accurate is this sample") are a planned later addition.
 ## Storage layout
 
 ```
-{output_prefix}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/
+{output_prefix}/account={namespace}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/
   samples/service={svc}/date={YYYY-MM-DD}/host={host}/{hash}.parquet  ← one row per sample
   dict/stacks/{hash}.parquet                                          ← stack_id → frame names
   polls/{hash}.parquet                                                ← poll spans (for /tokio-stats)
@@ -114,6 +114,11 @@ partition pruning on the query side; partition values use Hive path escaping
 and the content hash is only the leaf. The
 output is also namespaced by `bucket={source_bucket}` so bring-your-own-creds
 sources fold into isolated, independently prunable/GC-able trees.
+
+`account={namespace}` scopes the cache to the AWS account of explicit
+bring-your-own or assumed-role credentials, or to a fixed operational
+namespace such as `ambient`; see
+[ADR-0005](adr/0005-aggregate-cache-account-namespace.md).
 
 Two independent version knobs, deliberately in opposite places:
 - **`ORDER_VERSION`** (= 1) lives *only* in the order-key hash input. Bump it to

@@ -42,10 +42,17 @@ survive a version bump untouched.
 
 **SAMPLES_FORMAT_VERSION**:
 A baked constant in the **output key path**
-(`{output_prefix}/v{N}/samples/…`). Bump it when changing *what we
+(`{output_prefix}/account={namespace}/v{N}/samples/…`). Bump it when changing *what we
 persist* and we want a deliberate recompute. The bump points reads/writes
 at a fresh empty tree; files repopulate lazily on demand (no backfill
 job). The old tree is abandoned and GC'd out-of-band.
+
+**Cache namespace**:
+The `account={namespace}` segment of the **output key path**:
+`{partition}.{account_id}` for bring-your-own and assumed-role credentials
+(e.g. `aws.123456789012`), or the fixed operational namespaces `ambient`,
+`local`, `simulator`, or `supplied`. See ADR-0005.
+_Avoid_: tenant, per-object authorization.
 
 **Refinement loop**:
 The query control flow, realized as a **single held-open SSE stream** per

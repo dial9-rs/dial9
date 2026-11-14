@@ -1,9 +1,20 @@
 use super::credentials::{self, CredError, CredSource, MaybeCreds};
-use super::{AppState, check};
+use super::{AppState, ServerSourceIdentity, SourceIdentity, check};
+use crate::ingest::cache_namespace::CacheNamespace;
 use crate::storage::{EphemeralS3Config, S3Backend, StorageBackend};
 use axum::Router;
 use axum::http::StatusCode;
+use dial9_core::rate_limited;
 use std::sync::Arc;
+
+/// The client-facing rejection when a request's AWS account cannot be verified.
+/// Deliberately generic: the cause can name accounts or principals.
+fn identity_unverified(status: StatusCode) -> (StatusCode, String) {
+    (
+        status,
+        "could not verify the AWS account for this request".to_string(),
+    )
+}
 
 /// Detect a bucket's region via `HeadBucket`, reading `bucket_region()` on
 /// success and the `x-amz-bucket-region` response header on the redirect error
@@ -45,12 +56,24 @@ impl AppState {
         Self::new(backend, Some(bucket), prefix)
             .with_byo_creds(true)
             .with_role_assumer(Arc::new(assumer))
+            .with_source_identity(ServerSourceIdentity::Fixed(CacheNamespace::ambient()))
     }
 
     /// Inject ephemeral-S3 plumbing (test seam; production leaves this unset).
     #[doc(hidden)]
     pub fn with_ephemeral_s3(mut self, cfg: EphemeralS3Config) -> Self {
         self.ephemeral_s3 = Some(cfg);
+        self
+    }
+
+    /// Replace the STS caller-identity lookup that namespaces the aggregate
+    /// cache (test seam; production uses `StsCallerIdentityResolver`).
+    #[doc(hidden)]
+    pub fn with_caller_identity_resolver(
+        mut self,
+        resolver: Arc<dyn credentials::CallerIdentityResolver>,
+    ) -> Self {
+        self.caller_identity = resolver;
         self
     }
 
@@ -97,17 +120,32 @@ impl AppState {
         &self,
         creds: MaybeCreds,
     ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
-        self.resolve_with_region(creds, None).await
+        Ok(self.resolve_source(creds, None).await?.0)
     }
 
     /// Resolve a backend for aggregate reads, honoring a deep-linked region even
     /// when the request uses the server's ambient credentials. Explicit BYO or
     /// assumed-role credentials already carry their own validated region.
-    pub(super) async fn resolve_with_region(
+    ///
+    /// Also returns the identity that signs the backend's reads, so aggregation
+    /// can namespace its cache by it. Resolving that identity to an account is
+    /// deferred to [`Self::cache_namespace`], so browse routes make no extra
+    /// STS call. The returned backend cannot reach the persistent aggregate
+    /// cache (see [`AppState::guard_source`](super::AppState::guard_source)).
+    pub(super) async fn resolve_source(
         &self,
         creds: MaybeCreds,
         ambient_region: Option<&str>,
-    ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
+    ) -> Result<(Arc<dyn StorageBackend>, SourceIdentity), (StatusCode, String)> {
+        let (backend, identity) = self.resolve_unguarded(creds, ambient_region).await?;
+        Ok((self.guard_source(backend), identity))
+    }
+
+    async fn resolve_unguarded(
+        &self,
+        creds: MaybeCreds,
+        ambient_region: Option<&str>,
+    ) -> Result<(Arc<dyn StorageBackend>, SourceIdentity), (StatusCode, String)> {
         let parsed = match creds.0 {
             Ok(parsed) => parsed,
             Err(
@@ -124,15 +162,30 @@ impl AppState {
         match parsed {
             CredSource::Static(temp) if self.allow_byo_creds => {
                 self.log_chosen_identity(&temp, "bring-your-own credentials");
-                Ok(self.ephemeral_backend(temp))
+                let backend = self.ephemeral_backend(temp.clone());
+                Ok((backend, SourceIdentity::Credentials(temp)))
             }
             CredSource::AssumeRole { role_arn, region } if self.allow_byo_creds => {
                 let temp = self.assume(&role_arn, region.as_deref()).await?;
                 self.log_chosen_identity(&temp, "assumed-role credentials");
-                Ok(self.ephemeral_backend(temp))
+                // The role ARN names the account whose credentials STS just
+                // minted, so it needs no further identity lookup.
+                let Some(namespace) =
+                    CacheNamespace::aws_account(role_arn.partition(), role_arn.account_id())
+                else {
+                    tracing::warn!(role_arn = %role_arn.as_str(), "assumed role has no valid account");
+                    return Err(identity_unverified(StatusCode::INTERNAL_SERVER_ERROR));
+                };
+                Ok((
+                    self.ephemeral_backend(temp),
+                    SourceIdentity::Known(namespace),
+                ))
             }
-            // BYO disabled (local-dir) — credentials are meaningless here.
-            CredSource::Static(_) | CredSource::AssumeRole { .. } => Ok(self.backend.clone()),
+            // BYO disabled (local-dir) — credentials are meaningless here, so
+            // they select neither the backend nor its identity.
+            CredSource::Static(_) | CredSource::AssumeRole { .. } => {
+                Ok((self.backend.clone(), self.source_identity.of_backend()))
+            }
             CredSource::Default => {
                 if self.require_explicit_source_identity {
                     tracing::info!("rejecting source read without explicit AWS identity");
@@ -142,17 +195,77 @@ impl AppState {
                     ));
                 }
                 if self.allow_byo_creds {
-                    if let Some(region) = ambient_region {
+                    // Empty is absent, as in the credential parser.
+                    if let Some(region) = ambient_region.filter(|region| !region.is_empty()) {
+                        // The parser ignores this query value when a header
+                        // region takes precedence, so validate it before it
+                        // selects the S3 endpoint.
+                        if !credentials::is_valid_region(region) {
+                            return Err((
+                                StatusCode::BAD_REQUEST,
+                                CredError::InvalidRegion.message().to_string(),
+                            ));
+                        }
                         tracing::debug!(%region, "using ambient credentials in request region");
-                        return Ok(Arc::new(S3Backend::from_env_in_region(region).await));
+                        let backend = Arc::new(S3Backend::from_env_in_region(region).await);
+                        let identity = SourceIdentity::Known(CacheNamespace::ambient());
+                        return Ok((backend, identity));
                     }
                     tracing::debug!(
                         "no x-dial9-aws-* credentials on request; using server's default identity"
                     );
                 }
-                Ok(self.backend.clone())
+                Ok((self.backend.clone(), self.source_identity.of_backend()))
             }
         }
+    }
+
+    /// The cache namespace for `identity`. Raw credentials cost one STS
+    /// `GetCallerIdentity` call; other identities, including the ambient chain,
+    /// are known.
+    ///
+    /// Fails closed: when the account cannot be verified, the request is
+    /// rejected with a generic message rather than falling back to a shared
+    /// namespace. Details are logged server-side. Only STS rejecting supplied
+    /// credentials is a 401; any other failure is a 503.
+    pub(super) async fn cache_namespace(
+        &self,
+        identity: SourceIdentity,
+    ) -> Result<CacheNamespace, (StatusCode, String)> {
+        let temp = match &identity {
+            SourceIdentity::Known(namespace) => return Ok(namespace.clone()),
+            SourceIdentity::Credentials(temp) => temp,
+        };
+        let caller = match self
+            .caller_identity
+            .caller_identity(temp, temp.region.as_deref())
+            .await
+        {
+            Ok(caller) => caller,
+            Err(e) => {
+                rate_limited!(std::time::Duration::from_secs(60), {
+                    tracing::info!(
+                        error = %e,
+                        "could not resolve the AWS account of bring-your-own credentials"
+                    );
+                });
+                return Err(identity_unverified(if e.is_rejected() {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }));
+            }
+        };
+        CacheNamespace::from_caller_identity(caller.account(), caller.arn()).ok_or_else(|| {
+            rate_limited!(std::time::Duration::from_secs(60), {
+                tracing::warn!(
+                    account = %caller.account(),
+                    arn = %caller.arn(),
+                    "caller identity has no valid AWS account"
+                );
+            });
+            identity_unverified(StatusCode::SERVICE_UNAVAILABLE)
+        })
     }
 
     /// Assume `role_arn` (with the server's own identity) and return the minted
@@ -213,4 +326,177 @@ pub(super) fn add_routes(router: Router<AppState>) -> Router<AppState> {
         "/credentials/check",
         axum::routing::post(check::check_credentials),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingest::aggregate::AggContext;
+    use crate::server::credentials::{
+        CallerIdentity, CallerIdentityError, CallerIdentityResolver, TempCredentials,
+    };
+    use std::sync::Mutex;
+
+    const SUPPLIED_ACCOUNT: &str = "999999999999";
+
+    /// One recorded lookup's region.
+    type Lookup = Option<String>;
+
+    /// Reports [`SUPPLIED_ACCOUNT`] for every lookup.
+    #[derive(Default)]
+    struct FakeResolver {
+        lookups: Mutex<Vec<Lookup>>,
+    }
+
+    impl FakeResolver {
+        fn lookups(&self) -> Vec<Lookup> {
+            self.lookups.lock().unwrap().clone()
+        }
+    }
+
+    impl CallerIdentityResolver for FakeResolver {
+        fn caller_identity<'a>(
+            &'a self,
+            _credentials: &'a TempCredentials,
+            region: Option<&'a str>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<CallerIdentity, CallerIdentityError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.lookups
+                .lock()
+                .unwrap()
+                .push(region.map(str::to_string));
+            let account = SUPPLIED_ACCOUNT;
+            let result = Ok(CallerIdentity::new(
+                account,
+                format!("arn:aws:sts::{account}:assumed-role/server/s"),
+            ));
+            Box::pin(async move { result })
+        }
+    }
+
+    fn state(
+        identity: ServerSourceIdentity,
+        allow_byo: bool,
+        resolver: Arc<FakeResolver>,
+    ) -> AppState {
+        let backend: Arc<dyn StorageBackend> =
+            Arc::new(crate::storage::LocalBackend::new_temporary_aggregate());
+        let agg = AggContext {
+            source: Arc::clone(&backend),
+            output: Arc::clone(&backend),
+            source_bucket: "src".into(),
+            source_is_local: false,
+            output_bucket: "out".into(),
+            output_prefix: "base".into(),
+            source_prefixes: vec![String::new()],
+            segment_duration_secs: 60,
+        };
+        AppState::new(backend, Some("src".into()), None)
+            .with_agg(agg)
+            .with_byo_creds(allow_byo)
+            .with_source_identity(identity)
+            .with_caller_identity_resolver(resolver)
+    }
+
+    fn supplied_credentials() -> MaybeCreds {
+        MaybeCreds(Ok(CredSource::Static(TempCredentials::new(
+            "AKID",
+            "secret",
+            None,
+            Some("eu-west-1".into()),
+        ))))
+    }
+
+    fn no_credentials() -> MaybeCreds {
+        MaybeCreds(Ok(CredSource::Default))
+    }
+
+    /// The namespace and lookup follow the credentials that sign source reads.
+    /// Request credentials select neither the configured context's backend nor
+    /// its namespace, disabled BYO credentials select nothing either, and every
+    /// lookup carries the request's validated region.
+    #[rstest::rstest]
+    #[case::configured_ambient(
+        ServerSourceIdentity::Fixed(CacheNamespace::ambient()),
+        true,
+        None,
+        supplied_credentials(),
+        None,
+        "base/account=ambient",
+        vec![]
+    )]
+    #[case::byo_disabled(
+        ServerSourceIdentity::Fixed(CacheNamespace::simulator()),
+        false,
+        Some("src"),
+        supplied_credentials(),
+        None,
+        "flamegraph-data/account=simulator",
+        vec![]
+    )]
+    #[case::byo_enabled(
+        ServerSourceIdentity::Fixed(CacheNamespace::supplied()),
+        true,
+        Some("src"),
+        supplied_credentials(),
+        None,
+        "flamegraph-data/account=aws.999999999999",
+        vec![Some("eu-west-1".to_string())]
+    )]
+    #[case::ambient_in_region(
+        ServerSourceIdentity::Fixed(CacheNamespace::supplied()),
+        true,
+        Some("src"),
+        no_credentials(),
+        Some("us-west-2"),
+        "flamegraph-data/account=ambient",
+        vec![]
+    )]
+    #[tokio::test]
+    async fn namespace_follows_the_signing_credentials(
+        #[case] identity: ServerSourceIdentity,
+        #[case] allow_byo: bool,
+        #[case] bucket: Option<&str>,
+        #[case] creds: MaybeCreds,
+        #[case] aws_region: Option<&str>,
+        #[case] want: &str,
+        #[case] lookups: Vec<Lookup>,
+    ) {
+        let resolver = Arc::new(FakeResolver::default());
+        let agg = state(identity, allow_byo, Arc::clone(&resolver))
+            .agg_context_for(bucket, None, aws_region, creds)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agg.output_prefix, want);
+        assert_eq!(resolver.lookups(), lookups);
+    }
+
+    /// An invalid ambient `aws_region` is rejected before it can select an S3
+    /// endpoint.
+    #[tokio::test]
+    async fn invalid_ambient_region_is_rejected_before_any_lookup() {
+        let resolver = Arc::new(FakeResolver::default());
+        let error = state(
+            ServerSourceIdentity::Fixed(CacheNamespace::supplied()),
+            true,
+            Arc::clone(&resolver),
+        )
+        .agg_context_for(
+            Some("src"),
+            None,
+            Some("us-east-1.attacker.example"),
+            no_credentials(),
+        )
+        .await
+        .err()
+        .expect("invalid region must fail");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(resolver.lookups().is_empty());
+    }
 }

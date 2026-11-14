@@ -97,7 +97,7 @@ pub struct EphemeralS3Config {
 /// Default region used when the user did not supply (and we could not detect)
 /// one. S3 routes bucket operations regardless once the bucket region is known,
 /// but a concrete region is required to build the client.
-const DEFAULT_REGION: &str = "us-east-1";
+pub(crate) const DEFAULT_REGION: &str = "us-east-1";
 
 /// Per-attempt timeout: how long a single HTTP attempt may take before the SDK
 /// gives up on it (and possibly retries).

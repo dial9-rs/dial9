@@ -1250,13 +1250,14 @@ async fn refold_is_idempotent_no_duplicate_part_files() {
 
     // The output bucket should contain exactly `files_folded` samples part-files
     // (one per folded source file) — no duplicates from re-polling. The output
-    // is namespaced by source bucket: `…/v{VERSION}/bucket={src}/samples/…`.
+    // is namespaced by source identity and bucket:
+    // `…/account={namespace}/v{VERSION}/bucket={src}/samples/…`.
     let version = dial9_viewer::ingest::aggregate::SAMPLES_FORMAT_VERSION;
     let listed = uploader
         .list_objects_v2()
         .bucket("out-bucket")
         .prefix(format!(
-            "flamegraph-data/v{version}/bucket=src-bucket/samples/"
+            "flamegraph-data/account=supplied/v{version}/bucket=src-bucket/samples/"
         ))
         .send()
         .await
@@ -1343,8 +1344,10 @@ async fn escaped_service_and_instance_survive_aggregation_and_cache_paths() {
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
     let uploader = fake_s3_client(fs.path());
     let epoch = 1_775_761_800i64;
-    let service = "payments/api";
-    let host = "cluster/worker=blue%1";
+    // Short values keep each part key's metadata file name, which the s3s fake
+    // base64-encodes into a single path component, under 255 bytes.
+    let service = "pay/api";
+    let host = "c/w=b%1";
     let key = segment_key("2026-04-09", "1910", service, host, epoch, 0);
     put(&uploader, "src-bucket", &key, mini_trace_gz()).await;
 
@@ -1368,15 +1371,14 @@ async fn escaped_service_and_instance_survive_aggregation_and_cache_paths() {
         .list_objects_v2()
         .bucket("out-bucket")
         .prefix(format!(
-            "flamegraph-data/v{version}/bucket=src-bucket/samples/"
+            "flamegraph-data/account=supplied/v{version}/bucket=src-bucket/samples/"
         ))
         .send()
         .await
         .unwrap();
     assert!(listed.contents().iter().any(|object| {
         object.key().is_some_and(|key| {
-            key.contains("/service=payments%2Fapi/")
-                && key.contains("/host=cluster%2Fworker%3Dblue%251/")
+            key.contains("/service=pay%2Fapi/") && key.contains("/host=c%2Fw%3Db%251/")
         })
     }));
 }
@@ -1879,5 +1881,472 @@ async fn seed_merge_error_excludes_only_the_failed_leaf() {
     assert_eq!(
         c2.fold_errors, 1,
         "exactly one merge error from the corrupted part"
+    );
+}
+
+// ── Account-namespaced aggregate cache ──────────────────────────────────────
+//
+// Cached parts are scoped to the AWS account (and partition) whose credentials
+// sign the source reads: `{output_prefix}/account={partition}.{account}/…`.
+// These tests drive BYOC and assume-role requests against the s3s fake, with a
+// fake caller-identity resolver standing in for STS.
+
+use dial9_viewer::server::credentials::{
+    AssumeRoleError, CallerIdentity, CallerIdentityError, CallerIdentityResolver, RoleArn,
+    RoleAssumer, TempCredentials,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const ACCOUNT_A: &str = "111111111111";
+const ACCOUNT_B: &str = "222222222222";
+
+/// Session tokens the fake resolver understands. The s3s fake authorizes only
+/// the `test`/`test` key pair and ignores the token, so every session can read
+/// the source while the resolver reports a different account per token.
+const SESSION_A1: &str = "acct-111111111111-session-1";
+const SESSION_A2: &str = "acct-111111111111-session-2";
+const SESSION_B: &str = "acct-222222222222-session-1";
+const SESSION_STS_DENIED: &str = "sts-denied";
+const SESSION_STS_UNAVAILABLE: &str = "sts-unavailable";
+const SESSION_MALFORMED: &str = "malformed-identity";
+
+/// Stands in for STS `GetCallerIdentity`: `acct-{account}-…` tokens report that
+/// account, [`SESSION_MALFORMED`] reports an invalid account,
+/// [`SESSION_STS_UNAVAILABLE`] gets no response, and anything else is rejected.
+/// Ambient requests never reach it.
+#[derive(Default)]
+struct FakeCallerIdentity {
+    calls: AtomicUsize,
+}
+
+impl CallerIdentityResolver for FakeCallerIdentity {
+    fn caller_identity<'a>(
+        &'a self,
+        credentials: &'a TempCredentials,
+        _region: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<CallerIdentity, CallerIdentityError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let token = credentials.credentials.session_token();
+        let result = match token {
+            Some(SESSION_MALFORMED) => Ok(CallerIdentity::new(
+                "12345",
+                "arn:aws:sts::12345:assumed-role/reader/s",
+            )),
+            Some(SESSION_STS_UNAVAILABLE) => {
+                Err(CallerIdentityError::unavailable("no response (fake)"))
+            }
+            Some(token) => match token.strip_prefix("acct-").and_then(|t| t.get(..12)) {
+                Some(account) => Ok(CallerIdentity::new(
+                    account,
+                    format!("arn:aws:sts::{account}:assumed-role/reader/{token}"),
+                )),
+                None => Err(CallerIdentityError::rejected("denied (fake)")),
+            },
+            None => Err(CallerIdentityError::unavailable("no session token (fake)")),
+        };
+        Box::pin(async move { result })
+    }
+}
+
+/// Mints the s3s fake's static credentials for any role.
+struct FakeRoleAssumer;
+
+impl RoleAssumer for FakeRoleAssumer {
+    fn assume_role<'a>(
+        &'a self,
+        _role_arn: &'a RoleArn,
+        region: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TempCredentials, AssumeRoleError>> + Send + 'a>,
+    > {
+        let region = region.map(str::to_string);
+        Box::pin(async move {
+            Ok(TempCredentials::new(
+                "test",
+                "test",
+                Some("role".into()),
+                region,
+            ))
+        })
+    }
+}
+
+fn fake_ephemeral_config(fs_root: &std::path::Path) -> dial9_viewer::storage::EphemeralS3Config {
+    let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
+    let mut builder = s3s::service::S3ServiceBuilder::new(fs);
+    builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+    let s3_client: s3s_aws::Client = builder.build().into();
+    dial9_viewer::storage::EphemeralS3Config {
+        http_client: aws_sdk_s3::config::SharedHttpClient::new(s3_client),
+        endpoint_url: Some("http://localhost:0".to_string()),
+        force_path_style: true,
+    }
+}
+
+/// 40 source files (8 hosts × 5 minutes), so the default fold cap is 4. Host
+/// names are short because the s3s fake encodes each full key into one
+/// metadata file name, which must fit the filesystem's 255-byte limit.
+async fn seed_forty(fs_root: &std::path::Path) {
+    std::fs::create_dir(fs_root.join("src-bucket")).unwrap();
+    std::fs::create_dir(fs_root.join("out-bucket")).unwrap();
+    let uploader = fake_s3_client(fs_root);
+    let body = mini_trace_gz();
+    for host in 0..8 {
+        for minute in 0..5 {
+            let epoch = 1_744_224_000i64 + minute * 60;
+            let key = segment_key(
+                "2026-04-09",
+                &format!("21{minute:02}"),
+                "shale",
+                &format!("h{host}"),
+                epoch + host,
+                0,
+            );
+            put(&uploader, "src-bucket", &key, body.clone()).await;
+        }
+    }
+}
+
+/// A BYO server whose source reads go through request credentials, with a
+/// persistent S3 output bucket so tests can inspect each namespace.
+async fn start_identity_server(
+    fs_root: &std::path::Path,
+    resolver: Arc<FakeCallerIdentity>,
+) -> String {
+    let default_backend = Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
+    let out_backend: Arc<dyn dial9_viewer::storage::StorageBackend> =
+        Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
+    let state = AppState::new(default_backend, Some("src-bucket".into()), None)
+        .with_byo_creds(true)
+        .with_ephemeral_s3(fake_ephemeral_config(fs_root))
+        .with_role_assumer(Arc::new(FakeRoleAssumer))
+        .with_caller_identity_resolver(resolver)
+        .with_agg_output(dial9_viewer::server::AggOutput::s3(
+            "out-bucket",
+            out_backend,
+        ));
+    let app = router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// How a request authenticates its source reads.
+#[derive(Clone, Copy, Debug)]
+enum Caller {
+    Session(&'static str),
+    Role(&'static str),
+    Ambient,
+}
+
+impl Caller {
+    fn apply(self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let request = request.header("x-dial9-aws-region", "us-east-1");
+        match self {
+            Caller::Session(token) => request
+                .header("x-dial9-aws-access-key-id", "test")
+                .header("x-dial9-aws-secret-access-key", "test")
+                .header("x-dial9-aws-session-token", token),
+            Caller::Role(arn) => request.header("x-dial9-aws-role-arn", arn),
+            Caller::Ambient => request,
+        }
+    }
+}
+
+/// Stream `/api/flamegraph` over `src-bucket` as `caller`; returns the first
+/// (cached-only) and final coverage.
+async fn stream_as(base: &str, caller: Caller, query: &str) -> (Coverage, Coverage) {
+    let url = format!("{base}/api/flamegraph?bucket=src-bucket&service=shale{query}");
+    let response = caller
+        .apply(reqwest::Client::new().get(&url))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert!(status.is_success(), "{caller:?} {url}: {status} {body}");
+    let events = parse_sse_events(&body);
+    let first = extract_coverage(events.first().expect("at least one event")).unwrap();
+    let last = extract_coverage(events.last().unwrap()).unwrap();
+    (first, last)
+}
+
+/// Samples part-files written under one account namespace of the output bucket.
+async fn namespace_parts(fs_root: &std::path::Path, namespace: &str) -> usize {
+    let version = dial9_viewer::ingest::aggregate::SAMPLES_FORMAT_VERSION;
+    count_objects(
+        &fake_s3_client(fs_root),
+        "out-bucket",
+        &format!("flamegraph-data/account={namespace}/v{version}/bucket=src-bucket/samples/"),
+    )
+    .await
+}
+
+/// Account A populates its namespace and reuses all of it, including parts
+/// outside the default fold cap, across sessions. Account B sees none of A's
+/// parts and folds through its own source access into its own namespace.
+#[tokio::test]
+async fn cached_parts_are_reused_within_an_account_only() {
+    let fs = tempfile::tempdir().unwrap();
+    seed_forty(fs.path()).await;
+    let resolver = Arc::new(FakeCallerIdentity::default());
+    let base = start_identity_server(fs.path(), Arc::clone(&resolver)).await;
+
+    let (_, populated) = stream_as(&base, Caller::Session(SESSION_A1), "&max_files=12").await;
+    assert_eq!(populated.files_folded, 12);
+    assert_eq!(
+        namespace_parts(fs.path(), &format!("aws.{ACCOUNT_A}")).await,
+        12
+    );
+
+    // Cap 4, yet all 12 cached parts in A's namespace are reused by another
+    // session in the same account.
+    let (cached, reused) = stream_as(&base, Caller::Session(SESSION_A2), "").await;
+    assert_eq!(cached.files_folded, 12, "first snapshot is A's cache");
+    assert_eq!(reused.files_folded, 12, "no new folds were needed");
+
+    let (cached, folded) = stream_as(&base, Caller::Session(SESSION_B), "").await;
+    assert_eq!(cached.files_folded, 0, "B reuses none of A's parts");
+    assert_eq!(folded.files_folded, 4, "B folds its own capped prefix");
+    assert_eq!(
+        namespace_parts(fs.path(), &format!("aws.{ACCOUNT_B}")).await,
+        4
+    );
+    assert_eq!(
+        namespace_parts(fs.path(), &format!("aws.{ACCOUNT_A}")).await,
+        12,
+        "B's folds never land in A's namespace"
+    );
+    assert_eq!(
+        resolver.calls.load(Ordering::SeqCst),
+        3,
+        "one lookup per request"
+    );
+}
+
+/// Assumed roles take the namespace from the validated role ARN's partition
+/// and account and never consult the caller-identity resolver: roles in one
+/// account share its namespace, and a role in another partition and account
+/// is isolated.
+#[tokio::test]
+async fn assumed_role_namespace_comes_from_the_role_arn() {
+    let fs = tempfile::tempdir().unwrap();
+    seed_forty(fs.path()).await;
+    let resolver = Arc::new(FakeCallerIdentity::default());
+    let base = start_identity_server(fs.path(), Arc::clone(&resolver)).await;
+
+    let (_, populated) = stream_as(
+        &base,
+        Caller::Role("arn:aws:iam::111111111111:role/reader-one"),
+        "&max_files=12",
+    )
+    .await;
+    assert_eq!(populated.files_folded, 12);
+    let (cached, _) = stream_as(
+        &base,
+        Caller::Role("arn:aws:iam::111111111111:role/path/reader-two"),
+        "",
+    )
+    .await;
+    assert_eq!(
+        cached.files_folded, 12,
+        "a second role reuses the first's parts"
+    );
+    assert_eq!(
+        namespace_parts(fs.path(), &format!("aws.{ACCOUNT_A}")).await,
+        12
+    );
+
+    let (cached, folded) = stream_as(
+        &base,
+        Caller::Role("arn:aws-us-gov:iam::222222222222:role/reader"),
+        "",
+    )
+    .await;
+    assert_eq!(cached.files_folded, 0);
+    assert_eq!(folded.files_folded, 4);
+    assert_eq!(
+        namespace_parts(fs.path(), "aws-us-gov.222222222222").await,
+        4
+    );
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+}
+
+/// When the account behind raw credentials cannot be verified, the request
+/// fails with a generic message and writes nothing: there is no shared
+/// fallback namespace. Only rejected credentials are a 401.
+#[rstest::rstest]
+#[case::sts_denied(Caller::Session(SESSION_STS_DENIED), 401)]
+#[case::sts_unavailable(Caller::Session(SESSION_STS_UNAVAILABLE), 503)]
+#[case::malformed_identity(Caller::Session(SESSION_MALFORMED), 503)]
+#[tokio::test]
+async fn unverified_account_fails_closed(#[case] caller: Caller, #[case] status: u16) {
+    let fs = tempfile::tempdir().unwrap();
+    seed_forty(fs.path()).await;
+    let resolver = Arc::new(FakeCallerIdentity::default());
+    let base = start_identity_server(fs.path(), Arc::clone(&resolver)).await;
+
+    let url = format!("{base}/api/flamegraph?bucket=src-bucket&service=shale");
+    let response = caller
+        .apply(reqwest::Client::new().get(&url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), status);
+    assert_eq!(
+        response.text().await.unwrap(),
+        "could not verify the AWS account for this request"
+    );
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        count_objects(&fake_s3_client(fs.path()), "out-bucket", "flamegraph-data/").await,
+        0
+    );
+}
+
+/// The first object key under `prefix` in the simulated S3.
+async fn first_key(fs_root: &std::path::Path, bucket: &str, prefix: &str) -> String {
+    fake_s3_client(fs_root)
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix(prefix)
+        .send()
+        .await
+        .unwrap()
+        .contents()
+        .first()
+        .and_then(|object| object.key())
+        .unwrap_or_else(|| panic!("no object under {bucket}/{prefix}"))
+        .to_string()
+}
+
+async fn get_as(base: &str, caller: Caller, path: &str) -> (u16, String) {
+    let response = caller
+        .apply(reqwest::Client::new().get(format!("{base}{path}")))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+/// Generic source routes cannot read or enumerate the persistent aggregate
+/// cache, in any account's namespace or the legacy unscoped tree, whichever
+/// credentials sign the read. Raw objects in the output bucket, including ones
+/// under the output prefix but outside its cache roots, stay readable.
+#[rstest::rstest]
+#[case::ambient(Caller::Ambient)]
+#[case::other_account(Caller::Session(SESSION_B))]
+#[tokio::test]
+async fn source_routes_cannot_reach_the_aggregate_cache(#[case] caller: Caller) {
+    let fs = tempfile::tempdir().unwrap();
+    seed_forty(fs.path()).await;
+    let resolver = Arc::new(FakeCallerIdentity::default());
+    let base = start_identity_server(fs.path(), Arc::clone(&resolver)).await;
+    stream_as(&base, Caller::Session(SESSION_A1), "").await;
+
+    let version = dial9_viewer::ingest::aggregate::SAMPLES_FORMAT_VERSION;
+    let namespace = format!("flamegraph-data/account=aws.{ACCOUNT_A}");
+    let cached_part = first_key(fs.path(), "out-bucket", &format!("{namespace}/")).await;
+    let legacy_part = format!("flamegraph-data/v{version}/bucket=src-bucket/dict/stacks/l.parquet");
+    let raw_root = segment_key("2026-04-09", "2100", "shale", "h0", 1_744_224_000, 0);
+    let raw_under_prefix = "flamegraph-data/raw/1744224000-0.bin.gz";
+    let uploader = fake_s3_client(fs.path());
+    put(&uploader, "out-bucket", &legacy_part, b"legacy".to_vec()).await;
+    put(&uploader, "out-bucket", &raw_root, mini_trace_gz()).await;
+    put(&uploader, "out-bucket", raw_under_prefix, mini_trace_gz()).await;
+    let calls_before = resolver.calls.load(Ordering::SeqCst);
+    // Another name for the output bucket, as an S3 access point alias is.
+    std::os::unix::fs::symlink(fs.path().join("out-bucket"), fs.path().join("out-alias")).unwrap();
+
+    // 2026-04-09T21:00Z, the date and time segments of `segment_key` below.
+    let window = "from=1775768400&to=1775768700";
+    for bucket in ["out-bucket", "out-alias"] {
+        let object = |key: &str| {
+            format!(
+                "/api/object?bucket={bucket}&key={}",
+                urlencoding::encode(key)
+            )
+        };
+        let denied = [
+            object(&cached_part),
+            object(&cached_part.replacen('/', "//", 1)),
+            object(&format!("./{cached_part}")),
+            object(&legacy_part),
+            format!("/api/prefixes?bucket={bucket}&prefix={namespace}/"),
+            format!("/api/prefixes?bucket={bucket}&prefix=flamegraph-data/account="),
+            format!("/api/prefixes?bucket={bucket}&prefix=flamegraph-data/v{version}/"),
+            format!("/api/browse?bucket={bucket}&prefix={namespace}&service=shale&{window}"),
+            format!("/api/services?bucket={bucket}&prefix=flamegraph-data/v{version}&{window}"),
+        ];
+        for path in &denied {
+            let (status, body) = get_as(&base, caller, path).await;
+            assert_eq!(status, 404, "{caller:?} {path}: {body}");
+            // The same shape as a missing object; it echoes only the request.
+            assert!(
+                body.starts_with(&format!("not found: {bucket}/")),
+                "{path}: {body}"
+            );
+            assert!(
+                !body.contains(".parquet") || path.contains(".parquet"),
+                "{path}: {body}"
+            );
+        }
+
+        // A listing above the cache roots omits them.
+        let (status, body) = get_as(
+            &base,
+            caller,
+            &format!("/api/prefixes?bucket={bucket}&prefix=flamegraph-data/"),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let children: Vec<String> = serde_json::from_str(&body).unwrap();
+        assert_eq!(children, ["flamegraph-data/raw/"], "{caller:?} {bucket}");
+
+        // Legitimate source objects outside the cache roots stay readable.
+        for key in [raw_root.as_str(), raw_under_prefix] {
+            let (status, _) = get_as(&base, caller, &object(key)).await;
+            assert_eq!(status, 200, "{caller:?} {bucket} {key}");
+        }
+    }
+
+    let (status, body) = get_as(
+        &base,
+        caller,
+        &format!("/api/browse?bucket=out-bucket&service=shale&{window}"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(&raw_root),
+        "browse lists the raw object: {body}"
+    );
+    let (status, _) = get_as(
+        &base,
+        caller,
+        &format!(
+            "/api/object?bucket=src-bucket&key={}",
+            urlencoding::encode(&raw_root)
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // The guard refused the reads; the cache itself is intact.
+    assert!(count_objects(&uploader, "out-bucket", &format!("{namespace}/")).await > 0);
+    assert_eq!(
+        resolver.calls.load(Ordering::SeqCst),
+        calls_before,
+        "source routes make no caller-identity lookup"
     );
 }

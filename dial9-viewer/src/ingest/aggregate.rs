@@ -83,6 +83,10 @@ pub(crate) fn part_leaf_of(source_key: &str) -> String {
 /// store is namespaced by source bucket so that bring-your-own-credentials
 /// sources fold into isolated, independently-prunable/GC-able trees and the
 /// folded-set LIST never mixes buckets.
+///
+/// The server scopes `output_prefix` to the request's
+/// [cache namespace](crate::ingest::cache_namespace) before it reaches here, so
+/// the full root is `{base}/account={namespace}/v{N}/bucket={source_bucket}`.
 fn versioned_root(output_prefix: &str, source_bucket: &str) -> String {
     let p = output_prefix.trim_end_matches('/');
     debug_assert!(!p.is_empty(), "output_prefix must not be empty");
@@ -1687,6 +1691,10 @@ pub(crate) fn span_filter_matches(
 
 /// Shared `Arc`-friendly handle bundle the server uses to run the refinement
 /// loop without re-reading config each call.
+///
+/// `output_prefix` is the base prefix; the server appends the request's
+/// [cache namespace](crate::ingest::cache_namespace) (`/account=…`) before
+/// folding or reading cached parts.
 #[derive(Clone)]
 pub struct AggContext {
     pub source: Arc<dyn StorageBackend>,

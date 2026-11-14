@@ -1,5 +1,5 @@
 use crate::ingest::aggregate::AggContext;
-use crate::server::{AggOutput, AppState};
+use crate::server::{AggOutput, AppState, ServerSourceIdentity};
 use crate::storage::S3Backend;
 use std::path::Path;
 use std::sync::Arc;
@@ -98,9 +98,16 @@ pub(super) async fn app_state(
             Arc::new(backend),
             bucket.map(str::to_string),
             prefix.map(str::to_string),
-        ),
+        )
+        .with_source_identity(ambient_source_identity()),
         true,
     ))
+}
+
+/// The server's S3 backends read with the process's ambient credential chain,
+/// cached under the fixed `ambient` namespace without an STS lookup.
+pub(super) fn ambient_source_identity() -> ServerSourceIdentity {
+    ServerSourceIdentity::Fixed(crate::ingest::cache_namespace::CacheNamespace::ambient())
 }
 
 /// For an S3 source, offer the assume-role path using the server's ambient

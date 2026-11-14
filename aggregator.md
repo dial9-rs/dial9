@@ -52,8 +52,12 @@ they are never re-fetched.
 The output store lives under a versioned, source-bucket-namespaced root:
 
 ```
-{output_prefix}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/
+{output_prefix}/account={namespace}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/
 ```
+
+`{namespace}` is the AWS account of explicit bring-your-own or assumed-role
+credentials, or a fixed operational name such as `ambient`; see
+[ADR-0005](docs/adr/0005-aggregate-cache-account-namespace.md).
 
 Namespacing by source bucket keeps bring-your-own-credentials sources in
 isolated, independently prunable/GC-able trees, and a format-version bump points
@@ -152,7 +156,7 @@ clicked node) are **not yet a server endpoint** — see [Deferred](#deferred).
                          ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Parquet store (S3 or local)                                          │
-│  {output_prefix}/v{N}/bucket={source_bucket}/                          │
+│  {output_prefix}/account={ns}/v{N}/bucket={source_bucket}/             │
 │                                                                       │
 │    samples/service={svc}/date={YYYY-MM-DD}/host={host}/                │
 │      {blake3(source_key)}.parquet                                      │

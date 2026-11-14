@@ -1,3 +1,4 @@
+use crate::ingest::cache_namespace::CacheNamespace;
 use crate::storage::{LocalBackend, StorageBackend};
 use axum::Router;
 use axum::body::Body;
@@ -14,6 +15,7 @@ use tower_http::timeout::TimeoutLayer;
 
 mod browse;
 mod buckets;
+mod cache_guard;
 #[cfg(feature = "s3")]
 mod check;
 mod config;
@@ -61,6 +63,36 @@ pub(crate) fn embedded_ui_asset(path: &str) -> Option<Vec<u8>> {
 /// Default output key prefix for aggregate part-files.
 const DEFAULT_AGG_OUTPUT_PREFIX: &str = "flamegraph-data";
 const RAW_SPAN_STATS_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The identity that signs reads through the server's own source backend
+/// ([`AppState::backend`] and the configured [`AppState::agg`] source). It
+/// selects the aggregate cache namespace for requests served by that backend.
+#[derive(Clone, Debug)]
+pub(crate) enum ServerSourceIdentity {
+    /// A server-owned backend cached under a fixed operational namespace,
+    /// including `ambient` for the ambient AWS chain.
+    Fixed(CacheNamespace),
+}
+
+impl ServerSourceIdentity {
+    pub(super) fn of_backend(&self) -> SourceIdentity {
+        match self {
+            Self::Fixed(namespace) => SourceIdentity::Known(namespace.clone()),
+        }
+    }
+}
+
+/// The identity behind one request's source reads, resolved to a cache
+/// namespace only when the request aggregates
+/// (see `AppState::cache_namespace`).
+pub(crate) enum SourceIdentity {
+    /// Already known: a fixed namespace (including the ambient chain), or an
+    /// assumed role's account.
+    Known(CacheNamespace),
+    /// Caller-supplied temporary credentials, whose account STS reports.
+    #[cfg(feature = "s3")]
+    Credentials(credentials::TempCredentials),
+}
 
 /// Destination for the aggregate part-files produced by demand-driven folding.
 ///
@@ -146,6 +178,33 @@ impl AggOutput {
     pub(crate) fn location(&self) -> &str {
         &self.location
     }
+
+    /// Wrap a request's source backend so it cannot read or list this
+    /// output's aggregate cache in any bucket (see [`cache_guard`]). The
+    /// temporary directory is unreachable through a source backend, so it
+    /// needs no guard.
+    pub(crate) fn guard_source(&self, backend: Arc<dyn StorageBackend>) -> Arc<dyn StorageBackend> {
+        match &self.bucket {
+            Some(_) => cache_guard::CacheGuard::wrap(
+                backend,
+                cache_guard::ProtectedCache::new(&self.prefix),
+            ),
+            None => backend,
+        }
+    }
+
+    /// Whether `agg` writes this output's cache: the same backend and prefix.
+    fn is_output_of(&self, agg: &crate::ingest::aggregate::AggContext) -> bool {
+        Arc::ptr_eq(&self.backend, &agg.output) && self.prefix == agg.output_prefix
+    }
+}
+
+/// The cache a configured aggregation context writes, when its source is
+/// non-local. A local source keeps its output readable, as before.
+fn configured_cache(
+    agg: &crate::ingest::aggregate::AggContext,
+) -> Option<cache_guard::ProtectedCache> {
+    (!agg.source_is_local).then(|| cache_guard::ProtectedCache::new(&agg.output_prefix))
 }
 
 #[derive(Clone)]
@@ -189,6 +248,14 @@ pub struct AppState {
     /// both, or neither.
     #[cfg(feature = "s3")]
     pub role_assumer: Option<Arc<dyn credentials::RoleAssumer>>,
+    /// Looks up the AWS account of bring-your-own credentials, which namespaces
+    /// the aggregate cache. Production uses STS; tests inject a fake.
+    #[cfg(feature = "s3")]
+    caller_identity: Arc<dyn credentials::CallerIdentityResolver>,
+    /// The identity behind [`Self::backend`] and the configured
+    /// [`Self::agg`] source. Defaults to the fixed `supplied` namespace, since
+    /// an arbitrary backend has no resolvable AWS identity.
+    source_identity: ServerSourceIdentity,
     /// Destination for BYOC aggregate part-files: an operator-owned S3 bucket
     /// (persistent) or a process-local temporary directory (the default,
     /// removed at shutdown). Always a server-owned backend — aggregate writes
@@ -227,6 +294,9 @@ impl AppState {
             ephemeral_s3: None,
             #[cfg(feature = "s3")]
             role_assumer: None,
+            #[cfg(feature = "s3")]
+            caller_identity: Arc::new(credentials::StsCallerIdentityResolver),
+            source_identity: ServerSourceIdentity::Fixed(CacheNamespace::supplied()),
             agg_output: AggOutput::temporary(),
             agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
             bucket_filter: "dial9".to_string(),
@@ -243,6 +313,14 @@ impl AppState {
     pub fn from_local_dir(dir: impl AsRef<std::path::Path>) -> Self {
         let backend = Arc::new(crate::storage::LocalBackend::new(dir.as_ref()));
         Self::new(backend, Some("local".into()), None)
+            .with_source_identity(ServerSourceIdentity::Fixed(CacheNamespace::local()))
+    }
+
+    /// Declare the identity behind the server's own source backend, which
+    /// selects the aggregate cache namespace for requests it serves.
+    pub(crate) fn with_source_identity(mut self, identity: ServerSourceIdentity) -> Self {
+        self.source_identity = identity;
+        self
     }
 
     pub fn with_dev_ui_dir(mut self, dir: PathBuf) -> Self {
@@ -250,9 +328,27 @@ impl AppState {
         self
     }
 
+    /// A non-local configured source is guarded per request, like generic
+    /// source routes (see [`Self::guard_source`]).
     pub fn with_agg(mut self, agg: crate::ingest::aggregate::AggContext) -> Self {
         self.agg = Some(agg);
         self
+    }
+
+    /// Wrap a request's source backend so it can reach neither the
+    /// [`Self::agg_output`] cache nor the configured [`Self::agg`] cache. The
+    /// latter gets its own guard only when it writes elsewhere; otherwise
+    /// [`AggOutput::guard_source`] decides by persistence.
+    pub(crate) fn guard_source(&self, backend: Arc<dyn StorageBackend>) -> Arc<dyn StorageBackend> {
+        let backend = self.agg_output.guard_source(backend);
+        let configured = self
+            .agg
+            .as_ref()
+            .filter(|agg| !self.agg_output.is_output_of(agg));
+        match configured.and_then(configured_cache) {
+            Some(protected) => cache_guard::CacheGuard::wrap(backend, protected),
+            None => backend,
+        }
     }
 
     /// Enable the temporary trace-upload feature with the given caps. Without
@@ -327,7 +423,18 @@ impl AppState {
     /// the BYOC context is assembled, shared by `/api/flamegraph` and
     /// `/tokio-stats`.
     ///
+    /// Either way, the returned context's `output_prefix` is scoped to the
+    /// [cache namespace] of the credentials that sign its source reads.
+    /// Explicit credentials (bring-your-own or an assumed role) select their
+    /// AWS account, so their cached parts are reused only within that account;
+    /// when it cannot be verified the request fails rather than falling back
+    /// to a shared namespace. Ambient credentials and non-AWS sources use a
+    /// fixed operational namespace (such as `ambient`), which isolates them
+    /// from account namespaces but not from other servers using the same
+    /// fixed name on a shared output store and prefix.
+    ///
     /// [`AggContext`]: crate::ingest::aggregate::AggContext
+    /// [cache namespace]: crate::ingest::cache_namespace
     pub(crate) async fn agg_context_for(
         &self,
         bucket: Option<&str>,
@@ -337,7 +444,8 @@ impl AppState {
     ) -> Result<Option<crate::ingest::aggregate::AggContext>, (StatusCode, String)> {
         use crate::ingest::aggregate::AggContext;
         if let Some(bucket) = bucket {
-            let backend = self.resolve_with_region(creds, aws_region).await?;
+            let (backend, identity) = self.resolve_source(creds, aws_region).await?;
+            let namespace = self.cache_namespace(identity).await?;
             let source_prefix = prefix
                 .map(str::to_string)
                 .or_else(|| self.default_prefix.clone())
@@ -346,11 +454,12 @@ impl AppState {
             // request's source credentials: either the configured S3 output
             // bucket or the process-local temporary directory.
             let output_bucket = self.agg_output.output_bucket_for(bucket);
+            let output_prefix = namespace.scope_output_prefix(self.agg_output.prefix());
             tracing::info!(
                 %bucket,
                 %output_bucket,
                 resolved_source_prefix = %source_prefix,
-                output_prefix = %self.agg_output.prefix(),
+                %output_prefix,
                 "agg: BYOC context"
             );
             Ok(Some(AggContext {
@@ -359,12 +468,24 @@ impl AppState {
                 source_bucket: bucket.to_string(),
                 source_is_local: false,
                 output_bucket,
-                output_prefix: self.agg_output.prefix().to_string(),
+                output_prefix,
                 source_prefixes: vec![source_prefix],
                 segment_duration_secs: self.agg_segment_secs,
             }))
         } else {
-            Ok(self.agg.clone())
+            let Some(mut agg) = self.agg.clone() else {
+                return Ok(None);
+            };
+            // The configured context reads with the server's own identity;
+            // request credentials select neither its backend nor its namespace.
+            let namespace = self
+                .cache_namespace(self.source_identity.of_backend())
+                .await?;
+            if !agg.source_is_local {
+                agg.source = self.guard_source(agg.source);
+            }
+            agg.output_prefix = namespace.scope_output_prefix(&agg.output_prefix);
+            Ok(Some(agg))
         }
     }
 }
@@ -513,6 +634,46 @@ mod tests {
         let backend: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new_temporary_aggregate());
         let s3 = AggOutput::s3("operator-owned", backend);
         assert_eq!(s3.output_bucket_for("caller-source"), "operator-owned");
+    }
+
+    /// A configured non-local context's cache, under its own output prefix,
+    /// is unreachable through both the generic resolved backend and the
+    /// configured source, while raw objects stay readable.
+    #[tokio::test]
+    async fn configured_agg_cache_is_guarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(dir.path()));
+        let cache_key = "agg-out/account=aws.1/v11/p.parquet";
+        let raw_key = "raw/1.bin.gz";
+        for key in [cache_key, raw_key] {
+            backend.put_object("b", key, b"x".to_vec()).await.unwrap();
+        }
+        let agg = crate::ingest::aggregate::AggContext {
+            source: Arc::clone(&backend),
+            output: Arc::clone(&backend),
+            source_bucket: "b".into(),
+            source_is_local: false,
+            output_bucket: "b".into(),
+            output_prefix: "agg-out".into(),
+            source_prefixes: vec![String::new()],
+            segment_duration_secs: 60,
+        };
+        let state = AppState::new(Arc::clone(&backend), Some("b".into()), None).with_agg(agg);
+        #[cfg(feature = "s3")]
+        let creds = || credentials::MaybeCreds(Ok(credentials::CredSource::Default));
+        #[cfg(not(feature = "s3"))]
+        let creds = || credentials::MaybeCreds;
+        let route = state.resolve(creds()).await.unwrap();
+        let configured = state
+            .agg_context_for(None, None, None, creds())
+            .await
+            .unwrap()
+            .unwrap()
+            .source;
+        for source in [route, configured] {
+            assert!(source.get_object("b", cache_key).await.is_err());
+            assert!(source.get_object("b", raw_key).await.is_ok());
+        }
     }
 
     #[tokio::test]

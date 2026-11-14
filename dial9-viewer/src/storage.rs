@@ -8,6 +8,8 @@ use std::pin::Pin;
 #[cfg(feature = "s3")]
 mod s3;
 #[cfg(feature = "s3")]
+pub(crate) use s3::DEFAULT_REGION;
+#[cfg(feature = "s3")]
 pub use s3::{EphemeralS3Config, S3Backend, build_credentialed_client};
 
 /// Metadata about an object in storage.

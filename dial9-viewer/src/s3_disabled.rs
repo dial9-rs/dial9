@@ -1,5 +1,5 @@
 use crate::ingest::aggregate::AggContext;
-use crate::server::{AggOutput, AppState};
+use crate::server::{AggOutput, AppState, ServerSourceIdentity};
 use std::path::Path;
 
 pub(super) fn validate_config(
@@ -71,4 +71,10 @@ pub(super) async fn app_state(
 
 pub(super) async fn with_role_assumer(state: AppState, _source_is_s3: bool) -> AppState {
     state
+}
+
+/// Unreachable: [`validate_config`] and [`aggregate_context`] reject every S3
+/// aggregation source in this build.
+pub(super) fn ambient_source_identity() -> ServerSourceIdentity {
+    unreachable!("an S3 aggregation source requires the `s3` feature")
 }
