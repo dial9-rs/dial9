@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.8...dial9-v0.5.9) - 2026-11-14
+
+### Fixed
+
+- *(trace-format)* distinguish same-named event types ([#1118](https://github.com/dial9-rs/dial9/pull/1118))
+
+### Other
+
+- Namespace aggregate caches by AWS account for explicit credentials ([#1121](https://github.com/dial9-rs/dial9/pull/1121))
+
 ## [0.5.8](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.7...dial9-v0.5.8) - 2026-11-05
 
 ### Added
