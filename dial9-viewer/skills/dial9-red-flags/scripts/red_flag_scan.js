@@ -67,6 +67,62 @@ const { activeTaskSeries, buildWorkerSpans, attachCpuSamples, buildActiveTaskTim
  *  into a single count line. */
 const LONG_POLL_REPORT_LIMIT = 5;
 
+/** Checks 9-11, over the spans the tracing layer recorded. */
+function spanChecks(trace, workerIds, workerSpans) {
+  const findings = [];
+  // The worker spans let buildSpanData place each span on the workers whose
+  // polls ran it. Without them, spans from current producers carry no worker.
+  const spanResult = buildSpanData(trace.customEvents, workerSpans, trace.tidBindings, trace.blockInPlaceGaps);
+  const { allSpans } = spanResult;
+  // Check 9 counts enter/exit pairs, which single-event spans (`spanType` set) are not.
+  const spansByWorker = {}; // sorted by start, like allSpans
+  for (const s of allSpans) {
+    if (s.spanType != null) continue;
+    for (const w of new Set(s.segments.map(seg => seg.workerId))) (spansByWorker[w] ??= []).push(s);
+  }
+
+  // 9. Many spans per poll
+  for (const w of workerIds) {
+    const wSpans = spansByWorker[w] || [];
+    for (const p of workerSpans[w].polls) {
+      // Spans nest, so `end` is not sorted: search on `start`.
+      let lo = 0, hi = wSpans.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (wSpans[mid].start < p.start) lo = mid + 1; else hi = mid; }
+      let count = 0;
+      for (let i = lo; i < wSpans.length && wSpans[i].start <= p.end; i++) {
+        if (wSpans[i].end <= p.end) count++;
+      }
+      if (count > 20) {
+        findings.push({ severity: 'warning', check: 'many-spans-per-poll', message: `Worker ${w}: poll with ${count} spans (${((p.end - p.start) / 1e6).toFixed(2)}ms)` });
+      }
+    }
+  }
+
+  // 10. Span duration outliers
+  const byName = {};
+  for (const s of allSpans) (byName[s.spanName] ??= []).push(s.end - s.start);
+  for (const [name, durations] of Object.entries(byName)) {
+    if (durations.length < 10) continue;
+    durations.sort((a, b) => a - b);
+    const p50 = durations[Math.floor(durations.length * 0.5)];
+    const threshold = p50 * 10;
+    const outliers = durations.filter(d => d > threshold).length;
+    if (outliers > 0) {
+      findings.push({ severity: 'info', check: 'span-duration-outlier', message: `${name}: ${outliers} spans >10x P50 (P50=${(p50 / 1e3).toFixed(1)}µs, threshold=${(threshold / 1e3).toFixed(1)}µs)` });
+    }
+  }
+
+  // 11. Unmatched span enters
+  if (spanResult.unmatchedSpans && spanResult.unmatchedSpans.length > 0) {
+    const unmatched = spanResult.unmatchedSpans;
+    const byName = {};
+    for (const s of unmatched) (byName[s.spanName] ??= []).push(s);
+    const summary = Object.entries(byName).map(([n, arr]) => `${n}(${arr.length})`).join(', ');
+    findings.push({ severity: 'info', check: 'unmatched-spans', message: `${unmatched.length} spans with enter but no exit: ${summary}` });
+  }
+  return findings;
+}
+
 async function redFlagScan(tracePath) {
   for await (const trace of parseTrace(tracePath)) {
     const workerIds = [...new Set(
@@ -232,48 +288,7 @@ async function redFlagScan(tracePath) {
 
     // Span-based checks (require tracing layer)
     if (trace.customEvents && trace.customEvents.length > 0) {
-      const spanResult = buildSpanData(trace.customEvents);
-      const { spansByWorker: sWorker } = spanResult;
-
-      // 9. Many spans per poll
-      for (const w of workerIds) {
-        const wSpans = sWorker[w] || [];
-        for (const p of spans.workerSpans[w].polls) {
-          let lo = 0, hi = wSpans.length - 1;
-          while (lo <= hi) { const mid = (lo + hi) >> 1; if (wSpans[mid].end < p.start) lo = mid + 1; else hi = mid - 1; }
-          let count = 0;
-          for (let i = lo; i < wSpans.length && wSpans[i].start <= p.end; i++) {
-            if (wSpans[i].start >= p.start && wSpans[i].end <= p.end) count++;
-          }
-          if (count > 20) {
-            findings.push({ severity: 'warning', check: 'many-spans-per-poll', message: `Worker ${w}: poll with ${count} spans (${((p.end - p.start) / 1e6).toFixed(2)}ms)` });
-          }
-        }
-      }
-
-      // 10. Span duration outliers
-      const allSpans = Object.values(sWorker).flat();
-      const byName = {};
-      for (const s of allSpans) (byName[s.spanName] ??= []).push(s.end - s.start);
-      for (const [name, durations] of Object.entries(byName)) {
-        if (durations.length < 10) continue;
-        durations.sort((a, b) => a - b);
-        const p50 = durations[Math.floor(durations.length * 0.5)];
-        const threshold = p50 * 10;
-        const outliers = durations.filter(d => d > threshold).length;
-        if (outliers > 0) {
-          findings.push({ severity: 'info', check: 'span-duration-outlier', message: `${name}: ${outliers} spans >10x P50 (P50=${(p50 / 1e3).toFixed(1)}µs, threshold=${(threshold / 1e3).toFixed(1)}µs)` });
-        }
-      }
-
-      // 11. Unmatched span enters
-      if (spanResult.unmatchedSpans && spanResult.unmatchedSpans.length > 0) {
-        const unmatched = spanResult.unmatchedSpans;
-        const byName = {};
-        for (const s of unmatched) (byName[s.spanName] ??= []).push(s);
-        const summary = Object.entries(byName).map(([n, arr]) => `${n}(${arr.length})`).join(', ');
-        findings.push({ severity: 'info', check: 'unmatched-spans', message: `${unmatched.length} spans with enter but no exit: ${summary}` });
-      }
+      for (const f of spanChecks(trace, workerIds, spans.workerSpans)) findings.push(f);
     }
 
     // Print findings
@@ -300,4 +315,4 @@ if (require.main === module) {
   redFlagScan(process.argv[2] || 'trace.bin').catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { redFlagScan };
+module.exports = { redFlagScan, spanChecks };
