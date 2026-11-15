@@ -6,12 +6,13 @@
 // createRequire (see format.test.ts for the rationale). Temp directories are
 // seeded with copies of the demo trace, exactly as before.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as zlib from "node:zlib";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
@@ -516,5 +517,56 @@ describe("directory parsing", { timeout: 120_000 }, () => {
     } finally {
       cleanup(dir);
     }
+  });
+
+  // ── stack groups survive the worker pipe, and cross it compactly ──
+  describe("analyze worker stack groups", () => {
+    interface Frame { symbol: string; location: string | null }
+    interface StackGroup { count: number; frames: Frame[]; leaf: string; leafRaw: string }
+    type StackGroups = Record<"cpuGroups" | "schedGroups" | "inPollGroups", StackGroup[]>;
+    const groupKeys = ["cpuGroups", "schedGroups", "inPollGroups"] as const;
+    const frameKey = (f: Frame) => JSON.stringify([f.symbol, f.location]);
+
+    let single: StackGroups;
+    let fromDir: StackGroups;
+    let dir: string;
+    beforeAll(async () => {
+      const { analyzeTraces } = require(analyzeJsPath) as {
+        analyzeTraces: (p: string) => Promise<StackGroups>;
+      };
+      single = await analyzeTraces(demoPath);
+      dir = setupDir(1);
+      fromDir = await analyzeTraces(dir); // also populates .d9-cache
+    });
+    afterAll(() => cleanup(dir));
+
+    it("directory analysis reports the same stack groups as a single file", () => {
+      expect(single.cpuGroups.length, "demo trace has on-CPU stacks").toBeGreaterThan(0);
+      for (const k of groupKeys) expect(fromDir[k], k).toEqual(single[k]);
+    });
+
+    it("analyze worker writes each distinct frame once", () => {
+      const distinct = new Set(
+        groupKeys.flatMap((k) => single[k].flatMap((g) => g.frames.map(frameKey))),
+      );
+      const out = execFileSync(
+        process.execPath,
+        [analyzeJsPath, "--analyze-worker", path.join(dir, ".d9-cache", "trace-000.json")],
+        { maxBuffer: 256 * 1024 * 1024, encoding: "utf8" },
+      );
+      const partial = JSON.parse(out) as Record<string, unknown>;
+      const frames = partial.frames as Frame[];
+      expect(Array.isArray(frames), "partial carries a frame table").toBe(true);
+      expect(new Set(frames.map(frameKey)).size, "no frame repeated").toBe(frames.length);
+      expect(frames.length, "one entry per distinct frame").toBe(distinct.size);
+      for (const k of groupKeys) {
+        const groups = partial[k] as Record<string, unknown>[];
+        expect(groups.length, k).toBe(single[k].length);
+        for (const g of groups) {
+          expect(g, `${k}: no inline frames`).not.toHaveProperty("frames");
+          expect(Array.isArray(g.frameIds), `${k}: frameIds`).toBe(true);
+        }
+      }
+    });
   });
 });
