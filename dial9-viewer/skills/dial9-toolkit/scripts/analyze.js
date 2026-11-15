@@ -920,25 +920,12 @@ function mergePartial(acc, p) {
   if (p.taskTerminateTimes) for (const [k, v] of p.taskTerminateTimes) acc.taskTerminateTimes.set(k, v);
   if (p.callframeSymbols) for (const [k, v] of p.callframeSymbols) acc.callframeSymbols.set(k, v);
 
-  // Sample groups — key by full stack to avoid merging unrelated stacks with same leaf
-  for (const g of (p.cpuGroups || [])) {
-    const key = g.frames.map(f => f.symbol).join('\0');
-    const e = acc.cpuGroupMap.get(key);
-    if (e) e.count += g.count; else acc.cpuGroupMap.set(key, { ...g });
-  }
-  for (const g of (p.schedGroups || [])) {
-    const key = g.frames.map(f => f.symbol).join('\0');
-    const e = acc.schedGroupMap.get(key);
-    if (e) e.count += g.count; else acc.schedGroupMap.set(key, { ...g });
-  }
+  mergeGroups(acc.cpuGroupMap, p.cpuGroups || [], p.frames);
+  mergeGroups(acc.schedGroupMap, p.schedGroups || [], p.frames);
   // Off-CPU split: in-poll blocking groups + in-poll/idle counts + per-loc attribution.
   acc.offCpuInPollCount += p.offCpuInPollCount || 0;
   acc.offCpuIdleCount += p.offCpuIdleCount || 0;
-  for (const g of (p.inPollGroups || [])) {
-    const key = g.frames.map(f => f.symbol).join('\0');
-    const e = acc.inPollGroupMap.get(key);
-    if (e) e.count += g.count; else acc.inPollGroupMap.set(key, { ...g });
-  }
+  mergeGroups(acc.inPollGroupMap, p.inPollGroups || [], p.frames);
   for (const { loc, count } of (p.inPollByLoc || [])) {
     acc.inPollByLocMap.set(loc, (acc.inPollByLocMap.get(loc) || 0) + count);
   }
@@ -962,6 +949,43 @@ function mergePartial(acc, p) {
 // ── Worker modes (invoked as subprocesses) ──
 
 function mapToEntries(m) { return m instanceof Map ? [...m.entries()] : m; }
+
+/**
+ * Collects the distinct frames of the worker's stack groups into one table and
+ * rewrites each group's `frames` as `frameIds`, indices into that table.
+ * Written in full, each frame repeats once per stack that contains it, which on
+ * a busy trace passes V8's maximum string length. `mergeGroups` expands them.
+ */
+function createFrameTable() {
+  const frames = [];
+  const ids = new Map(); // symbol -> location -> index into frames
+  function idOf(frame) {
+    let byLocation = ids.get(frame.symbol);
+    if (!byLocation) { byLocation = new Map(); ids.set(frame.symbol, byLocation); }
+    let id = byLocation.get(frame.location);
+    if (id === undefined) {
+      id = frames.length;
+      frames.push(frame);
+      byLocation.set(frame.location, id);
+    }
+    return id;
+  }
+  return {
+    frames,
+    encode: groups => groups.map(({ frames: groupFrames, ...rest }) => ({ ...rest, frameIds: groupFrames.map(idOf) })),
+  };
+}
+
+/** Merges a partial's stack groups into `map`, expanding their `frameIds`. */
+function mergeGroups(map, groups, frames) {
+  for (const { frameIds, ...g } of groups) {
+    g.frames = frameIds.map(i => frames[i]);
+    // Key by full stack to avoid merging unrelated stacks with same leaf
+    const key = g.frames.map(f => f.symbol).join('\0');
+    const e = map.get(key);
+    if (e) e.count += g.count; else map.set(key, g);
+  }
+}
 
 async function parseWorkerMain(traceFile, cachePath) {
   const trace = await parseTrace(fs.readFileSync(traceFile));
@@ -1060,6 +1084,7 @@ function analyzeWorkerMain(cachePath) {
   const onCpu = trace.cpuSamples.filter(s => s.source === 0);
   const offCpu = trace.cpuSamples.filter(s => s.source === 1);
   const offCpuSplit = groupOffCpuSamples(offCpu, trace.callframeSymbols);
+  const frameTable = createFrameTable();
 
   const partial = {
     workerIds: wids, minTs, maxTs,
@@ -1077,10 +1102,11 @@ function analyzeWorkerMain(cachePath) {
     taskSpawnTimes: mapToEntries(trace.taskSpawnTimes),
     taskTerminateTimes: mapToEntries(trace.taskTerminateTimes),
     callframeSymbols: mapToEntries(trace.callframeSymbols),
-    cpuGroups: deduplicateSamples(onCpu, trace.callframeSymbols),
-    schedGroups: deduplicateSamples(offCpu, trace.callframeSymbols),
+    cpuGroups: frameTable.encode(deduplicateSamples(onCpu, trace.callframeSymbols)),
+    schedGroups: frameTable.encode(deduplicateSamples(offCpu, trace.callframeSymbols)),
     // Off-CPU split: in-poll = real blocking, idle = parked with no work.
-    inPollGroups: offCpuSplit.inPollGroups,
+    inPollGroups: frameTable.encode(offCpuSplit.inPollGroups),
+    frames: frameTable.frames,
     offCpuInPollCount: offCpuSplit.inPollCount,
     offCpuIdleCount: offCpuSplit.idleCount,
     inPollByLoc: offCpuSplit.inPollByLoc,
