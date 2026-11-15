@@ -86,6 +86,28 @@ function argVal(flag, def) {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def;
 }
 
+/**
+ * Counts, by name, the `tracing` spans that ran during the poll `[start, end]`
+ * on worker `w`, including ones entered before it and still open. Returns null
+ * when the trace has no `tracing` spans at all.
+ */
+function innerSpanCounts(trace, workerSpans, { w, start, end }) {
+  if (!trace.customEvents || trace.customEvents.length === 0) return null;
+  // The worker spans let buildSpanData place each span on the workers whose
+  // polls ran it. Without them, spans from current producers carry no worker.
+  const { allSpans } = buildSpanData(trace.customEvents, workerSpans, trace.tidBindings, trace.blockInPlaceGaps);
+  // Single-event spans (`spanType` set) are records, not `tracing` spans.
+  const tracingSpans = allSpans.filter((s) => s.spanType == null);
+  if (tracingSpans.length === 0) return null;
+  const by = {};
+  for (const s of tracingSpans) {
+    if (s.segments.some((seg) => seg.workerId === w && seg.start >= start && seg.end <= end)) {
+      by[s.spanName] = (by[s.spanName] || 0) + 1;
+    }
+  }
+  return by;
+}
+
 async function main() {
   const dir = process.argv[2];
   const centerMs = parseFloat(process.argv[3]);
@@ -216,18 +238,10 @@ async function main() {
 
     // ── Inner spans of the dominant (longest) poll, if tracing layer present ──
     const dominant = rows.filter((r) => r.durMs > 1).sort((a, b) => b.durMs - a.durMs)[0];
-    if (dominant) {
-      let spanData = null;
-      try { spanData = buildSpanData(trace.customEvents); } catch (_) { /* no tracing layer */ }
-      if (spanData && spanData.allSpans && spanData.allSpans.length) {
-        const inner = spanData.allSpans.filter((s) =>
-          s.segments.some((seg) => seg.workerId === dominant.w && seg.start >= dominant.start && seg.end <= dominant.end)
-        );
-        const by = {};
-        for (const s of inner) by[s.spanName] = (by[s.spanName] || 0) + 1;
-        const summary = Object.entries(by).map(([n, c]) => `${n}×${c}`).join(", ") || "(none)";
-        console.log(`\ninner tracing spans of dominant ${dominant.durMs.toFixed(1)}ms poll (task ${dominant.task}): ${summary}`);
-      }
+    const by = dominant && innerSpanCounts(trace, spans.workerSpans, dominant);
+    if (by) {
+      const summary = Object.entries(by).map(([n, c]) => `${n}×${c}`).join(", ") || "(none)";
+      console.log(`\ninner tracing spans of dominant ${dominant.durMs.toFixed(1)}ms poll (task ${dominant.task}): ${summary}`);
     }
 
     // ── Viewer deep link for this window ──
@@ -243,3 +257,5 @@ async function main() {
 if (require.main === module) {
   main().catch((e) => { console.error(e); process.exit(1); });
 }
+
+module.exports = { innerSpanCounts };
