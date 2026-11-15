@@ -67,6 +67,44 @@ const { activeTaskSeries, buildWorkerSpans, attachCpuSamples, buildActiveTaskTim
  *  into a single count line. */
 const LONG_POLL_REPORT_LIMIT = 5;
 
+/** Check 7, over the CPU time of each worker's active periods. */
+function cpuContentionChecks(trace, workerIds, workerSpans) {
+  // An active period's CPU ratio comes from the thread CPU time on its unpark
+  // and park events. A worker whose events carry none has every ratio at 0.
+  const timed = new Set();
+  for (const e of trace.events) {
+    if ((e.eventType === EVENT_TYPES.WorkerPark || e.eventType === EVENT_TYPES.WorkerUnpark) && e.cpuTime > 0) {
+      timed.add(e.workerId);
+    }
+  }
+  const findings = [];
+  let untimed = 0;
+  for (const w of workerIds) {
+    const actives = workerSpans[w].actives;
+    if (actives.length > 10) {
+      if (!timed.has(w)) { untimed++; continue; }
+      const lowRatio = actives.filter(a => a.ratio < 0.5 && (a.end - a.start) > 1e6);
+      if (lowRatio.length > actives.length * 0.1) {
+        const avgRatio = lowRatio.reduce((s, a) => s + a.ratio, 0) / lowRatio.length;
+        findings.push({
+          severity: 'warning',
+          check: 'cpu-contention',
+          message: `Worker ${w}: ${lowRatio.length}/${actives.length} active periods have CPU ratio < 0.5 (avg ${avgRatio.toFixed(2)}) — kernel is descheduling this worker`,
+        });
+      }
+    }
+  }
+  // Say so, or "no red flags" would read as "no contention".
+  if (untimed > 0) {
+    findings.push({
+      severity: 'info',
+      check: 'cpu-contention',
+      message: `Not checked for ${untimed} worker(s): their park/unpark events carry no thread CPU time (only Linux and Android record it)`,
+    });
+  }
+  return findings;
+}
+
 /** Checks 9-11, over the spans the tracing layer recorded. */
 function spanChecks(trace, workerIds, workerSpans) {
   const findings = [];
@@ -258,20 +296,7 @@ async function redFlagScan(tracePath) {
     }
 
     // 7. Low CPU utilization during active periods
-    for (const w of workerIds) {
-      const actives = spans.workerSpans[w].actives;
-      if (actives.length > 10) {
-        const lowRatio = actives.filter(a => a.ratio < 0.5 && (a.end - a.start) > 1e6);
-        if (lowRatio.length > actives.length * 0.1) {
-          const avgRatio = lowRatio.reduce((s, a) => s + a.ratio, 0) / lowRatio.length;
-          findings.push({
-            severity: 'warning',
-            check: 'cpu-contention',
-            message: `Worker ${w}: ${lowRatio.length}/${actives.length} active periods have CPU ratio < 0.5 (avg ${avgRatio.toFixed(2)}) — kernel is descheduling this worker`,
-          });
-        }
-      }
-    }
+    for (const f of cpuContentionChecks(trace, workerIds, spans.workerSpans)) findings.push(f);
 
     // 8. Kernel scheduling wait on unpark
     for (const w of workerIds) {
@@ -315,4 +340,4 @@ if (require.main === module) {
   redFlagScan(process.argv[2] || 'trace.bin').catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { redFlagScan, spanChecks };
+module.exports = { redFlagScan, spanChecks, cpuContentionChecks };
