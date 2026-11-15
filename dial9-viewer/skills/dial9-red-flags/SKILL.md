@@ -38,6 +38,7 @@ Poll counts differ by more than 3x across workers. Work-stealing may not be dist
 
 ### cpu-contention
 Workers are active but spending less than 50% of wall time on CPU. The kernel is descheduling them due to CPU contention.
+Needs the thread CPU time on park/unpark events, which only Linux and Android record; without it the scan reports the check as not run.
 
 ### kernel-sched-wait
 Worker unpark takes more than 1ms of kernel scheduling wait. Indicates CPU contention at the OS level.
