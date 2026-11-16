@@ -275,7 +275,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// fn my_config() -> io::Result<AttachedRuntime> {
 ///     let writer = DiskBuffer::builder()
-///         .base_path("/tmp/traces")
+///         .base_path("/var/tmp/traces")
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
 ///         .expect("writer build failed");
