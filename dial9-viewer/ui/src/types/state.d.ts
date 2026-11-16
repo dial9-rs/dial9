@@ -405,6 +405,11 @@ export interface UiPrefsSlice {
   selectedSpanNames: ReadonlySet<string>;
   selectedEventNames: ReadonlySet<string>;
   /**
+   * Hidden-by-default custom-event names (e.g. ProcessResourceUsageEvent) the
+   * user revealed. Applies only while selectedEventNames is empty.
+   */
+  revealedEventNames: ReadonlySet<string>;
+  /**
    * Span filter text: case-insensitive substring over span name or field
    * key/value. Empty string = no text filter. AND-combined with the name
    * chips and the percentile filter (spanMatchesFilter). Lives in the store

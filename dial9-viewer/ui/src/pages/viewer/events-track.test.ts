@@ -16,15 +16,18 @@ import { describe, it, expect } from "vitest";
 import { createViewerStore } from "./store.js";
 import {
   computeEventTrackData,
+  eventChipClick,
   selectClusterMember,
   type EventDrawBucket,
 } from "./events-model.js";
 import {
+  createEventsTrack,
   dispatchEventPin,
   dispatchHoverEvent,
   drawEventsCanvas,
 } from "./events-track.js";
 import type { EventRenderModel } from "./events-model.js";
+import type { TrackSpec } from "../../lib/canvas/track-layout.js";
 import type {
   CustomTraceEvent,
   ParsedTrace,
@@ -218,6 +221,7 @@ function twoClusterModel(): EventRenderModel {
     buckets: [bucket([ev("a", 10)], 1, 10), bucket([ev("b", 50)], 2, 50)],
     info: "2 events · 2 markers",
     emptyReason: null,
+    hiddenInView: 0,
   };
 }
 
@@ -248,7 +252,7 @@ describe("drawEventsCanvas dimming", () => {
     const { ctx, texts } = recordingCtx();
     drawEventsCanvas(
       ctx,
-      { buckets: [], info: "", emptyReason: "no-events" },
+      { buckets: [], info: "", emptyReason: "no-events", hiddenInView: 0 },
       null,
       100,
       40,
@@ -256,6 +260,22 @@ describe("drawEventsCanvas dimming", () => {
       false,
     );
     expect(texts).toContain("No custom events");
+  });
+
+  it("explains an empty view caused only by hidden-by-default events", () => {
+    const { ctx, texts } = recordingCtx();
+    drawEventsCanvas(
+      ctx,
+      { buckets: [], info: "", emptyReason: "no-visible", hiddenInView: 3 },
+      null,
+      100,
+      40,
+      false,
+      false,
+    );
+    expect(texts).toContain(
+      "No events in view (3 hidden by default; click a dashed chip to show)",
+    );
   });
 });
 
@@ -293,5 +313,77 @@ describe("event-data derived cache", () => {
     expect([...second.order].map((row) => second.store.at(row)!.name)).toEqual([
       "real",
     ]);
+  });
+});
+
+// ── 5. Screen-reader status for the name filter ──────────────────────────
+
+type Tpl = { strings: readonly string[]; values: readonly unknown[] };
+
+/** Depth-first search of a lit TemplateResult tree (through nested templates
+ *  and arrays) for the template whose static markup contains `needle`. */
+function findResult(tpl: unknown, needle: string): Tpl | null {
+  if (Array.isArray(tpl)) {
+    for (const v of tpl) {
+      const hit = findResult(v, needle);
+      if (hit !== null) return hit;
+    }
+    return null;
+  }
+  const t = tpl as Partial<Tpl> | null;
+  if (t === null || typeof t !== "object" || t.strings === undefined) return null;
+  if (t.strings.join("").includes(needle)) return t as Tpl;
+  return findResult(t.values ?? [], needle);
+}
+
+describe("events legend live region", () => {
+  const TRACK = { id: "events", label: "events", height: 60 } as TrackSpec;
+  const RESOURCE = "ProcessResourceUsageEvent";
+
+  function statusText(track: ReturnType<typeof createEventsTrack>): string {
+    const region = findResult(track.rowTemplate(TRACK), "d9-events-status");
+    expect(region).not.toBeNull();
+    const markup = region!.strings.join("");
+    expect(markup).toContain('role="status"');
+    expect(markup).toContain('aria-live="polite"');
+    const text = region!.values.filter((v): v is string => typeof v === "string");
+    expect(text).toHaveLength(1);
+    return text[0]!;
+  }
+
+  it("announces hiding and revealing resource events, and silent viewport changes", () => {
+    const store = testStore();
+    store.update("trace", { trace: fakeTrace([ev(RESOURCE, 10), ev("a", 20)]) });
+    const track = createEventsTrack(store);
+    expect(statusText(track)).toBe(
+      `Showing all events except ${RESOURCE} (hidden by default)`,
+    );
+
+    // A viewport change leaves the text alone, so nothing is re-announced.
+    store.update("viewport", { viewStart: 5, viewEnd: 15 });
+    expect(statusText(track)).toBe(
+      `Showing all events except ${RESOURCE} (hidden by default)`,
+    );
+
+    const reveal = () => {
+      const { selectedEventNames, revealedEventNames } = store.getState().uiPrefs;
+      store.update("uiPrefs", eventChipClick(RESOURCE, selectedEventNames, revealedEventNames));
+    };
+    reveal();
+    expect(statusText(track)).toBe("Showing all events");
+    reveal();
+    expect(statusText(track)).toBe(
+      `Showing all events except ${RESOURCE} (hidden by default)`,
+    );
+
+    store.update("uiPrefs", eventChipClick("a", new Set(), new Set()));
+    expect(statusText(track)).toBe("Showing only a events");
+  });
+
+  it("renders no live region when the trace has no custom events", () => {
+    const store = testStore();
+    store.update("trace", { trace: fakeTrace([]) });
+    const track = createEventsTrack(store);
+    expect(findResult(track.rowTemplate(TRACK), "d9-events-status")).toBeNull();
   });
 });
