@@ -186,6 +186,30 @@ export function eventChipClick(
   return { selectedEventNames: toggle(selectedNames), revealedEventNames: new Set() };
 }
 
+/**
+ * Screen-reader summary of the name-chip filter, for the events legend's live
+ * region. Derived from the filter state and the trace's event names only,
+ * never the viewport, so panning and zooming stay silent. A selected name the
+ * trace lacks (from a shared URL) is left out, matching the chips.
+ */
+export function eventFilterStatus(
+  eventNames: readonly string[],
+  selectedNames: ReadonlySet<string>,
+  revealedNames: ReadonlySet<string>,
+): string {
+  if (selectedNames.size > 0) {
+    const shown = eventNames.filter((n) => selectedNames.has(n));
+    return shown.length > 0
+      ? `Showing only ${shown.join(", ")} events`
+      : "Showing no events: no selected event name is in this trace";
+  }
+  const hidden = eventNames.filter((n) => isEventHiddenByDefault(n) && !revealedNames.has(n));
+  if (hidden.length > 0) {
+    return `Showing all events except ${hidden.join(", ")} (hidden by default)`;
+  }
+  return "Showing all events";
+}
+
 // ── Visibility window (binary-searched at both edges) ────────────────────
 
 /**

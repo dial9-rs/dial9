@@ -41,6 +41,7 @@ import {
   eventHighlightTask,
   eventChipClick,
   eventChipState,
+  eventFilterStatus,
   isSameCluster,
   resolveTaskForEvent,
   EVENT_DIM_FACTOR,
@@ -250,6 +251,11 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
         <div class="d9-track-body d9-events-body">
           ${hasEvents
             ? legendTemplate(data, selectedNames, s.uiPrefs.revealedEventNames)
+            : nothing}
+          ${hasEvents
+            ? html`<span class="d9-sr-only d9-events-status" role="status" aria-live="polite"
+                >${eventFilterStatus(data.eventNames, selectedNames, s.uiPrefs.revealedEventNames)}</span
+              >`
             : nothing}
           <div class="d9-events-canvas-wrap">
             <canvas

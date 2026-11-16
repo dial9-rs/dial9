@@ -20,6 +20,7 @@ import {
   eventHighlightTask,
   eventChipClick,
   eventChipState,
+  eventFilterStatus,
   eventMatchesFilter,
   filterVisibleEvents,
   isSameCluster,
@@ -513,5 +514,30 @@ describe("cluster browsing", () => {
     expect(second.start).toBe(100);
     expect(last).toMatchObject({ start: 200, page: 2, pages: 3 });
     expect(eventClusterPage({ ...pinned, clusterPage: 99 }).page).toBe(2);
+  });
+});
+
+describe("eventFilterStatus", () => {
+  const R = "ProcessResourceUsageEvent";
+  const none = new Set<string>();
+
+  it("names the hidden-by-default events until they are revealed", () => {
+    expect(eventFilterStatus([R, "a"], none, none)).toBe(
+      `Showing all events except ${R} (hidden by default)`,
+    );
+    expect(eventFilterStatus([R, "a"], none, new Set([R]))).toBe("Showing all events");
+  });
+
+  it("reads plainly when the trace has no hidden-by-default events", () => {
+    expect(eventFilterStatus(["a"], none, none)).toBe("Showing all events");
+  });
+
+  it("lists selected names in chip order, ignoring names the trace lacks", () => {
+    expect(eventFilterStatus(["a", "b", "c"], new Set(["c", "a", "zz"]), none)).toBe(
+      "Showing only a, c events",
+    );
+    expect(eventFilterStatus(["a"], new Set(["zz"]), none)).toBe(
+      "Showing no events: no selected event name is in this trace",
+    );
   });
 });
