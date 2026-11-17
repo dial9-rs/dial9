@@ -74,7 +74,8 @@ function setup() {
   canvas.clientWidth = 100;
   const cursor = new FakeElement();
   const cursorLabel = new FakeElement();
-  const body = Object.assign(new FakeElement(), { scrollTop: 0 });
+  const body = Object.assign(new FakeElement(["#heatmap-view"]), { scrollTop: 0 });
+  const labels = new FakeElement(["#heatmap-view"]);
   const els = {
     heatmapPlot: plot,
     heatmapCanvas: canvas,
@@ -82,6 +83,7 @@ function setup() {
     heatmapCursorLabel: cursorLabel,
     heatmapResetZoom: new FakeElement(),
     heatmapBody: body,
+    heatmapLabels: labels,
   } as unknown as BrowserEls;
 
   const store = createBrowserStore();
@@ -115,7 +117,9 @@ function setup() {
   } as unknown as BrowserActions;
 
   mountHeatmapInteraction({ store, els, actions });
-  return { win, doc, plot, body, cursor, cursorLabel, store, actions, setHeatmapSelection };
+  return {
+    win, doc, plot, body, labels, cursor, cursorLabel, store, actions, setHeatmapSelection,
+  };
 }
 
 /** Drag across the plot and release, committing a region selection. */
@@ -194,6 +198,87 @@ describe("heatmap pointer interaction", () => {
 
     expect(store.getState().browse.selection).toBe(SELECTION);
     expect(setHeatmapSelection).not.toHaveBeenCalled();
+  });
+  // Regression (#1126): the timeline body fills the pane, so the blank area
+  // below the last host row is inside #heatmap-view. Clicking that blank
+  // area is a click-away and must clear.
+  it.each(["body", "labels"] as const)(
+    "clears the selection when the blank %s area below the rows is clicked",
+    (which) => {
+      const handles = setup();
+      const { win, doc, plot, store } = handles;
+      dragSelect(plot, win);
+      doc.dispatch("click", { target: new FakeElement() });
+      expect(store.getState().browse.selection).toBe(SELECTION);
+
+      doc.dispatch("mousedown", { target: handles[which] });
+      doc.dispatch("click", { target: handles[which] });
+
+      expect(store.getState().browse.selection).toBeNull();
+    },
+  );
+
+  it("clears the selection on a double-click in the blank body area", () => {
+    const { win, doc, plot, body, store } = setup();
+    dragSelect(plot, win);
+    doc.dispatch("click", { target: new FakeElement() });
+
+    for (let i = 0; i < 2; i++) {
+      doc.dispatch("mousedown", { target: body });
+      doc.dispatch("click", { target: body });
+    }
+
+    expect(store.getState().browse.selection).toBeNull();
+  });
+
+  // A press released over a different child of the timeline dispatches its
+  // click on the shared ancestor (the body or the label column). Such a click
+  // did not start on the blank area, so it must keep the selection.
+  it.each([
+    ["the plot", "body"],
+    ["the label resizer", "body"],
+    ["a host label", "labels"],
+  ] as const)("keeps the selection when a press on %s is released over the %s", (_, which) => {
+    const handles = setup();
+    const { win, doc, plot, store, setHeatmapSelection } = handles;
+    dragSelect(plot, win);
+    doc.dispatch("click", { target: new FakeElement() });
+
+    doc.dispatch("mousedown", { target: new FakeElement(["#heatmap-view"]) });
+    doc.dispatch("click", { target: handles[which] });
+
+    expect(store.getState().browse.selection).toBe(SELECTION);
+    expect(setHeatmapSelection).not.toHaveBeenCalled();
+  });
+
+  // The full plot path: a click-select whose release slips onto the blank
+  // body dispatches its click on the body; the new selection must survive.
+  it("keeps a plot click-selection whose release lands on the blank body", () => {
+    const { win, doc, plot, body, store, actions, setHeatmapSelection } = setup();
+    vi.mocked(actions.selectSegmentAt).mockImplementation(() => {
+      store.update("browse", { selection: SELECTION });
+    });
+    const canvasTarget = new FakeElement(["#heatmap-view"]);
+    doc.dispatch("mousedown", { target: canvasTarget });
+    plot.dispatch("mousedown", {
+      clientX: 50, clientY: 24, altKey: false, preventDefault: vi.fn(),
+    });
+    win.dispatch("mouseup", { clientX: 50, clientY: 27 });
+    doc.dispatch("click", { target: body });
+
+    expect(actions.selectSegmentAt).toHaveBeenCalled();
+    expect(store.getState().browse.selection).toBe(SELECTION);
+    expect(setHeatmapSelection).not.toHaveBeenCalled();
+  });
+
+  it("keeps the selection when the host filter controls are clicked", () => {
+    const { win, doc, plot, store } = setup();
+    dragSelect(plot, win);
+    doc.dispatch("click", { target: new FakeElement() });
+
+    doc.dispatch("click", { target: new FakeElement(["#heatmap-view"]) });
+
+    expect(store.getState().browse.selection).toBe(SELECTION);
   });
 });
 
