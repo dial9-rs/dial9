@@ -205,6 +205,76 @@ describe("prefix scope", () => {
     expect(els.prefixInput.value).toBe("dial9-traces");
   });
 
+  it.each([
+    {
+      name: "omits an implicit server-default bucket but keeps a typed prefix",
+      fromServerDefault: true,
+      prefixFromBucketDiscovery: false,
+      bucket: null,
+      prefix: "dial9-traces",
+    },
+    {
+      name: "omits an implicit server-default bucket and its discovered prefix",
+      fromServerDefault: true,
+      prefixFromBucketDiscovery: true,
+      bucket: null,
+      prefix: null,
+    },
+    {
+      name: "serializes an explicit bucket and its discovered prefix",
+      fromServerDefault: false,
+      prefixFromBucketDiscovery: true,
+      bucket: "traces-bucket",
+      prefix: "dial9-traces",
+    },
+  ])(
+    "$name from the URL",
+    ({ fromServerDefault, prefixFromBucketDiscovery, bucket, prefix }) => {
+      const replaceState = stubUrlEnv();
+      const store = createBrowserStore();
+      const els = browserEls("");
+      Object.assign(els, { credsRegion: input() });
+      store.update("form", {
+        bucketFromServerDefault: fromServerDefault,
+        prefixFromBucketDiscovery,
+      });
+      const actions = createActions(store, els);
+
+      actions.syncUrl();
+
+      const url = String(replaceState.mock.calls.at(-1)?.[2]);
+      const params = new URL(url, "http://x").searchParams;
+      expect(params.get("bucket")).toBe(bucket);
+      expect(params.get("prefix")).toBe(prefix);
+      // The page keeps browsing the source even when it stays out of the URL.
+      expect(store.getState().source.bucket).toBe("traces-bucket");
+      expect(els.prefixInput.value).toBe("dial9-traces");
+    },
+  );
+
+  it.each([
+    { name: "clears a discovered prefix", discover: true, expected: "" },
+    { name: "keeps a typed prefix", discover: false, expected: "dial9-traces" },
+  ])("$name when its bucket is dropped", async ({ discover, expected }) => {
+    const { store, els, actions } = setup();
+    if (discover) {
+      els.prefixInput.value = "";
+      await actions.discoverPrefixes();
+      expect(els.prefixInput.value).toBe("dial9-traces");
+      expect(store.getState().form.prefixFromBucketDiscovery).toBe(true);
+    } else {
+      actions.mirrorPrefix();
+      store.update("search", { suggestions: ["dial9-traces"] });
+    }
+
+    actions.dropBucketDiscoveredPrefix();
+
+    expect(els.prefixInput.value).toBe(expected);
+    expect(store.getState().form.prefix).toBe(expected);
+    expect(store.getState().form.prefixFromBucketDiscovery).toBe(false);
+    expect(store.getState().search.suggestions).toEqual([]);
+  });
+
   it("lists empty-result sample keys under the search prefix", async () => {
     const { actions, urls } = setup("checkout-api");
 

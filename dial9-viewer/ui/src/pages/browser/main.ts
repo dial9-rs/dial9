@@ -192,8 +192,9 @@ function boot(): void {
         store.update("config", { bucketFilter: config.bucket_filter });
       }
       if (config.supports_byo_credentials) credsPanel.init();
-      // Server defaults (bucket/prefix) were filled programmatically above;
-      // reflect them in the URL so the link is complete.
+      // Reflect explicit and server-configured prefixes in the URL. An
+      // implicit server-default bucket and its discovered prefix stay out:
+      // a reload resolves both from /api/config and bucket discovery again.
       actions.syncUrl();
       // If we're restoring a bucket with credentials but no region pinned
       // in the URL, detect it before discovery/search so the first signed

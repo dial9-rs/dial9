@@ -37,16 +37,17 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   });
 
   // A service and its results belong to the previous prefix. Invalidate
-  // them on edits and chip clicks so Search discovers the new scope.
-  function syncEditedPrefix(): void {
+  // them on edits and chip clicks so Search discovers the new scope. A chip
+  // is a prefix discovered in the current bucket; a typed prefix is not.
+  function syncEditedPrefix(fromBucketDiscovery = false): void {
     const changed = store.getState().form.prefix.trim() !== els.prefixInput.value.trim();
-    actions.mirrorPrefix();
+    actions.mirrorPrefix(fromBucketDiscovery);
     if (changed) actions.resetBrowsePane();
     else actions.syncUrl();
   }
 
   // Prefix edits gate the Search button and ride the URL.
-  els.prefixInput.addEventListener("input", syncEditedPrefix);
+  els.prefixInput.addEventListener("input", () => syncEditedPrefix());
 
   // Quick-range buttons.
   for (const btn of els.quickBtns) {
@@ -102,7 +103,7 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
         btn.style.cssText = "font-size:0.75em;padding:2px 8px";
         btn.addEventListener("click", () => {
           els.prefixInput.value = label;
-          syncEditedPrefix();
+          syncEditedPrefix(true);
           store.update("search", { activeSuggestion: label });
         });
         els.prefixSuggestions.appendChild(btn);

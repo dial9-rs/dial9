@@ -64,9 +64,10 @@ export const ROW_H = 26;
 export interface BrowserActions {
   syncUrl(historyMode?: "replace" | "push"): void;
   setRestoring(on: boolean): void;
-  mirrorPrefix(): void;
+  mirrorPrefix(fromBucketDiscovery?: boolean): void;
   requestPrefix(): string;
   resetPrefixForBucketChange(previous: string, next: string): void;
+  dropBucketDiscoveredPrefix(): void;
   setQuickRange(hours: number): void;
   clearQuickRange(): void;
   switchTab(tab: "browse" | "raw"): void;
@@ -146,13 +147,19 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
     const s = store.getState();
     const state: UrlStateFields = {
-      bucket: source.bucket,
+      // A server-default source stays implicit: on reload /api/config
+      // supplies the bucket again and discovery resolves its prefix. A typed,
+      // URL, or server-configured prefix remains explicit.
+      bucket: s.form.bucketFromServerDefault ? "" : source.bucket,
       region: source.region,
       credentialMode: source.credentials.kind,
       ...(source.credentials.kind === "role"
         ? { roleArn: source.credentials.roleArn }
         : {}),
-      prefix: els.prefixInput.value.trim(),
+      prefix:
+        s.form.bucketFromServerDefault && s.form.prefixFromBucketDiscovery
+          ? ""
+          : els.prefixInput.value.trim(),
       service: els.serviceInput.value.trim(),
       tab: s.ui.tab,
       tz: s.ui.useLocalTz ? "local" : "utc",
@@ -203,8 +210,12 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     );
   }
 
-  function mirrorPrefix(): void {
-    store.update("form", { prefix: els.prefixInput.value });
+  // Mirror the prefix input and record whether bucket discovery chose it.
+  function mirrorPrefix(fromBucketDiscovery = false): void {
+    store.update("form", {
+      prefix: els.prefixInput.value,
+      prefixFromBucketDiscovery: fromBucketDiscovery,
+    });
   }
 
   // The key prefix sent with every source request: credential checks,
@@ -226,6 +237,15 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       mirrorPrefix();
     }
     store.update("search", { suggestions: [], activeSuggestion: null });
+  }
+
+  // Drop a prefix discovered in a bucket that is being dropped, with its
+  // suggestions. A typed or URL prefix is kept for the next bucket.
+  function dropBucketDiscoveredPrefix(): void {
+    store.update("search", { suggestions: [], activeSuggestion: null });
+    if (!store.getState().form.prefixFromBucketDiscovery) return;
+    els.prefixInput.value = "";
+    mirrorPrefix();
   }
 
   function setQuickRange(hours: number): void {
@@ -604,7 +624,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         const preferred = preferredPrefix(prefixes);
         if (preferred) {
           els.prefixInput.value = preferred;
-          mirrorPrefix();
+          mirrorPrefix(true);
           syncUrl();
         }
       }
@@ -1160,6 +1180,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       restoring = on;
     },
     mirrorPrefix,
+    dropBucketDiscoveredPrefix,
     requestPrefix,
     resetPrefixForBucketChange,
     setQuickRange,

@@ -374,6 +374,7 @@ describe("mountCredsPanel", () => {
         syncUrl: vi.fn(),
         canRerunCurrentSearch: vi.fn(() => false),
         resetPrefixForBucketChange: vi.fn(),
+        dropBucketDiscoveredPrefix: vi.fn(),
         resetBrowsePane: vi.fn(),
         discoverPrefixes: vi.fn(async () => {}),
         discoverServices: vi.fn(async () => {}),
@@ -428,6 +429,15 @@ describe("mountCredsPanel", () => {
         "dial9-traces",
       );
       expect(actions.resetBrowsePane).toHaveBeenCalledTimes(fromServerDefault ? 1 : 0);
+      // A prefix discovered in the server default goes before ListBuckets.
+      expect(actions.dropBucketDiscoveredPrefix).toHaveBeenCalledTimes(
+        fromServerDefault ? 1 : 0,
+      );
+      if (fromServerDefault) {
+        expect(
+          vi.mocked(actions.dropBucketDiscoveredPrefix).mock.invocationCallOrder[0],
+        ).toBeLessThan(listBuckets.mock.invocationCallOrder[0]!);
+      }
       expect(creds.setRegion).toHaveBeenCalledWith("eu-west-1");
       // The panel's own writes do not start a second discovery.
       expect(actions.discoverServices).toHaveBeenCalledOnce();
