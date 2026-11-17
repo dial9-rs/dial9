@@ -150,14 +150,13 @@ pub async fn check_credentials(
 
 /// The `ListObjectsV2` prefix for a scoped check, or `None` for a bucket-level
 /// check. The request prefix is combined with the server default exactly as
-/// `/api/browse` does, so a server default alone still scopes the check. The
-/// result gets a single trailing `/` so the listing stays inside that
-/// directory, matching the keys browse lists under it.
+/// `/api/browse` does, so a server default alone still scopes the check. Like
+/// browse's key joining, trailing separators collapse to a single `/` and a
+/// leading `/` is kept, so `/` is the real S3 prefix `/`.
 fn scoped_prefix(default_prefix: Option<&str>, requested: Option<&str>) -> Option<String> {
     let requested = requested.map(str::trim).filter(|p| !p.is_empty());
     let base = resolve_base(default_prefix, requested);
-    let base = base.trim_matches('/');
-    (!base.is_empty()).then(|| format!("{base}/"))
+    (!base.is_empty()).then(|| format!("{}/", base.trim_end_matches('/')))
 }
 
 /// Validate `temp` by listing at most one key under `prefix`.
@@ -385,10 +384,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::trims_space_and_slashes(None, Some(" /traces/svc/ "), Some("traces/svc/"))]
+    #[case::keeps_leading_slash(None, Some(" /traces/svc/ "), Some("/traces/svc/"))]
+    #[case::root_slash(None, Some("/"), Some("/"))]
     #[case::nests_under_server_default(Some("traces"), Some("svc"), Some("traces/svc/"))]
     #[case::already_under_server_default(Some("traces"), Some("traces/svc"), Some("traces/svc/"))]
-    #[case::server_default_alone(Some("/traces/"), Some(" "), Some("traces/"))]
+    #[case::server_default_alone(Some("/traces/"), Some(" "), Some("/traces/"))]
     #[case::absent(None, None, None)]
     #[case::only_slashes(Some("/"), Some("/"), None)]
     fn scoped_prefix_normalizes_and_composes(
