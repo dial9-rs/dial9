@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.8...dial9-v0.5.9) - 2026-11-17
+
+### Fixed
+
+- warn when DiskBuffer directory is on tmpfs and default trace dir to /var/tmp ([#1099](https://github.com/dial9-rs/dial9/pull/1099))
+- *(trace-format)* distinguish same-named event types ([#1118](https://github.com/dial9-rs/dial9/pull/1118))
+- *(viewer)* hide process resource events by default in the events pane ([#1125](https://github.com/dial9-rs/dial9/pull/1125))
+- *(viewer)* find the inner spans of zoom's dominant poll on current traces ([#1130](https://github.com/dial9-rs/dial9/pull/1130))
+- *(viewer)* skip the red-flag cpu-contention check without CPU time ([#1129](https://github.com/dial9-rs/dial9/pull/1129))
+- *(toolkit)* send each stack frame once from analyze workers ([#1128](https://github.com/dial9-rs/dial9/pull/1128))
+- *(viewer)* run the red-flag span checks on current traces ([#1127](https://github.com/dial9-rs/dial9/pull/1127))
+
+### Other
+
+- *(core)* keep batch headroom when re-arming the thread-local buffer ([#1135](https://github.com/dial9-rs/dial9/pull/1135))
+- Namespace aggregate caches by AWS account for explicit credentials ([#1121](https://github.com/dial9-rs/dial9/pull/1121))
+
 ## [0.5.8](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.7...dial9-v0.5.8) - 2026-11-05
 
 ### Added
