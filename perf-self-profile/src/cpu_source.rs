@@ -8,6 +8,7 @@
 
 use crate::sampler::DEFAULT_RING_BUFFER_BYTES;
 use crate::{ActiveCpuBackend, EventSource, PerfSampler, SamplerConfig, SamplingMode, sys};
+use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::rate_limited;
 use dial9_core::source::{FlushContext, Source};
@@ -64,6 +65,25 @@ struct CpuSampleEvent {
     /// Widened to `u64` on the wire so the field encodes as `OptionalVarint`:
     /// 1 byte when absent, typically 2 bytes (tag + small-varint) when present.
     cpu: Option<u64>,
+}
+
+// ── CpuSamplesLostEvent (wire format) ───────────────────────────────────────
+
+/// Samples a profiler dropped on full sample buffers, written by the flush
+/// that found them.
+#[derive(TraceEvent)]
+#[traceevent(wire_slot)]
+pub(crate) struct CpuSamplesLostEvent {
+    /// When the loss was found; the samples were dropped before this.
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+    /// The profiler that dropped them.
+    source: CpuSampleSource,
+    /// Samples dropped since the profiler's previous flush.
+    lost: u64,
+    /// Samples dropped since the profiler started.
+    #[traceevent(kind = "counter")]
+    total_lost: u64,
 }
 
 // ── Internal types ──────────────────────────────────────────────────────────
@@ -271,8 +291,8 @@ impl CpuProfilingConfig {
     }
 
     /// Size of each per-CPU perf ring buffer, in bytes. Default: 512 KiB. See
-    /// [`SamplerConfig::ring_buffer_size`]. Dropped samples are counted in the
-    /// `cpu.profile.lost_samples` segment metadata.
+    /// [`SamplerConfig::ring_buffer_size`]. Dropped samples are reported as
+    /// `CpuSamplesLostEvent`s in the trace.
     ///
     /// Ignored by [`Ctimer`](CpuBackend::Ctimer).
     pub fn ring_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
@@ -311,56 +331,52 @@ impl SchedEventConfig {
 
     /// Size of each tracked thread's perf ring buffer, in bytes. Default:
     /// 512 KiB. See [`SamplerConfig::ring_buffer_size`]. Dropped context
-    /// switches are counted in the `sched.profile.lost_samples` segment metadata.
+    /// switches are reported as `CpuSamplesLostEvent`s in the trace.
     pub fn ring_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
         self.ring_buffer_bytes = Some(bytes);
         self
     }
 }
 
-/// Running count of samples a profiler's buffers dropped, reported as a
-/// segment-metadata entry when it grows.
+/// Running count of samples a profiler's buffers dropped.
 #[derive(Debug, Default)]
 struct LostSamples {
     total: u64,
-    reported: u64,
-    last_report: Option<std::time::Instant>,
 }
 
-/// Minimum time between metadata reports: each one rewrites the segment
-/// metadata, and a ring that keeps overflowing changes the total every flush.
-const LOST_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
 impl LostSamples {
-    /// Add the samples `sampler` dropped since the last call. Call after a drain.
-    fn collect(&mut self, sampler: &mut PerfSampler, source: &'static str) {
-        let lost = sampler.take_lost_samples();
+    /// Add the samples `sampler` dropped since the last call and return the
+    /// event reporting them, if there were any. Call after a drain.
+    fn collect(
+        &mut self,
+        sampler: &mut PerfSampler,
+        source: CpuSampleSource,
+    ) -> Option<CpuSamplesLostEvent> {
+        self.record(sampler.take_lost_samples(), source)
+    }
+
+    fn record(&mut self, lost: u64, source: CpuSampleSource) -> Option<CpuSamplesLostEvent> {
         if lost == 0 {
-            return;
+            return None;
         }
         self.total = self.total.saturating_add(lost);
-        rate_limited!(std::time::Duration::from_secs(60), key = source, {
+        let name = match source {
+            CpuSampleSource::CpuProfile => "CPU",
+            CpuSampleSource::SchedEvent => "sched event",
+        };
+        rate_limited!(std::time::Duration::from_secs(60), key = name, {
             tracing::warn!(
-                "{source} profiler dropped {lost} samples: sample buffer filled before it was \
+                "{name} profiler dropped {lost} samples: sample buffer filled before it was \
                  flushed ({} dropped in total)",
                 self.total
             );
         });
-    }
-
-    /// Append the cumulative total under `key` if it changed since last
-    /// reported, at most once per [`LOST_REPORT_INTERVAL`].
-    fn segment_metadata(&mut self, key: &str, out: &mut Vec<(String, String)>) {
-        if self.total == self.reported
-            || self
-                .last_report
-                .is_some_and(|at| at.elapsed() < LOST_REPORT_INTERVAL)
-        {
-            return;
-        }
-        self.reported = self.total;
-        self.last_report = Some(std::time::Instant::now());
-        out.push((key.to_string(), self.total.to_string()));
+        Some(CpuSamplesLostEvent {
+            timestamp_ns: clock_monotonic_ns(),
+            source,
+            lost,
+            total_lost: self.total,
+        })
     }
 }
 
@@ -473,8 +489,12 @@ impl CpuProfiler {
     /// Drain all pending perf samples as raw (tid, callchain) tuples.
     ///
     /// Filters out child-process samples (perf `inherit` leaks them).
-    /// Eagerly caches thread names for non-worker tids.
-    pub(crate) fn drain(&mut self, mut f: impl FnMut(RawCpuSample, Option<&ThreadName>)) {
+    /// Eagerly caches thread names for non-worker tids. Returns the event
+    /// reporting samples dropped since the previous drain, if any.
+    pub(crate) fn drain(
+        &mut self,
+        mut f: impl FnMut(RawCpuSample, Option<&ThreadName>),
+    ) -> Option<CpuSamplesLostEvent> {
         let pid = self.pid;
         self.sampler.for_each_sample(|sample| {
             if sample.pid != pid {
@@ -498,8 +518,11 @@ impl CpuProfiler {
                 thread_name,
             );
         });
-        self.lost.collect(&mut self.sampler, "CPU");
+        let lost = self
+            .lost
+            .collect(&mut self.sampler, CpuSampleSource::CpuProfile);
         self.evict_stopped_names();
+        lost
     }
 
     /// Forget the names of threads that stopped before this drain; their last
@@ -516,7 +539,7 @@ impl CpuProfiler {
 
 impl Source for CpuProfiler {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
-        self.drain(|raw, thread_name| {
+        let lost = self.drain(|raw, thread_name| {
             // worker_id is always UNKNOWN; analysis attributes via tid.
             ctx.record_event(&CpuSampleData {
                 timestamp_nanos: raw.timestamp_nanos,
@@ -527,6 +550,9 @@ impl Source for CpuProfiler {
                 cpu: raw.cpu,
             });
         });
+        if let Some(lost) = lost {
+            ctx.record_event(&lost);
+        }
     }
 
     /// Perf samples the whole process, so this only matters for the ctimer
@@ -569,7 +595,6 @@ impl Source for CpuProfiler {
     }
 
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
-        self.lost.segment_metadata("cpu.profile.lost_samples", out);
         if self.metadata_emitted {
             return;
         }
@@ -688,7 +713,9 @@ impl SchedProfiler {
         self.sampler.stop_tracking_current_thread()
     }
 
-    pub(crate) fn drain(&mut self, mut f: impl FnMut(RawCpuSample)) {
+    /// Drain all pending context switches. Returns the event reporting
+    /// samples dropped since the previous drain, if any.
+    pub(crate) fn drain(&mut self, mut f: impl FnMut(RawCpuSample)) -> Option<CpuSamplesLostEvent> {
         self.sampler.for_each_sample(|sample| {
             self.samples_drained = self.samples_drained.saturating_add(1);
             f(RawCpuSample {
@@ -699,13 +726,14 @@ impl SchedProfiler {
                 cpu: sample.cpu,
             });
         });
-        self.lost.collect(&mut self.sampler, "sched event");
+        self.lost
+            .collect(&mut self.sampler, CpuSampleSource::SchedEvent)
     }
 }
 
 impl Source for SchedProfiler {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
-        self.drain(|raw| {
+        let lost = self.drain(|raw| {
             // worker_id left UNKNOWN; attributed by tid at analysis.
             ctx.record_event(&CpuSampleData {
                 timestamp_nanos: raw.timestamp_nanos,
@@ -716,6 +744,9 @@ impl Source for SchedProfiler {
                 cpu: raw.cpu,
             });
         });
+        if let Some(lost) = lost {
+            ctx.record_event(&lost);
+        }
     }
 
     fn on_thread_start(&mut self) -> io::Result<()> {
@@ -731,8 +762,6 @@ impl Source for SchedProfiler {
     }
 
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
-        self.lost
-            .segment_metadata("sched.profile.lost_samples", out);
         if self.metadata_emitted {
             return;
         }
@@ -750,30 +779,51 @@ impl Source for SchedProfiler {
 
 #[cfg(test)]
 mod lost_samples_tests {
-    use super::LostSamples;
+    use super::{CpuSampleSource, LostSamples};
+    use dial9_trace_format::decoder::{DecodedFrame, Decoder};
+    use dial9_trace_format::encoder::Encoder;
+    use dial9_trace_format::types::FieldValue;
 
     #[test]
-    fn metadata_reports_the_total_when_it_changes_at_most_once_per_interval() {
-        const KEY: &str = "sched.profile.lost_samples";
-        let report = |lost: &mut LostSamples| {
-            let mut out = Vec::new();
-            lost.segment_metadata(KEY, &mut out);
-            out
-        };
-        let entry = |total: &str| vec![(KEY.to_string(), total.to_string())];
+    fn each_loss_is_reported_with_the_running_total() {
         let mut lost = LostSamples::default();
+        let mut report = |n| {
+            lost.record(n, CpuSampleSource::SchedEvent)
+                .map(|event| (event.lost, event.total_lost))
+        };
 
-        assert_eq!(report(&mut lost), [], "nothing lost, nothing reported");
+        assert_eq!(report(0), None, "nothing lost, nothing reported");
+        assert_eq!(report(7), Some((7, 7)));
+        assert_eq!(report(0), None);
+        assert_eq!(report(2), Some((2, 9)));
+    }
 
-        lost.total = 7;
-        assert_eq!(report(&mut lost), entry("7"));
-        assert_eq!(report(&mut lost), [], "unchanged total reported again");
+    #[test]
+    fn lost_event_round_trips() {
+        let event = LostSamples { total: 4 }
+            .record(3, CpuSampleSource::SchedEvent)
+            .expect("a loss is reported");
+        let mut enc = Encoder::new();
+        enc.write(&event).unwrap();
+        let bytes = enc.finish();
 
-        lost.total = 9;
-        assert_eq!(report(&mut lost), [], "reported again within the interval");
-
-        lost.last_report = None;
-        assert_eq!(report(&mut lost), entry("9"));
+        let values = Decoder::new(&bytes)
+            .unwrap()
+            .decode_all()
+            .into_iter()
+            .find_map(|frame| match frame {
+                DecodedFrame::Event { values, .. } => Some(values),
+                _ => None,
+            })
+            .expect("event frame");
+        assert_eq!(
+            values,
+            [
+                FieldValue::Varint(CpuSampleSource::SchedEvent as u64),
+                FieldValue::Varint(3),
+                FieldValue::Varint(7),
+            ]
+        );
     }
 }
 

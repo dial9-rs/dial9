@@ -1,16 +1,52 @@
 //! A sched ring too small for the context switches between two flushes drops
-//! samples, and the profiler reports how many.
+//! samples, and the profiler reports how many in the trace.
 
 #![cfg(all(target_os = "linux", feature = "cpu-profiling"))]
 
 use dial9_core::buffer::MemoryBuffer;
 use dial9_core::recorder::recorder;
-use dial9_core::source::Source;
 use dial9_core::test_util::drain_encoded_batches;
 use dial9_perf_self_profile::{SchedEventConfig, SchedProfiler};
+use serde::Deserialize;
 use std::num::NonZeroUsize;
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "event")]
+enum DecodedEvent {
+    CpuSamplesLostEvent(DecodedLost),
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecodedLost {
+    /// `CpuSampleSource` on the wire: 1 = sched event.
+    source: u8,
+    lost: u64,
+    total_lost: u64,
+}
+
+fn lost_events(batches: &[Vec<u8>]) -> Vec<DecodedLost> {
+    let mut events = Vec::new();
+    for bytes in batches {
+        let mut decoder = dial9_trace_format::decoder::Decoder::new(bytes)
+            .expect("encoded batch should have a valid trace header");
+        decoder
+            .for_each_event(|raw| {
+                // Other event types decode to `Other`, so an error here is a
+                // decode failure.
+                if let DecodedEvent::CpuSamplesLostEvent(lost) =
+                    raw.deserialize().expect("event should deserialize")
+                {
+                    events.push(lost);
+                }
+            })
+            .expect("encoded batch should decode");
+    }
+    events
+}
 
 /// Deschedule the calling thread often enough to overflow a one-page ring,
 /// 64 KiB pages included: a context-switch record with its callchain is over
@@ -59,26 +95,30 @@ fn overflowing_ring_reports_lost_samples() {
     // The kernel writes the lost count with the next record that fits.
     context_switch_burst();
     shared.flush_sources();
-    drain_encoded_batches(&shared);
+    let events = lost_events(&drain_encoded_batches(&shared));
     drop(tracking);
 
-    let (metadata, samples_lost) = handle
-        .with_source::<SchedProfiler, _>(|sched| {
-            let mut out = Vec::new();
-            sched.segment_metadata(&mut out);
-            (out, sched.samples_lost())
-        })
+    let samples_lost = handle
+        .with_source::<SchedProfiler, _>(|sched| sched.samples_lost())
         .expect("sched source registered");
-    let reported = metadata
-        .iter()
-        .find(|(key, _)| key == "sched.profile.lost_samples")
-        .map(|(_, value)| value.parse::<u64>().expect("lost count is a number"));
 
     assert!(
         samples_lost > 0,
         "expected lost samples from a one-page ring"
     );
-    assert_eq!(reported, Some(samples_lost));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.source == 1 && event.lost > 0)
+    );
+    assert_eq!(
+        events.iter().map(|event| event.lost).sum::<u64>(),
+        samples_lost
+    );
+    assert_eq!(
+        events.last().map(|event| event.total_lost),
+        Some(samples_lost)
+    );
 
     rec.graceful_shutdown(Duration::ZERO);
 }
