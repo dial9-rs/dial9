@@ -42,6 +42,8 @@ declare module "*/creds.js" {
     region?: string;
     autoDetectRegion?: boolean;
     bucket?: string;
+    /** Validate access under this key prefix instead of the whole bucket. */
+    prefix?: string;
   }
 
   export interface CredentialCheckResult {

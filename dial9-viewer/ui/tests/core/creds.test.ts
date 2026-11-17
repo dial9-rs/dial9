@@ -39,7 +39,11 @@ const { Dial9Creds } = require("../../creds.js") as {
     has: () => boolean;
     get: () => (StoredCreds & { kind: string; roleArn?: string });
     set: (
-      creds: Partial<StoredCreds> & { bucket?: string; autoDetectRegion?: boolean },
+      creds: Partial<StoredCreds> & {
+        bucket?: string;
+        prefix?: string;
+        autoDetectRegion?: boolean;
+      },
     ) => Promise<SetResult>;
     check: (bucket?: string, opts?: { prefix?: string }) => Promise<SetResult>;
     setAmbient: () => { kind: "ambient" };
@@ -391,6 +395,37 @@ describe("Dial9Creds", () => {
         secretAccessKey: "SK",
         region: "us-west-2",
       });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("set() checks at the prefix and notifies once, after storing the region", async () => {
+    freshStore();
+    const regionsAtNotify: (string | undefined)[] = [];
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => ({
+      ok: true,
+      status: 200,
+      async json() { return { ok: true, region: "eu-west-1", error: null }; },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("CustomEvent", class {});
+    vi.stubGlobal("window", {
+      dispatchEvent: () => regionsAtNotify.push(Dial9Creds.get().region),
+    });
+    try {
+      const result = await Dial9Creds.set({
+        accessKeyId: "AK",
+        secretAccessKey: "SK",
+        bucket: "trace-bucket",
+        prefix: "traces/svc",
+      });
+      expect(result).toEqual({ ok: true, region: "eu-west-1", error: null });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(fetchMock.mock.calls[0]![0]).toBe(
+        "/api/credentials/check?bucket=trace-bucket&prefix=traces%2Fsvc",
+      );
+      expect(regionsAtNotify).toEqual(["eu-west-1"]);
     } finally {
       vi.unstubAllGlobals();
     }

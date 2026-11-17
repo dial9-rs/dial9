@@ -162,15 +162,12 @@ function boot(): void {
     .then((config) => {
       // The server's default bucket belongs to the server's identity. Don't
       // prefill it when the user has brought their own credentials - that
-      // bucket isn't theirs; they pick from their own buckets instead.
-      const credentials = store.getState().source.credentials;
-      const usingByoCreds =
-        credentials.kind === "role" ||
-        (credentials.kind === "literal" &&
-          credentials.accessKeyId !== "" &&
-          credentials.secretAccessKey !== "");
-      if (!els.bucketInput.value && config.default_bucket && !usingByoCreds) {
+      // bucket isn't theirs; they pick from their own buckets instead. Ask
+      // creds.js, not the boot-time source state: a userscript may have set
+      // credentials while /api/config was in flight.
+      if (!els.bucketInput.value && config.default_bucket && !Dial9Creds.has()) {
         els.bucketInput.value = config.default_bucket;
+        store.update("form", { bucketFromServerDefault: true });
       }
       if (config.default_prefix) {
         if (!els.prefixInput.value) els.prefixInput.value = config.default_prefix;

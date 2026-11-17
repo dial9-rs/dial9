@@ -335,7 +335,7 @@ describe("mountCredsPanel", () => {
   });
 
   describe("Apply", () => {
-    function setup(bucket: string, checkOk = true) {
+    function setup(bucket: string, checkOk = true, fromServerDefault = false) {
       let active = false;
       let changed: Listener | undefined;
       // Like creds.js, every write dispatches the change event synchronously.
@@ -374,6 +374,7 @@ describe("mountCredsPanel", () => {
         syncUrl: vi.fn(),
         canRerunCurrentSearch: vi.fn(() => false),
         resetPrefixForBucketChange: vi.fn(),
+        resetBrowsePane: vi.fn(),
         discoverPrefixes: vi.fn(async () => {}),
         discoverServices: vi.fn(async () => {}),
         requestPrefix: vi.fn(() => "traces/svc"),
@@ -381,6 +382,7 @@ describe("mountCredsPanel", () => {
       const store = createBrowserStore();
       const els = fakeEls();
       els.bucketInput.value = bucket;
+      store.update("form", { bucketFromServerDefault: fromServerDefault });
       mountCredsPanel({ store, els, actions }).init();
       els.credsAkid.value = "AK";
       els.credsSecret.value = "SK";
@@ -389,10 +391,27 @@ describe("mountCredsPanel", () => {
 
     it.each([
       // Credentials scoped to a supplied source may be denied ListBuckets.
-      { name: "checks a supplied bucket at the request prefix", bucket: "dial9-traces", lists: 0 },
-      { name: "lists buckets when no bucket is supplied", bucket: "", lists: 1 },
-    ])("$name", async ({ bucket, lists }) => {
-      const { els, actions, creds, check, listBuckets } = setup(bucket);
+      {
+        name: "checks a supplied bucket at the request prefix",
+        bucket: "dial9-traces",
+        fromServerDefault: false,
+        lists: 0,
+      },
+      { name: "lists buckets when no bucket is supplied", bucket: "", fromServerDefault: false, lists: 1 },
+      // The server default belongs to the ambient identity, even when the new
+      // credentials can also see it.
+      {
+        name: "lists buckets instead of checking a server-default bucket",
+        bucket: "dial9-traces",
+        fromServerDefault: true,
+        lists: 1,
+      },
+    ])("$name", async ({ bucket, fromServerDefault, lists }) => {
+      const { store, els, actions, creds, check, listBuckets } = setup(
+        bucket,
+        true,
+        fromServerDefault,
+      );
 
       els.credsApply.click();
       await drainMicrotasks();
@@ -401,6 +420,14 @@ describe("mountCredsPanel", () => {
       expect(check).toHaveBeenCalledOnce();
       expect(check).toHaveBeenCalledWith("dial9-traces", { prefix: "traces/svc" });
       expect(els.bucketInput.value).toBe("dial9-traces");
+      expect(store.getState().form.bucketFromServerDefault).toBe(false);
+      // A prefix entered before the first explicit bucket is kept for it;
+      // the server default's service and results are not.
+      expect(actions.resetPrefixForBucketChange).toHaveBeenCalledWith(
+        fromServerDefault ? "" : bucket,
+        "dial9-traces",
+      );
+      expect(actions.resetBrowsePane).toHaveBeenCalledTimes(fromServerDefault ? 1 : 0);
       expect(creds.setRegion).toHaveBeenCalledWith("eu-west-1");
       // The panel's own writes do not start a second discovery.
       expect(actions.discoverServices).toHaveBeenCalledOnce();

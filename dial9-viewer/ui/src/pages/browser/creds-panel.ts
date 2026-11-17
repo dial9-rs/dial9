@@ -91,6 +91,17 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     if (store.getState().ui.tab === "raw") actions.reRunCurrentSearch();
   }
 
+  // A server-default bucket belongs to the ambient identity, so drop it with
+  // its suggestions, service and results before another identity browses.
+  // A typed prefix stays for the first explicit bucket.
+  function dropServerDefaultBucket(): void {
+    if (!store.getState().form.bucketFromServerDefault) return;
+    els.bucketInput.value = "";
+    store.update("form", { bucketFromServerDefault: false });
+    store.update("search", { suggestions: [], activeSuggestion: null });
+    actions.resetBrowsePane();
+  }
+
   // Choose a bucket. ListBuckets normally supplies its region directly;
   // fall back to /api/credentials/check for compatible S3 implementations
   // that omit the newer BucketRegion field.
@@ -329,10 +340,11 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       setStatus("Filled from pasted JSON — review and click Apply", "ok");
     });
 
-    // Apply: store the credentials, then validate them. A supplied bucket is
+    // Apply: store the credentials, then validate them. An explicit bucket is
     // kept and checked at the request prefix, without ListBuckets (credentials
     // scoped to it may be denied that). Without one, listing the visible
-    // buckets validates them and powers the picker.
+    // buckets validates them and powers the picker. A failed check keeps the
+    // credentials stored.
     els.credsApply.addEventListener("click", () => {
       void (async () => {
         if (!els.credsAkid.value.trim() || !els.credsSecret.value.trim()) {
@@ -341,6 +353,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
         }
         // A previous listing belongs to a different identity.
         store.update("creds", { buckets: [], bucketsRowVisible: false, selectedBucket: null });
+        dropServerDefaultBucket();
         // Store only; the bucket check or listing below validates them. The
         // write's change event fires synchronously, inside writeCreds.
         let stored!: Promise<unknown>;
@@ -373,6 +386,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       // so a later search can't query a foreign bucket as the server's
       // ambient identity (which would 500/leak).
       els.bucketInput.value = "";
+      store.update("form", { bucketFromServerDefault: false });
       actions.syncUrl();
       store.update("creds", {
         buckets: [],
@@ -384,13 +398,17 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     });
 
     // React to programmatic changes (e.g. an injected userscript calling
-    // Dial9Creds.set). The panel's own writes resume via resumeWithBucket. An
+    // Dial9Creds.set). The panel's own writes resume via resumeWithBucket. A
+    // server-default bucket gives way to the new identity's picker; an
     // active service is reloaded; an already-picked bucket with no active
     // service runs only the lightweight discovery query.
     window.addEventListener("dial9:credentials-changed", () => {
       refreshFields();
       if (ownWrite || !creds.has()) return;
-      if (actions.canRerunCurrentSearch()) {
+      if (store.getState().form.bucketFromServerDefault) {
+        dropServerDefaultBucket();
+        void loadBuckets();
+      } else if (actions.canRerunCurrentSearch()) {
         actions.reRunCurrentSearch();
       } else if (els.bucketInput.value.trim()) {
         void actions.discoverPrefixes().then(() => actions.discoverServices());

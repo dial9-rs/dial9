@@ -9,6 +9,10 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   // (change), detecting the bucket's region FIRST - discovery is itself a
   // signed S3 call.
   els.bucketInput.addEventListener("input", () => {
+    // A typed bucket is explicit, even when it matches the server default.
+    if (store.getState().form.bucketFromServerDefault) {
+      store.update("form", { bucketFromServerDefault: false });
+    }
     actions.syncUrl();
   });
   // `change` fires when the value differs from the one at focus.
