@@ -406,16 +406,21 @@ describe("mountCredsPanel", () => {
       expect(actions.discoverServices).toHaveBeenCalledOnce();
     });
 
-    it("offers the picker when the supplied bucket is rejected", async () => {
+    it("keeps a rejected supplied bucket without listing buckets", async () => {
       const { store, els, actions, check, listBuckets } = setup("dial9-traces", false);
 
       els.credsApply.click();
       await drainMicrotasks();
 
       expect(check).toHaveBeenCalledOnce();
-      expect(listBuckets).toHaveBeenCalledOnce();
-      expect(store.getState().creds.bucketsRowVisible).toBe(true);
-      expect(store.getState().creds.status.text).toContain("Cannot use dial9-traces");
+      expect(check).toHaveBeenCalledWith("dial9-traces", { prefix: "traces/svc" });
+      expect(listBuckets).not.toHaveBeenCalled();
+      expect(els.bucketInput.value).toBe("dial9-traces");
+      expect(store.getState().creds.bucketsRowVisible).toBe(false);
+      expect(store.getState().creds.status).toEqual({
+        text: "Cannot use dial9-traces: HTTP 403",
+        kind: "error",
+      });
       expect(actions.discoverServices).not.toHaveBeenCalled();
     });
   });

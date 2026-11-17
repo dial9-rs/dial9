@@ -93,9 +93,8 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
 
   // Choose a bucket. ListBuckets normally supplies its region directly;
   // fall back to /api/credentials/check for compatible S3 implementations
-  // that omit the newer BucketRegion field. Resolves to the failure status,
-  // or null once the bucket is in use.
-  async function selectBucket(bucket: BucketInfo): Promise<string | null> {
+  // that omit the newer BucketRegion field.
+  async function selectBucket(bucket: BucketInfo): Promise<void> {
     const { name, region } = bucket;
     // Switching to a different bucket invalidates any active/leftover service:
     // it belongs to the previous bucket, and discoverServices would otherwise
@@ -115,7 +114,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       actions.syncUrl();
       setStatus(`Using ${name} · region ${region}`, "ok");
       resumeWithBucket();
-      return null;
+      return;
     }
     setStatus(`Detecting region for ${name}…`, null);
     const result = await creds.check(name, { prefix: actions.requestPrefix() });
@@ -131,11 +130,9 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       }
       setStatus(`Using ${name}${detected ? ` · region ${detected}` : ""}`, "ok");
       resumeWithBucket();
-      return null;
+      return;
     }
-    const failure = `Cannot use ${name}: ${result.error || "unknown error"}`;
-    setStatus(failure, "error");
-    return failure;
+    setStatus(`Cannot use ${name}: ${result.error || "unknown error"}`, "error");
   }
 
   // Auto-select when there's exactly one filter-matching bucket - the
@@ -158,25 +155,15 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
 
   // List the buckets the stored credentials can see and render the picker.
   // Used by Apply and on page load when credentials are already present.
-  // After `rejected` (a failed check of the bucket in the field) the picker
-  // opens with that reason and nothing is auto-selected; if listing fails
-  // too, the rejection is the more useful error.
-  async function loadBuckets(rejected?: string): Promise<void> {
+  async function loadBuckets(): Promise<void> {
     setStatus("Listing buckets…", null);
     try {
       const buckets = await creds.listBuckets();
       store.update("creds", { buckets, bucketsRowVisible: true });
-      if (rejected) {
-        setStatus(`${rejected} — pick a bucket below`, "error");
-        return;
-      }
       setStatus(`${buckets.length} bucket(s) — pick one below`, "ok");
       autoSelectSingleMatch();
     } catch (e) {
-      setStatus(
-        rejected ?? "Rejected: " + (e instanceof Error ? e.message : String(e)),
-        "error",
-      );
+      setStatus("Rejected: " + (e instanceof Error ? e.message : String(e)), "error");
       store.update("creds", { bucketsRowVisible: false });
     }
   }
@@ -343,10 +330,9 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     });
 
     // Apply: store the credentials, then validate them. A supplied bucket is
-    // kept and checked at the request prefix (credentials scoped to it may be
-    // denied ListBuckets). Without one, or when these credentials cannot read
-    // it (e.g. the server default prefilled for its own identity), listing
-    // the visible buckets validates them and powers the picker.
+    // kept and checked at the request prefix, without ListBuckets (credentials
+    // scoped to it may be denied that). Without one, listing the visible
+    // buckets validates them and powers the picker.
     els.credsApply.addEventListener("click", () => {
       void (async () => {
         if (!els.credsAkid.value.trim() || !els.credsSecret.value.trim()) {
@@ -370,8 +356,8 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
         await stored;
         actions.syncUrl();
         const bucket = els.bucketInput.value.trim();
-        const rejected = bucket ? await selectBucket({ name: bucket, region: null }) : undefined;
-        if (rejected !== null) await loadBuckets(rejected);
+        if (bucket) await selectBucket({ name: bucket, region: null });
+        else await loadBuckets();
       })();
     });
 
