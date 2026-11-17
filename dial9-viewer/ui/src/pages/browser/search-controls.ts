@@ -11,13 +11,20 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   els.bucketInput.addEventListener("input", () => {
     actions.syncUrl();
   });
+  // `change` fires when the value differs from the one at focus.
+  let bucketAtFocus = "";
+  els.bucketInput.addEventListener("focus", () => {
+    bucketAtFocus = els.bucketInput.value.trim();
+  });
   els.bucketInput.addEventListener("change", () => {
     void (async () => {
       // A committed bucket edit points at a (possibly) new bucket, so any
       // leftover service belongs to the old one. Clear it: otherwise
       // discoverServices sees a non-empty serviceInput, skips discovery, and
-      // browses the stale service against the new bucket.
+      // browses the stale service against the new bucket. The old bucket's
+      // prefix goes too.
       els.serviceInput.value = "";
+      actions.resetPrefixForBucketChange(bucketAtFocus, els.bucketInput.value.trim());
       await actions.detectRegionForBucket(els.bucketInput.value.trim());
       await actions.discoverPrefixes();
       await actions.discoverServices();
@@ -30,7 +37,6 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   function syncEditedPrefix(): void {
     const changed = store.getState().form.prefix.trim() !== els.prefixInput.value.trim();
     actions.mirrorPrefix();
-    actions.markPrefixExplicit();
     if (changed) actions.resetBrowsePane();
     else actions.syncUrl();
   }

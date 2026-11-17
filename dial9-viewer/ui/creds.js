@@ -276,9 +276,10 @@
    *   await window.Dial9Creds.set({ accessKeyId, secretAccessKey, sessionToken,
    *                                 region, autoDetectRegion: true });
    *
-   * When `autoDetectRegion` is true (and no region is given) the credentials are
-   * validated against `/api/credentials/check` for the given (or current
-   * default) bucket, and the resolved region is stored. Returns a result object
+   * When `autoDetectRegion` is true, or omitted and no region is given, the
+   * credentials are validated against `/api/credentials/check` for the given
+   * (or current default) bucket, and the resolved region is stored. An
+   * explicit `autoDetectRegion: false` only stores them. Returns a result object
    * `{ ok, region, error }`. In Node (no fetch) the validation step is skipped
    * and the credentials are stored as-is.
    *
@@ -293,9 +294,9 @@
     // Store first so the headers are available to the check request itself.
     storeStatic(creds);
 
-    const wantCheck =
-      (creds.autoDetectRegion || !creds.region) &&
-      typeof fetch !== "undefined";
+    const autoDetect =
+      creds.autoDetectRegion != null ? !!creds.autoDetectRegion : !creds.region;
+    const wantCheck = autoDetect && typeof fetch !== "undefined";
     if (!wantCheck) {
       return { ok: true, region: creds.region || undefined, error: null };
     }

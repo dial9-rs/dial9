@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { sideBCheckRequest } from "./diff-creds.js";
+import { sideBCheckRequest, sideBHeaders } from "./diff-creds.js";
 
 const CREDS = { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "TK" };
+
+describe("sideBHeaders", () => {
+  const TAB = { "x-dial9-aws-role-arn": "arn:aws:iam::123456789012:role/A", "x-dial9-aws-region": "us-east-1" };
+
+  it.each([
+    { name: "pins tab credentials to B's linked region", scope: "bucket=bb&aws_region=eu-west-1", creds: null, region: "eu-west-1" },
+    { name: "uses pasted B credentials' own region", scope: "bucket=bb&aws_region=eu-west-1", creds: { ...CREDS, region: "ap-south-1" }, region: "ap-south-1" },
+  ])("$name", ({ scope, creds, region }) => {
+    expect(sideBHeaders(new URLSearchParams(scope), creds, TAB)["x-dial9-aws-region"]).toBe(region);
+  });
+});
 
 describe("sideBCheckRequest", () => {
   it.each([

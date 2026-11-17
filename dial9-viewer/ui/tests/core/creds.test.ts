@@ -396,6 +396,24 @@ describe("Dial9Creds", () => {
     }
   });
 
+  it("set() with autoDetectRegion: false stores without a check", async () => {
+    freshStore();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await Dial9Creds.set({
+        accessKeyId: "AK",
+        secretAccessKey: "SK",
+        autoDetectRegion: false,
+      });
+      expect(result.ok).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(Dial9Creds.get()).toMatchObject({ kind: "literal", accessKeyId: "AK" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each([
     { opts: undefined, url: "/api/credentials/check?bucket=trace-bucket" },
     { opts: { prefix: "  " }, url: "/api/credentials/check?bucket=trace-bucket" },

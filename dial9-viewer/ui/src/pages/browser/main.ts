@@ -110,8 +110,6 @@ function boot(): void {
   if (urlState.service) els.serviceInput.value = urlState.service;
   if (urlState.q) els.rawSearchInput.value = urlState.q;
   actions.mirrorPrefix();
-  // A linked prefix scopes credential checks and replaces root discovery.
-  actions.markPrefixExplicit();
   if (urlState.tab === "raw") actions.switchTab("raw");
 
   // Make the credential store's active transport match the canonical source.

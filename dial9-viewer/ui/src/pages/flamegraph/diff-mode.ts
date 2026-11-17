@@ -17,7 +17,7 @@ import {
   sourceScopeFromStored,
 } from "../../lib/trace/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
-import { credsToHeaders, sideBCheckRequest, type SideBCreds } from "./diff-creds.js";
+import { sideBCheckRequest, sideBHeaders, type SideBCreds } from "./diff-creds.js";
 import type { PageEls } from "./dom.js";
 import { readDiffState, writeDiffState } from "./diff-state.js";
 
@@ -53,10 +53,11 @@ export function runDiffMode(params: URLSearchParams, els: PageEls): void {
 
   // Per-side credentials: both default to this tab's session creds; `credsB`
   // overrides B once supplied (held in memory for this tab only).
+  const bScope = diffParsed.b;
   let credsB: SideBCreds | null = null;
   const headersFor = (side: "a" | "b"): Record<string, string> =>
     Dial9Session.headers(
-      side === "b" && credsB !== null ? credsToHeaders(credsB) : Dial9Creds.headers(),
+      side === "b" ? sideBHeaders(bScope, credsB, Dial9Creds.headers()) : Dial9Creds.headers(),
     );
 
   let view: DiffViewHandle | null = null;
@@ -64,7 +65,6 @@ export function runDiffMode(params: URLSearchParams, els: PageEls): void {
 
   // Validate candidate B creds against B's scope via /api/credentials/check
   // (both confirms access and resolves B's region for the S3 endpoint).
-  const bScope = diffParsed.b;
   const bBucket = bScope.get("bucket");
   async function checkBCreds(
     creds: SideBCreds,
