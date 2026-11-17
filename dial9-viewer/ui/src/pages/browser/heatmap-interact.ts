@@ -133,19 +133,30 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
   // inside the plot are handled by its own mousedown/up; the actions bar and
   // the page header are control surfaces, so clicking a button there (Open,
   // Flamegraph, the TZ toggle, AWS Credentials) must preserve the selection -
-  // toggling TZ only relabels the axis (#645).
+  // toggling TZ only relabels the axis (#645). The blank filler of the
+  // timeline (the body and label column below the last host row) is not a
+  // control surface: a click there clears like any other click-away (#1126).
+  // It counts only when the press also started on that filler, because a
+  // press released over a different child (the plot, a label, the resizer)
+  // dispatches its click on their shared ancestor.
+  let pressTarget: EventTarget | null = null;
+  document.addEventListener("mousedown", (e) => {
+    pressTarget = e.target;
+  });
   document.addEventListener("click", (e) => {
     const wasDrag = justDraggedOnHeatmap;
     justDraggedOnHeatmap = false;
     const s = store.getState();
     const target = e.target instanceof Element ? e.target : null;
+    const onBlankTimeline =
+      (target === els.heatmapBody || target === els.heatmapLabels) && pressTarget === target;
     const inside = (selector: string): boolean => !!target?.closest(selector);
     if (
       shouldClearSelectionOnClick({
         isBrowseTab: s.ui.tab === "browse",
         hasSelection: !!s.browse.selection,
         wasDrag,
-        targetInHeatmap: inside("#heatmap-view"),
+        targetInHeatmap: !onBlankTimeline && inside("#heatmap-view"),
         targetInActions: inside("#actions-bar"),
         targetInHeader: inside("header"),
       })
