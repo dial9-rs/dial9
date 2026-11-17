@@ -41,7 +41,7 @@ const { Dial9Creds } = require("../../creds.js") as {
     set: (
       creds: Partial<StoredCreds> & { bucket?: string; autoDetectRegion?: boolean },
     ) => Promise<SetResult>;
-    check: (bucket?: string) => Promise<SetResult>;
+    check: (bucket?: string, opts?: { prefix?: string }) => Promise<SetResult>;
     setAmbient: () => { kind: "ambient" };
     setLiteralMode: () => StoredCreds & { kind: "literal" };
     setRoleArn: (arn: string, opts?: { region?: string }) => void;
@@ -390,6 +390,35 @@ describe("Dial9Creds", () => {
         accessKeyId: "AK",
         secretAccessKey: "SK",
         region: "us-west-2",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    { opts: undefined, url: "/api/credentials/check?bucket=trace-bucket" },
+    { opts: { prefix: "  " }, url: "/api/credentials/check?bucket=trace-bucket" },
+    {
+      opts: { prefix: " traces/svc " },
+      url: "/api/credentials/check?bucket=trace-bucket&prefix=traces%2Fsvc",
+    },
+  ])("check() sends a non-empty prefix only ($url)", async ({ opts, url }) => {
+    freshStore();
+    Dial9Creds.setRoleArn(VALID_ARN, { region: "us-west-2" });
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => ({
+      ok: true,
+      status: 200,
+      async json() { return { ok: true, region: "us-west-2", error: null }; },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await Dial9Creds.check("trace-bucket", opts);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(fetchMock.mock.calls[0]![0]).toBe(url);
+      expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+        method: "POST",
+        headers: { [H_ROLE_ARN]: VALID_ARN, [H_REGION]: "us-west-2" },
       });
     } finally {
       vi.unstubAllGlobals();

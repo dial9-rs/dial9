@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createActions, ROW_H } from "./actions.js";
+import { Dial9Creds } from "../../lib/trace/creds.js";
 import type { BrowserEls } from "./dom.js";
 import { createBrowserStore, type HeatmapSegment } from "./state.js";
 import { toRows } from "./segments.js";
@@ -86,6 +87,127 @@ describe("prefix discovery", () => {
       );
     },
   );
+});
+
+describe("explicit prefix scope", () => {
+  const ROLE_ARN = "arn:aws:iam::123456789012:role/trace-reader";
+
+  function jsonResponse(body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  function setup(service = "") {
+    stubUrlEnv();
+    vi.stubGlobal("alert", vi.fn());
+    const fetchMock = vi.fn(async (url: string) =>
+      url.startsWith("/api/credentials/check")
+        ? jsonResponse({ ok: true, region: "us-west-2", error: null })
+        : url.startsWith("/api/prefixes")
+          ? jsonResponse(["dial9-traces/", "other/"])
+          : jsonResponse({ objects: [] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const store = createBrowserStore();
+    const els = browserEls(service);
+    Object.assign(els, { credsRegion: input() });
+    const actions = createActions(store, els);
+    const urls = () => fetchMock.mock.calls.map(([url]) => url);
+    return { store, els, actions, urls };
+  }
+
+  it("skips root prefix discovery for a supplied prefix", async () => {
+    const { els, actions, urls } = setup();
+    actions.markPrefixExplicit();
+
+    await actions.discoverPrefixes();
+
+    expect(urls()).toEqual([]);
+    expect(els.prefixInput.value).toBe("dial9-traces");
+  });
+
+  it.each([
+    { name: "without a supplied prefix", mark: false, bucket: "traces-bucket", server: false },
+    { name: "after the bucket changes", mark: true, bucket: "other-bucket", server: false },
+    { name: "when the server owns the prefix", mark: true, bucket: "traces-bucket", server: true },
+  ])("discovers prefixes at the bucket root $name", async ({ mark, bucket, server }) => {
+    const { store, els, actions, urls } = setup();
+    store.update("config", { serverHasPrefix: server });
+    if (mark) actions.markPrefixExplicit();
+    els.bucketInput.value = bucket;
+
+    await actions.discoverPrefixes();
+
+    expect(urls()).toEqual([`/api/prefixes?bucket=${bucket}`]);
+  });
+
+  it("binds a prefix supplied before any bucket to the first bucket used", async () => {
+    const { els, actions, urls } = setup();
+    els.bucketInput.value = "";
+    actions.markPrefixExplicit();
+
+    els.bucketInput.value = "traces-bucket";
+    await actions.discoverPrefixes();
+    expect(urls()).toEqual([]);
+
+    els.bucketInput.value = "other-bucket";
+    await actions.discoverPrefixes();
+    expect(urls()).toEqual(["/api/prefixes?bucket=other-bucket"]);
+  });
+
+  it.each([
+    {
+      name: "scopes the check to a supplied prefix",
+      mark: true,
+      url: "/api/credentials/check?bucket=traces-bucket&prefix=dial9-traces",
+    },
+    {
+      name: "keeps the bucket-level check otherwise",
+      mark: false,
+      url: "/api/credentials/check?bucket=traces-bucket",
+    },
+  ])("region detection $name", async ({ mark, url }) => {
+    const { store, actions, urls } = setup();
+    Object.assign(window, { dispatchEvent: vi.fn() });
+    Dial9Creds.setRoleArn(ROLE_ARN);
+    try {
+      store.update("source", {
+        ...store.getState().source,
+        credentials: { kind: "role", roleArn: ROLE_ARN },
+      });
+      if (mark) actions.markPrefixExplicit();
+
+      await actions.detectRegionForBucket("traces-bucket");
+
+      expect(urls()).toEqual([url]);
+      expect(store.getState().source.region).toBe("us-west-2");
+    } finally {
+      Dial9Creds.setAmbient();
+    }
+  });
+
+  it("lists empty-result sample keys under the search prefix", async () => {
+    const { actions, urls } = setup("checkout-api");
+
+    await actions.doTimeRangeSearch();
+
+    expect(urls()).toHaveLength(2);
+    for (const url of urls()) {
+      expect(new URL(url, "http://x").searchParams.get("prefix")).toBe("dial9-traces");
+    }
+  });
+
+  it("lists raw empty-result sample keys under the search prefix", async () => {
+    const { els, actions, urls } = setup();
+    els.rawSearchInput.value = "dial9-traces/version=1/";
+
+    await actions.doRawSearch();
+
+    expect(urls()).toHaveLength(2);
+    expect(new URL(urls()[1]!, "http://x").searchParams.get("prefix")).toBe("dial9-traces");
+  });
 });
 
 describe("URL service loading", () => {

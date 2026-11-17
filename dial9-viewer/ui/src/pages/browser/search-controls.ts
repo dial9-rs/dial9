@@ -30,6 +30,7 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   function syncEditedPrefix(): void {
     const changed = store.getState().form.prefix.trim() !== els.prefixInput.value.trim();
     actions.mirrorPrefix();
+    actions.markPrefixExplicit();
     if (changed) actions.resetBrowsePane();
     else actions.syncUrl();
   }

@@ -322,14 +322,20 @@
   /**
    * Validate the stored credentials and detect the bucket's region via
    * `POST /api/credentials/check`. Browser-only (needs fetch + the backend).
+   * With a non-empty `prefix` the server validates read access under that
+   * prefix only; without one it validates the whole bucket.
    *
    * @param {string} [bucket] bucket to check; defaults to the server default
+   * @param {{prefix?: string}} [opts]
    * @returns {Promise<{ok, region, error}>}
    */
-  async function check(bucket) {
-    const url =
-      "/api/credentials/check" +
-      (bucket ? "?bucket=" + encodeURIComponent(bucket) : "");
+  async function check(bucket, opts = {}) {
+    const params = new URLSearchParams();
+    if (bucket) params.set("bucket", bucket);
+    const prefix = (opts.prefix || "").trim();
+    if (prefix) params.set("prefix", prefix);
+    const query = params.toString();
+    const url = "/api/credentials/check" + (query ? "?" + query : "");
     const request =
       typeof Dial9Session !== "undefined" ? Dial9Session.fetch : fetch;
     const resp = await request(url, {

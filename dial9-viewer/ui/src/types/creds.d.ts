@@ -50,6 +50,11 @@ declare module "*/creds.js" {
     error: string | null;
   }
 
+  export interface CredentialCheckOptions {
+    /** Validate access under this key prefix instead of the whole bucket. */
+    prefix?: string;
+  }
+
   export interface CredentialStorage {
     getItem(key: string): string | null;
     setItem(key: string, value: string): void;
@@ -59,7 +64,7 @@ declare module "*/creds.js" {
   /** Exact public facade used by the private Tampermonkey integration. */
   export interface Dial9CredsUserscriptApi {
     set(creds: SetCredentialsInput): Promise<CredentialCheckResult>;
-    check(bucket?: string): Promise<CredentialCheckResult>;
+    check(bucket?: string, opts?: CredentialCheckOptions): Promise<CredentialCheckResult>;
     setRegion(region: string): StoredCredentials;
   }
 

@@ -93,7 +93,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       return;
     }
     setStatus(`Detecting region for ${name}…`, null);
-    const result = await creds.check(name);
+    const result = await creds.check(name, { prefix: actions.explicitPrefix(name) });
     if (result.ok) {
       if (result.region) {
         els.credsRegion.value = result.region;
@@ -369,8 +369,10 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
 
     // Returning user: credentials already in sessionStorage. Keep the panel
     // closed (the green button signals creds are active) but re-list their
-    // buckets in the background so the picker is ready when opened.
-    if (creds.has()) {
+    // buckets in the background so the picker is ready when opened. A
+    // supplied bucket needs no picker, and credentials scoped to it may be
+    // denied ListBuckets; boot discovers its prefixes separately.
+    if (creds.has() && !els.bucketInput.value.trim()) {
       void loadBuckets();
     }
   }
