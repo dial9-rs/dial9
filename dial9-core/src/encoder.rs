@@ -208,6 +208,15 @@ impl FlushEpoch {
 
 /// Default maximum encoded batch size before flushing (~1MB).
 const DEFAULT_BATCH_SIZE: usize = 1023 * 1024;
+/// Spare capacity past `batch_size` in every batch buffer. `should_flush` is
+/// checked after an event is written, so a full batch overshoots `batch_size`
+/// by up to one event; the headroom keeps that last event from regrowing the
+/// buffer (and copying the whole batch).
+const BATCH_HEADROOM: usize = 1024;
+
+fn batch_buffer(batch_size: usize) -> Vec<u8> {
+    Vec::with_capacity(batch_size + BATCH_HEADROOM)
+}
 
 struct CachedLocation {
     text: String,
@@ -244,9 +253,7 @@ impl ThreadLocalBuffer {
 
     fn with_batch_size(batch_size: usize) -> Self {
         Self {
-            // Allocate 1KB extra headroom so typical events never trigger a realloc.
-            encoder: Encoder::new_to(Vec::with_capacity(batch_size + 1024))
-                .expect("Vec::write_all cannot fail"),
+            encoder: Encoder::new_to(batch_buffer(batch_size)).expect("Vec::write_all cannot fail"),
             event_count: 0,
             batch_size,
             collector: None,
@@ -290,7 +297,7 @@ impl ThreadLocalBuffer {
         let event_count = self.event_count as u64;
         let encoded_bytes = self
             .encoder
-            .reset_to_infallible(Vec::with_capacity(self.batch_size));
+            .reset_to_infallible(batch_buffer(self.batch_size));
         self.batch_generation = self.batch_generation.wrapping_add(1);
         if self.batch_generation == 0 {
             // Old cached generations could match again after wraparound.
@@ -554,6 +561,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Fill a buffer the way a busy worker does: record until `should_flush`,
+    /// then flush. Returns the capacity of each flushed batch.
+    fn full_batch_capacities(buffer: &mut ThreadLocalBuffer, batches: usize) -> Vec<usize> {
+        (0..batches)
+            .map(|_| {
+                while !buffer.should_flush() {
+                    buffer.record_encodable(&sample_event());
+                }
+                buffer.flush().into_encoded_bytes().capacity()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn full_batches_fit_without_regrowing() {
+        let batch_size = 4096;
+        let mut buffer = ThreadLocalBuffer::with_batch_size(batch_size);
+        for capacity in full_batch_capacities(&mut buffer, 3) {
+            assert_eq!(capacity, batch_size + BATCH_HEADROOM);
+        }
+    }
+
+    /// Run with `cargo test --release -p dial9-core --lib bench_full_batch_cycle -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_full_batch_cycle() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const BATCHES: usize = 200;
+        let mut buffer = ThreadLocalBuffer::new();
+        // Warm up: the first batch uses the constructor's allocation.
+        full_batch_capacities(&mut buffer, 1);
+        let start = Instant::now();
+        let mut events = 0usize;
+        let mut capacity = 0usize;
+        for _ in 0..BATCHES {
+            while !buffer.should_flush() {
+                buffer.record_encodable(black_box(&sample_event()));
+                events += 1;
+            }
+            let bytes = buffer.flush().into_encoded_bytes();
+            capacity = bytes.capacity();
+            black_box(bytes);
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "full_batch_cycle: {:.2} ns/event, {:.1} us/batch, flushed batch capacity {capacity} B ({events} events, {BATCHES} batches, {elapsed:?})",
+            elapsed.as_nanos() as f64 / events as f64,
+            elapsed.as_nanos() as f64 / 1000.0 / BATCHES as f64,
+        );
     }
 
     /// Run with `cargo test --release -p dial9-core --lib bench_location_intern -- --ignored --nocapture`.
