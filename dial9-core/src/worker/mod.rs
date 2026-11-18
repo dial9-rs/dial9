@@ -292,9 +292,15 @@ struct ActiveDump {
     id: crate::dump::DumpId,
     triggered_at: SystemTime,
     window: EpochWindow,
-    /// `Some` iff a non-zero look-forward was requested; the dump stays
-    /// registered until this elapses.
+    /// `Some` for a finite look-forward deadline. An overflowing forward
+    /// window leaves this `None`; `forward_window` distinguishes that from
+    /// no forward window.
     deadline: Option<crate::primitives::time::Instant>,
+    /// True when a non-zero look-forward was requested. Kept separately from
+    /// `deadline` because an overflowing deadline is unbounded rather than
+    /// absent: `Duration::MAX` must keep the dump open for the process
+    /// lifetime, not resolve it immediately.
+    forward_window: bool,
     metadata: Vec<(String, String)>,
     receipt_tx: Option<tokio::sync::oneshot::Sender<Result<DumpReceipt, DumpError>>>,
     segments_processed: usize,
@@ -319,17 +325,22 @@ impl ActiveDump {
             start_secs,
             end_secs: trigger_epoch.saturating_add(req.lookforward.as_secs()),
         };
-        let deadline = (!req.lookforward.is_zero()).then(|| {
+        let forward_window = !req.lookforward.is_zero();
+        let deadline = if forward_window {
             // Anchor at trigger time so worker pickup latency does not
-            // extend the forward window.
+            // extend the forward window. An overflow leaves the dump without
+            // a representable deadline, so it stays open until shutdown.
             let elapsed = req.elapsed_since_trigger();
-            crate::primitives::time::now() + req.lookforward.saturating_sub(elapsed)
-        });
+            crate::primitives::time::now().checked_add(req.lookforward.saturating_sub(elapsed))
+        } else {
+            None
+        };
         Self {
             id: req.id,
             triggered_at: req.triggered_at,
             window,
             deadline,
+            forward_window,
             metadata: req.metadata,
             receipt_tx: Some(req.receipt_tx),
             segments_processed: 0,
@@ -343,7 +354,11 @@ impl ActiveDump {
     /// Whether the dump can resolve once no matching work remains: no
     /// forward window, or its deadline elapsed.
     fn due(&self, now: crate::primitives::time::Instant) -> bool {
-        self.deadline.is_none_or(|d| now >= d)
+        // An absent deadline means immediate only when no forward window was
+        // requested. An overflowing forward window has no representable
+        // deadline and stays open until the worker shuts down.
+        self.deadline
+            .map_or(!self.forward_window, |deadline| now >= deadline)
     }
 
     fn mark_pipeline_unavailable(&mut self) {
