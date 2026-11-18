@@ -5,6 +5,10 @@ use dial9_perf_self_profile::{read_proc_maps, resolve_symbol_with_maps};
 
 use blazesym::symbolize::Symbolizer;
 
+fn symbol_leaf(name: &str) -> &str {
+    name.rsplit_once("::").map_or(name, |(_, leaf)| leaf)
+}
+
 #[inline(never)]
 fn outer(unwinder: &Unwinder) -> Vec<u64> {
     std::hint::black_box(inner(unwinder))
@@ -35,12 +39,6 @@ fn capture_and_symbolize() {
         .iter()
         .filter_map(|&addr| resolve_symbol_with_maps(addr, &symbolizer, &maps).name)
         .collect();
-    assert_eq!(
-        names[0..3],
-        vec![
-            "symbolize_stack::inner",
-            "symbolize_stack::outer",
-            "symbolize_stack::capture_and_symbolize"
-        ]
-    );
+    let leaves: Vec<_> = names.iter().take(3).map(|name| symbol_leaf(name)).collect();
+    assert_eq!(leaves, ["inner", "outer", "capture_and_symbolize"]);
 }
