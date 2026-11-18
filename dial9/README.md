@@ -433,11 +433,13 @@ On 64-bit Arm (aarch64), Rust's default build already gives every function that
 calls something a frame record. Only *leaf* functions, the ones that call
 nothing, are left without one. A frame-pointer stack walk then skips each
 leaf's immediate caller, which is why the setup above asks for
-`-C force-frame-pointers=yes`. That flag gives leaves a frame record too, but
-adds overhead.
+`-C force-frame-pointers=yes`. That flag gives most leaves a frame record, but
+adds overhead, and it misses leaves whose frame record the compiler sets up
+late.
 
 Turn on `recover_leaf_callers` instead, and dial9 recovers the missing caller
-from the link register. With it on, you do not need
+from the link register. `recover_leaf_callers` is new and experimental. With it
+on, you do not need
 `-C force-frame-pointers=yes` for CPU or scheduler profiling on 64-bit Arm:
 
 ```rust,no_run
