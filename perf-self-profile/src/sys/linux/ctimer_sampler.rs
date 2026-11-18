@@ -20,6 +20,10 @@ use libc::{timer_getoverrun, timer_settime};
 use crate::sampler::{Sample, SamplerConfig};
 
 static CTIMER_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Whether the `SIGPROF` walk repairs frameless leaves. Its own flag rather than
+/// "the table exists": another sampler that asked for recovery may have built
+/// the table, and that must not turn it on here.
+static RECOVER_LEAF_CALLERS: AtomicBool = AtomicBool::new(false);
 
 pub fn is_ctimer_active() -> bool {
     CTIMER_ACTIVE.load(Ordering::Relaxed)
@@ -62,8 +66,11 @@ impl CtimerSampler {
         // The SIGPROF walk reads the function-start table from signal context,
         // where it cannot be built, so build it before the first sample. Only
         // the aarch64 walk reads it; elsewhere `unwind_with_lr` ignores `lr`.
-        #[cfg(target_arch = "aarch64")]
-        crate::sys::func_starts::init();
+        let recover = cfg!(target_arch = "aarch64") && config.recover_leaf_callers;
+        if recover {
+            crate::sys::func_starts::init();
+        }
+        RECOVER_LEAF_CALLERS.store(recover, Ordering::Release);
 
         unsafe {
             ctimer::start(interval_ns, sigprof_handler)
@@ -225,7 +232,11 @@ extern "C" fn sigprof_handler(
         #[cfg(target_os = "android")]
         {
             if crate::sys::fp_profiler::fp_unwind_supported() {
-                let result = unwind::unwind_from_ucontext(ucontext, slot.frames_mut());
+                let result = unwind::unwind_from_ucontext(
+                    ucontext,
+                    slot.frames_mut(),
+                    RECOVER_LEAF_CALLERS.load(Ordering::Acquire),
+                );
                 slot.set_num_frames(result.frames_written as u32);
             } else {
                 let pc = crate::sys::fp_profiler::bionic_arm64::android_ucontext_pc(ucontext);
@@ -238,7 +249,11 @@ extern "C" fn sigprof_handler(
         }
         #[cfg(not(target_os = "android"))]
         {
-            let result = unwind::unwind_from_ucontext(ucontext, slot.frames_mut());
+            let result = unwind::unwind_from_ucontext(
+                ucontext,
+                slot.frames_mut(),
+                RECOVER_LEAF_CALLERS.load(Ordering::Acquire),
+            );
             slot.set_num_frames(result.frames_written as u32);
         }
 

@@ -42,6 +42,7 @@ const ENV_DIAL9_SERVICE_NAME: &str = "DIAL9_SERVICE_NAME";
 const ENV_DIAL9_S3_PREFIX: &str = "DIAL9_S3_PREFIX";
 const ENV_DIAL9_CPU_PROFILE_ENABLED: &str = "DIAL9_CPU_PROFILE_ENABLED";
 const ENV_DIAL9_CPU_SAMPLE_HZ: &str = "DIAL9_CPU_SAMPLE_HZ";
+const ENV_DIAL9_RECOVER_LEAF_CALLERS: &str = "DIAL9_RECOVER_LEAF_CALLERS";
 const ENV_DIAL9_SCHEDULE_PROFILE_ENABLED: &str = "DIAL9_SCHEDULE_PROFILE_ENABLED";
 const ENV_DIAL9_MEMORY_PROFILE_ENABLED: &str = "DIAL9_MEMORY_PROFILE_ENABLED";
 const ENV_DIAL9_MEMORY_SAMPLE_RATE_BYTES: &str = "DIAL9_MEMORY_SAMPLE_RATE_BYTES";
@@ -66,6 +67,7 @@ const DEFAULT_CPU_PROFILE_ENABLED: bool = cfg!(all(target_os = "linux", feature 
 const DEFAULT_SCHEDULE_PROFILE_ENABLED: bool =
     cfg!(all(target_os = "linux", feature = "cpu-profiling"));
 const DEFAULT_MEMORY_PROFILE_ENABLED: bool = false;
+const DEFAULT_RECOVER_LEAF_CALLERS: bool = false;
 const DEFAULT_TASK_DUMP_ENABLED: bool = false;
 const DEFAULT_PROCESS_RESOURCE_USAGE_ENABLED: bool = cfg!(all(unix, feature = "process-resource"));
 
@@ -102,6 +104,7 @@ struct ParsedEnvConfig {
     s3: Option<ParsedS3Config>,
     cpu_profile_enabled: Option<bool>,
     cpu_sample_hz: Option<u64>,
+    recover_leaf_callers: Option<bool>,
     schedule_profile_enabled: Option<bool>,
     memory_profile_enabled: Option<bool>,
     memory_sample_rate_bytes: Option<u64>,
@@ -168,6 +171,8 @@ struct ResolvedEnvConfig {
     // None means CpuProfilingConfig::default() owns the sample rate.
     cpu_sample_hz: Option<u64>,
 
+    recover_leaf_callers: bool,
+
     schedule_profile_enabled: bool,
 
     // Optional source: Some(_) installs memory profiling; None leaves it disabled.
@@ -199,6 +204,8 @@ struct RuntimeEnvConfig {
     cpu_profile_enabled: bool,
     #[cfg_attr(not(feature = "cpu-profiling"), allow(dead_code))]
     cpu_sample_hz: Option<u64>,
+    #[cfg_attr(not(feature = "cpu-profiling"), allow(dead_code))]
+    recover_leaf_callers: bool,
     schedule_profile_enabled: bool,
     task_dump_enabled: bool,
     task_dump_idle_threshold: Option<Duration>,
@@ -241,6 +248,7 @@ fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
         s3,
         cpu_profile_enabled: env.get_bool(ENV_DIAL9_CPU_PROFILE_ENABLED),
         cpu_sample_hz: env.get_positive_u64(ENV_DIAL9_CPU_SAMPLE_HZ),
+        recover_leaf_callers: env.get_bool(ENV_DIAL9_RECOVER_LEAF_CALLERS),
         schedule_profile_enabled: env.get_bool(ENV_DIAL9_SCHEDULE_PROFILE_ENABLED),
         memory_profile_enabled: env.get_bool(ENV_DIAL9_MEMORY_PROFILE_ENABLED),
         memory_sample_rate_bytes: env.get_positive_u64(ENV_DIAL9_MEMORY_SAMPLE_RATE_BYTES),
@@ -295,6 +303,9 @@ fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
             .cpu_profile_enabled
             .unwrap_or(DEFAULT_CPU_PROFILE_ENABLED),
         cpu_sample_hz: parsed.cpu_sample_hz,
+        recover_leaf_callers: parsed
+            .recover_leaf_callers
+            .unwrap_or(DEFAULT_RECOVER_LEAF_CALLERS),
         schedule_profile_enabled: parsed
             .schedule_profile_enabled
             .unwrap_or(DEFAULT_SCHEDULE_PROFILE_ENABLED),
@@ -501,6 +512,7 @@ fn build_s3_config(config: ResolvedS3Config) -> dial9_destinations_s3::S3Config 
 /// | --- | --- | --- |
 /// | `DIAL9_CPU_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable CPU stack sampling. |
 /// | `DIAL9_CPU_SAMPLE_HZ` | `99` | CPU sampling frequency in Hz. |
+/// | `DIAL9_RECOVER_LEAF_CALLERS` | `false` | On 64-bit Arm, recover each frameless leaf function's immediate caller, so CPU and scheduler profiling do not need `-C force-frame-pointers=yes`. No effect elsewhere. |
 /// | `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable per-worker scheduler event capture. Requires the [CPU profiling setup](https://github.com/dial9-rs/dial9/blob/HEAD/dial9-tokio-telemetry/README.md#cpu-profiling-linux-only). |
 ///
 /// Supported memory profiling variables (`memory-profiling` feature required;
@@ -601,6 +613,7 @@ fn env_recorder(resolved: ResolvedEnvConfig) -> (Option<Recorder>, RuntimeEnvCon
         s3,
         cpu_profile_enabled,
         cpu_sample_hz,
+        recover_leaf_callers,
         schedule_profile_enabled,
         memory_profiling,
         task_dump_enabled,
@@ -618,6 +631,7 @@ fn env_recorder(resolved: ResolvedEnvConfig) -> (Option<Recorder>, RuntimeEnvCon
         runtime_name,
         cpu_profile_enabled,
         cpu_sample_hz,
+        recover_leaf_callers,
         schedule_profile_enabled,
         task_dump_enabled,
         task_dump_idle_threshold,
@@ -744,10 +758,13 @@ fn apply_core_sources(
                 Some(hz) => CpuProfilingConfig::default().frequency_hz(hz),
                 None => CpuProfilingConfig::default(),
             };
-            core = core.with_cpu_profiling(cpu_config);
+            core = core
+                .with_cpu_profiling(cpu_config.recover_leaf_callers(config.recover_leaf_callers));
         }
         if config.schedule_profile_enabled {
-            core = core.with_sched_events(SchedEventConfig::default());
+            core = core.with_sched_events(
+                SchedEventConfig::default().recover_leaf_callers(config.recover_leaf_callers),
+            );
         }
     }
     #[cfg(not(feature = "cpu-profiling"))]
@@ -957,6 +974,7 @@ mod tests {
         assert!(parsed.s3.is_none());
         assert_eq!(parsed.cpu_profile_enabled, None);
         assert_eq!(parsed.cpu_sample_hz, None);
+        assert_eq!(parsed.recover_leaf_callers, None);
         assert_eq!(parsed.schedule_profile_enabled, None);
         assert_eq!(parsed.memory_profile_enabled, None);
         assert_eq!(parsed.memory_sample_rate_bytes, None);
@@ -1015,6 +1033,8 @@ mod tests {
         assert_eq!(resolved.rotation_period, None);
         assert_eq!(resolved.cpu_sample_hz, None);
         assert_eq!(resolved.task_dump_idle_threshold, None);
+        // Opt-in: off unless asked for.
+        assert!(!resolved.recover_leaf_callers);
         assert_eq!(resolved.process_resource_usage_sample_interval, None);
         assert_eq!(resolved.socket_accept_queues_sample_interval, None);
     }
@@ -1049,6 +1069,7 @@ mod tests {
                 .with("DIAL9_S3_PREFIX", " prod/traces ")
                 .with("DIAL9_CPU_PROFILE_ENABLED", "false")
                 .with("DIAL9_CPU_SAMPLE_HZ", "199")
+                .with("DIAL9_RECOVER_LEAF_CALLERS", "true")
                 .with("DIAL9_SCHEDULE_PROFILE_ENABLED", "false")
                 .with("DIAL9_MEMORY_PROFILE_ENABLED", "true")
                 .with("DIAL9_MEMORY_SAMPLE_RATE_BYTES", "4096")
@@ -1071,6 +1092,7 @@ mod tests {
         assert_eq!(s3.prefix.as_deref(), Some("prod/traces"));
         assert_eq!(parsed.cpu_profile_enabled, Some(false));
         assert_eq!(parsed.cpu_sample_hz, Some(199));
+        assert_eq!(parsed.recover_leaf_callers, Some(true));
         assert_eq!(parsed.schedule_profile_enabled, Some(false));
         assert_eq!(parsed.memory_profile_enabled, Some(true));
         assert_eq!(parsed.memory_sample_rate_bytes, Some(4096));

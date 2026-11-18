@@ -204,6 +204,7 @@ pub struct CpuProfilingConfig {
     include_kernel: bool,
     snapshot_kallsyms: bool,
     ring_buffer_bytes: Option<NonZeroUsize>,
+    recover_leaf_callers: bool,
 }
 
 impl Default for CpuProfilingConfig {
@@ -215,6 +216,7 @@ impl Default for CpuProfilingConfig {
             include_kernel: false,
             snapshot_kallsyms: false,
             ring_buffer_bytes: None,
+            recover_leaf_callers: false,
         }
     }
 }
@@ -299,6 +301,20 @@ impl CpuProfilingConfig {
         self.ring_buffer_bytes = Some(bytes);
         self
     }
+
+    /// Recover a frameless leaf function's immediate caller from the link
+    /// register. Default: `false`.
+    ///
+    /// On 64-bit Arm, Rust gives leaf functions no frame record by default, so
+    /// a frame-pointer stack walk skips each leaf's immediate caller. With this
+    /// on, that frame is put back, so `-C force-frame-pointers=yes` is not
+    /// needed to see it. Costs one 64-bit value per perf sample and a table of
+    /// function start addresses built once per process. Does nothing on other
+    /// architectures. See `docs/design/leaf-caller-recovery.md`.
+    pub fn recover_leaf_callers(mut self, yes: bool) -> Self {
+        self.recover_leaf_callers = yes;
+        self
+    }
 }
 
 /// Configuration for per-thread sched event capture (context switches).
@@ -314,6 +330,7 @@ pub struct SchedEventConfig {
     sampling_interval: Option<u64>,
     include_kernel: bool,
     ring_buffer_bytes: Option<NonZeroUsize>,
+    recover_leaf_callers: bool,
 }
 
 impl SchedEventConfig {
@@ -334,6 +351,20 @@ impl SchedEventConfig {
     /// switches are reported as `CpuSamplesLostEvent`s in the trace.
     pub fn ring_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
         self.ring_buffer_bytes = Some(bytes);
+        self
+    }
+
+    /// Recover a frameless leaf function's immediate caller from the link
+    /// register. Default: `false`.
+    ///
+    /// On 64-bit Arm, Rust gives leaf functions no frame record by default, so
+    /// a frame-pointer stack walk skips each leaf's immediate caller. With this
+    /// on, that frame is put back, so `-C force-frame-pointers=yes` is not
+    /// needed to see it. Costs one 64-bit value per perf sample and a table of
+    /// function start addresses built once per process. Does nothing on other
+    /// architectures. See `docs/design/leaf-caller-recovery.md`.
+    pub fn recover_leaf_callers(mut self, yes: bool) -> Self {
+        self.recover_leaf_callers = yes;
         self
     }
 }
@@ -438,19 +469,22 @@ impl CpuProfiler {
                     .event_source(config.event_source)
                     .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
                     .include_kernel(config.include_kernel)
-                    .ring_buffer_size(ring_bytes),
+                    .ring_buffer_size(ring_bytes)
+                    .recover_leaf_callers(config.recover_leaf_callers),
             )?,
             CpuBackend::Perf => PerfSampler::start_perf_only(
                 SamplerConfig::default()
                     .event_source(config.event_source)
                     .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
                     .include_kernel(config.include_kernel)
-                    .ring_buffer_size(ring_bytes),
+                    .ring_buffer_size(ring_bytes)
+                    .recover_leaf_callers(config.recover_leaf_callers),
             )?,
             CpuBackend::Ctimer => PerfSampler::start_ctimer_only(
                 SamplerConfig::default()
                     .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(false),
+                    .include_kernel(false)
+                    .recover_leaf_callers(config.recover_leaf_callers),
             )?,
         };
         // `Auto` resolves inside the sampler, which reports what it picked.
@@ -608,6 +642,10 @@ impl Source for CpuProfiler {
             "cpu.profile.backend".to_string(),
             self.active_backend.as_str().to_string(),
         ));
+        out.push((
+            "cpu.profile.recover_leaf_callers".to_string(),
+            self.config.recover_leaf_callers.to_string(),
+        ));
         // "false": requested, but fell back to live /proc/kallsyms.
         if let Some(active) = self.kallsyms_snapshot {
             out.push((
@@ -681,7 +719,8 @@ impl SchedProfiler {
                     config
                         .ring_buffer_bytes
                         .unwrap_or(DEFAULT_RING_BUFFER_BYTES),
-                ),
+                )
+                .recover_leaf_callers(config.recover_leaf_callers),
         )?;
         Ok(Self {
             sampler,
@@ -943,6 +982,32 @@ mod thread_name_tests {
 mod metadata_tests {
     use super::*;
     use dial9_core::source::Source;
+
+    /// Leaf-caller recovery is opt-in, and the trace records which way it was
+    /// set so a reader can tell a dropped frame from a disabled feature.
+    ///
+    /// Perf only, never the automatic choice: if perf cannot start, `Auto`
+    /// falls back to ctimer, and dropping a ctimer sampler disarms every CPU
+    /// timer in the process, starving tests that run alongside this one.
+    #[rstest::rstest]
+    #[case::default(CpuProfilingConfig::with_perf_backend(), "false")]
+    #[case::enabled(CpuProfilingConfig::with_perf_backend().recover_leaf_callers(true), "true")]
+    fn cpu_profiler_metadata_reports_recover_leaf_callers(
+        #[case] config: CpuProfilingConfig,
+        #[case] want: &str,
+    ) {
+        let Ok(mut profiler) = CpuProfiler::start(config) else {
+            eprintln!("skipping: CpuProfiler::start failed (likely no perf access)");
+            return;
+        };
+        let mut meta = Vec::new();
+        profiler.segment_metadata(&mut meta);
+        let got = meta
+            .iter()
+            .find(|(k, _)| k == "cpu.profile.recover_leaf_callers")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(got, Some(want));
+    }
 
     /// CpuProfiler::segment_metadata must report the active backend
     /// ("perf" or "ctimer"), never "auto", even when CpuBackend::Auto was

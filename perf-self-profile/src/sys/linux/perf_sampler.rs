@@ -185,6 +185,7 @@ pub(super) struct PerfSamplerImpl {
     parse_config: ParseConfig<Little>,
     attr: perf_event_attr,
     include_kernel: bool,
+    recover_leaf_callers: bool,
     max_tracked_threads: usize,
     /// Data pages per ring buffer.
     page_count: usize,
@@ -224,6 +225,7 @@ impl PerfSamplerImpl {
             parse_config: ParseConfig::from(attr),
             attr,
             include_kernel: config.include_kernel,
+            recover_leaf_callers: recover_leaf_callers(config),
             max_tracked_threads: config.max_tracked_threads,
             page_count,
             lost: 0,
@@ -256,6 +258,7 @@ impl PerfSamplerImpl {
             parse_config: ParseConfig::from(attr),
             attr,
             include_kernel: config.include_kernel,
+            recover_leaf_callers: recover_leaf_callers(config),
             max_tracked_threads: config.max_tracked_threads,
             page_count,
             lost: 0,
@@ -351,17 +354,17 @@ impl PerfSamplerImpl {
                 0
             }
             // aarch64: the kernel's callchain walks the x29 chain only, so a
-            // frameless leaf loses its immediate caller. Record x30 (LR), one
-            // extra u64 per sample, and re-insert the frame in
+            // frameless leaf loses its immediate caller. When asked to, record
+            // x30 (LR), one extra u64 per sample, and re-insert the frame in
             // `insert_leaf_caller`.
-            | if cfg!(target_arch = "aarch64") {
+            | if recover_leaf_callers(config) {
                 PERF_SAMPLE_REGS_USER as u64
             } else {
                 0
             };
 
         #[cfg(target_arch = "aarch64")]
-        {
+        if recover_leaf_callers(config) {
             attr.sample_regs_user = 1u64 << PERF_REG_ARM64_LR;
         }
 
@@ -474,7 +477,9 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
                         let include_kernel = self.include_kernel;
                         let (mut callchain, user_pc) =
                             filter_callchain(s.callchain().unwrap_or(&[]), include_kernel);
-                        recover_leaf_caller(&mut callchain, user_pc, &s);
+                        if self.recover_leaf_callers {
+                            recover_leaf_caller(&mut callchain, user_pc, &s);
+                        }
                         Sample {
                             ip: s.ip().unwrap_or(0),
                             pid: s.pid().unwrap_or(0),
@@ -547,6 +552,12 @@ fn lr_from_regs(regs: &perf_event_data::Registers<'_>) -> Option<u64> {
     let idx = (regs.mask & (bit - 1)).count_ones() as usize;
     let lr = *regs.regs.get(idx)?;
     Some(crate::sys::fp_profiler::unwind::strip_pac(lr as usize) as u64)
+}
+
+/// Whether this sampler repairs frameless leaves: asked for, and on the only
+/// architecture whose kernel walk drops the frame.
+fn recover_leaf_callers(config: &SamplerConfig) -> bool {
+    cfg!(target_arch = "aarch64") && config.recover_leaf_callers
 }
 
 /// Repair the chain's dropped leaf-caller frame, where the platform can.
