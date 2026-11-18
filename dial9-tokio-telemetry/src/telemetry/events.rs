@@ -1,7 +1,9 @@
-pub(crate) use dial9_core::thread::current_tid;
+// `gettid` is a real syscall on Linux; the park/unpark hooks read the tid on every
+// worker park and unpark, so they use the per-thread cached value.
+pub(crate) use dial9_core::thread::cached_tid;
 
 /// Read the calling thread's CPU time via `CLOCK_THREAD_CPUTIME_ID`.
-/// This is a vDSO call on Linux and Android (~20-40ns), no actual syscall.
+/// The vDSO does not serve this clock on Linux, so each call is a real syscall.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn thread_cpu_time_nanos() -> u64 {
     let mut ts = libc::timespec {
