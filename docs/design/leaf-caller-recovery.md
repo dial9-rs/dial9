@@ -28,6 +28,19 @@ called `leaf` — is silently dropped.
 **The missing address is still in the link register.** `leaf` makes no call, so
 nothing has overwritten it. The fix is to read it and put the frame back.
 
+A function that *does* get a frame record can lose its caller the same way. The
+compiler may set the record up late, after the code that does the work
+(*shrink-wrapping*), so a sample taken in that code sees exactly the state
+above. `rayon-fanout`'s `hash_block`, built with `-C force-frame-pointers=yes`:
+
+```
+4aae0 ... 4ab14   the hot loop: no frame record yet
+4ab1c             stp x29, x30, [sp, #16]   <- frame record stored here
+4ab38             ret
+```
+
+Nearly every sample lands in the loop, before the frame record exists.
+
 ## Why this mattered
 
 Until this change, dial9 needed `-C force-frame-pointers=yes` on 64-bit Arm so
@@ -39,6 +52,10 @@ micro-operations, +1 store, +1 load).
 The reason is the calling convention: a frame record on 64-bit Arm is the *pair*
 of the frame pointer and the link register. Forcing a frame into a leaf
 therefore also saves a link register the leaf never needed.
+
+The flag is also not a complete fix: it covers leaves that set up their frame
+record first, but not ones whose record the compiler sets up late (see above).
+Recovery covers both.
 
 ## Turning it on
 
@@ -104,29 +121,70 @@ run; what matters is that it is all-or-nothing:
 
 Both columns run in CI: each backend test runs with the setting on and then off,
 in that order, so the "off" run happens after the table is built and checks the
-setting itself. With `-C force-frame-pointers=yes`, both backends report every
-leaf sample either way and no frame is duplicated.
+setting itself. With `-C force-frame-pointers=yes`, the test's leaf sets up its
+frame record before its loop, so both backends report every leaf sample either
+way, and no frame is duplicated.
 
-The same effect shows up in a real program. `examples/rayon-fanout` has two
-call-free functions, `score_document` and `hash_block`; `objdump` confirms
-neither stores a frame record under the default flags. Profiling it with dial9's
-default backend, about 10,200 samples per run:
+The same effect shows up in a real program. `examples/rayon-fanout` has a
+call-free function, `hash_block`, whose immediate caller is rayon's
+`bridge_producer_consumer::helper`. The correct answer comes from
+`perf record --call-graph dwarf`, which unwinds from the binary's own unwind
+tables instead of frame pointers. Every row below is the same binary per build,
+run with the setting off and then on, about 6,700 samples per run:
 
-| build | caller reported for `score_document` | for `hash_block` |
+| run | `hash_block`'s reported caller |
+|---|---|
+| `perf` DWARF unwind (correct) | `helper` 100% |
+| leaves frameless, setting off | a different function, 99.8% |
+| leaves frameless, setting on | `helper` **100%** |
+| `-C force-frame-pointers=yes`, setting off | a different function, 99.7% |
+| `-C force-frame-pointers=yes`, setting on | `helper` **100%** |
+| stripped, setting on | a different function |
+
+With the setting off, the frame is dropped and the sample names the caller's
+caller. `=yes` does not help here, because `hash_block` sets up its frame
+record after its loop (see "What goes wrong"). On the stripped binary the
+setting has no symbols to use, so the frame is lost again, but nothing is
+invented.
+
+`rayon-fanout`'s other leaf, `score_document`, cannot tell the cases apart:
+`rayon::join` is recursive, so its caller and its caller's caller are the same
+function.
+
+### Beyond the test programs
+
+`rayon-fanout` was written to exercise this, so we also checked three widely
+used open-source Rust applications that we did not write and whose hot code we
+did not choose:
+
+* **ripgrep**, a text search tool: one process searching a 620 MB source tree
+  15 times;
+* **jaq**, a JSON query tool: a filter over a 215 MB JSON file;
+* **oxipng**, a PNG optimizer: ten images at optimization level 4.
+
+Each was built in release mode with Rust's default 64-bit Arm frame pointers, so
+its leaves are frameless, and each binary was run three times: under dial9 with
+the setting off, under dial9 with it on, and under
+`perf record --call-graph dwarf` for the correct answer. For every leaf
+function, we compared which immediate caller dial9 reported with which caller
+perf reported, weighted by how often perf sampled that leaf:
+
+| app | setting off | setting on |
 |---|---|---|
-| before, leaves frameless | `{closure#0}` 76%, **`run_inline` 24%** | `{closure#0}` 52%, **`run_inline` 48%** |
-| after, leaves frameless | `{closure#0}` **99.5%** | `helper` **100%** |
-| after, leaves framed (`=yes`) | `{closure#0}` **99.6%** | `helper` **100%** |
-| after, binary stripped | `{closure#0}` 98.5% | `{closure#0}` 99.5% |
+| ripgrep | 82.5% | **99.1%** |
+| jaq | 68.7% | **88.4%** |
+| oxipng | 99.0% | 99.4% |
 
-Row 3 is ground truth: with leaves framed, the stack alone names the immediate
-caller. Row 2 matches it. Row 1 does not — a quarter to a half of the samples
-name `run_inline`, the caller's *caller*, exactly the dropped frame. Row 4 loses
-the frame again on a stripped binary, but every name it reports is still a real
-function, so the failure is a lost frame rather than an invented one.
+ripgrep's second-hottest function, a substring searcher (14% of samples), is a
+leaf. With the setting off, every one of its samples names the caller's caller;
+with it on, every one is right. oxipng's hot functions all call other functions,
+so there is almost nothing to recover, which also shows the setting does no
+harm. In jaq the setting fixes most of the C allocator it links in (34.8% to
+81.3%); what is left is C code built with no frame pointers at all (see "What
+this cannot do").
 
-Row 1 is a different binary (5,693 functions against 5,830), so it is an honest
-before/after but not a controlled comparison.
+Measured on Graviton3, Amazon Linux 2023, kernel 6.12. The harness is not in the
+repository: it needs `perf` and the three applications' sources.
 
 ## Two paths needed fixing
 
@@ -177,7 +235,10 @@ address into an invented frame on the default backend.
 | frameless leaf | no — link register points into the caller | yes | **insert** |
 | framed function that already called something | **yes** — stale link register points back into itself | yes | skip |
 | framed function, link register not yet overwritten | no | **no** | skip |
-| sampled mid-prologue, before the frame record is stored | no | yes | **insert** |
+| sampled before the frame record is stored (at the start of a function, or in code the compiler placed before setting it up) | no | yes | **insert** |
+
+The last row is not a corner case: with late frame setup it covers a function's
+hot loop, so it is where much of the recovery happens in practice.
 
 Without condition 3 the common case would misfire constantly. A `bl` call
 instruction leaves the link register pointing into the *calling* function, so
@@ -235,6 +296,11 @@ One case that *looks* like a problem but is not: a tail call into a leaf. If `F`
 calls anything, `F` is a non-leaf and has a frame record, so its tail call must
 restore the link register first. A sample in the tail-called leaf therefore
 recovers `F`'s caller — which is correct, because `F`'s frame is already gone.
+
+**Code built with no frame pointers at all** — usually a C or C++ dependency —
+is out of reach. If such a function is not a leaf, the frame-pointer chain is
+already broken by the time the sample is taken, and the link register no longer
+holds its caller. That is most of the gap left in jaq below.
 
 Finally, recovery only applies to samples from this process, since the table
 describes this process's own memory map. `start_for_pid` and `inherit` can
@@ -409,28 +475,34 @@ ring buffer: the link register, requested through `PERF_SAMPLE_REGS_USER`. `lr_f
 it back and strips pointer authentication bits, which the kernel does for stack
 addresses but not for registers.
 
-## Why x86-64 needs nothing equivalent
+## x86-64
 
-The same frame loss is possible there, but x86-64 never lands in the state that
-causes it. On 64-bit Arm the trap is that `non-leaf` is the *target default*, so
-an ordinary build silently gets framed callers with frameless leaves. x86-64 has
-no such middle state:
+The same frame loss happens on x86-64: a frameless leaf leaves the frame pointer
+at its caller's frame, so the walk skips the caller. The difference is where the
+missing return address lives. On 64-bit Arm it is in the link register; on
+x86-64 the call instruction pushes it onto the stack, at `*rsp`. Recovering it
+would mean reading the stack top at sample time, which is a different mechanism,
+so this change does not do it and the setting has no effect there.
+
+The trap is also less likely. On 64-bit Arm, `non-leaf` is the *target default*,
+so an ordinary build silently gets framed callers with frameless leaves. x86-64
+has no such default middle state:
 
 * rustc omits frame pointers entirely by default (measured: 781 frame-pointer
   sites by default, 1,300 with `-C force-frame-pointers=yes`), so you get
   nothing to walk rather than a partial chain;
-* `-fno-omit-frame-pointer` in C and C++ *does* cover leaves on x86-64, unlike
-  64-bit Arm.
+* `-fno-omit-frame-pointer` in C and C++ covers leaves on x86-64, unlike 64-bit
+  Arm.
 
-So you are either all-in, where leaves already have a frame record and there is
-nothing to recover, or all-out, where frame-pointer walking does not work at
-all. The partial state only appears if someone explicitly asks for
-`-momit-leaf-frame-pointer`.
+But `-C force-frame-pointers=yes` is not a complete fix there either. Late frame
+setup happens on x86-64 too: built with `=yes`, `rayon-fanout`'s `hash_block`
+runs its whole loop before `push %rbp` (instruction 28 of 34), so samples in the
+loop lose its caller, and nothing in this change recovers them.
 
-The cost is also about 18x lower there (+0.037 against +0.653 cycles per leaf
-call), because the call instruction has already pushed the return address, so no
-link register has to be saved. For comparison, the `perf` tool does no x86-64
-leaf recovery at all, and async-profiler does.
+The cost of `=yes` is also about 18x lower there (+0.037 against +0.653 cycles
+per leaf call), because the call instruction has already pushed the return
+address, so no link register has to be saved. For comparison, the `perf` tool
+does no x86-64 leaf recovery at all, and async-profiler does.
 
 ## Known gaps
 
@@ -462,7 +534,12 @@ leaf recovery at all, and async-profiler does.
   the bounds.
 * **A sample taken entirely in the kernel recovers nothing.** The rule needs a
   user-space program counter, and such a sample has none.
-* **x86-64 is deliberately unchanged** — see above.
+* **x86-64 gets no recovery**, including for functions that set up their frame
+  record late, which lose their caller even with `-C force-frame-pointers=yes`.
+  Reading the return address from the top of the stack would close it; see
+  "x86-64".
+* **Code built with no frame pointers at all**, usually a C or C++ dependency,
+  breaks the chain wherever it is not a leaf, and nothing recovers that.
 * **The recursion self-test cannot see this class of bug.** Its helper makes a
   call, so it is a non-leaf and gets a frame record; the self-test passes while
   leaves are frameless. `Unwinder::leaf_frame_pointers_present()` closes that by
