@@ -26,7 +26,7 @@ For a fleet where only some processes should record, see [Startup sampling](#sta
 
 You can also find a full [example service](https://github.com/dial9-rs/dial9/blob/HEAD/examples).
 
-dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime: poll spans, task spawn and terminate, and per-worker queue depth. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder; on 64-bit Arm, CPU profiling can do without the flag (see [Frame pointers on 64-bit Arm](#frame-pointers-on-64-bit-arm)). These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
+dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime: poll spans, task spawn and terminate, and per-worker queue depth. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder; on 64-bit Arm, CPU and scheduler profiling can do without the flag if you turn on `recover_leaf_callers`, which is off by default (see [Frame pointers on 64-bit Arm](#frame-pointers-on-64-bit-arm)). These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
 
 ```toml
 # .cargo/config.toml
@@ -156,6 +156,7 @@ CPU profiling knobs (`cpu-profiling` feature required):
 | --- | --- | --- |
 | `DIAL9_CPU_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable CPU stack sampling. |
 | `DIAL9_CPU_SAMPLE_HZ` | `99` | CPU sampling frequency in Hz. |
+| `DIAL9_RECOVER_LEAF_CALLERS` | `false` | On 64-bit Arm, recover each frameless leaf function's immediate caller, so CPU and scheduler profiling do not need `-C force-frame-pointers=yes`. No effect elsewhere. See [Frame pointers on 64-bit Arm](#frame-pointers-on-64-bit-arm). |
 | `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable per-worker scheduler event capture. Requires the [CPU profiling setup](#cpu-profiling-linux-only). |
 
 Memory profiling knobs (`memory-profiling` feature required; your binary must still install `Dial9Allocator` as its `#[global_allocator]`):
@@ -366,7 +367,7 @@ dial9 = { version = "0.5", features = ["cpu-profiling"] }
 rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 ```
 
-On 64-bit Arm (aarch64) you can drop `-C force-frame-pointers=yes` for CPU profiling; see [Frame pointers on 64-bit Arm](#frame-pointers-on-64-bit-arm).
+On 64-bit Arm (aarch64) you can drop `-C force-frame-pointers=yes` for CPU and scheduler profiling if you turn on `recover_leaf_callers`, which is off by default; see [Frame pointers on 64-bit Arm](#frame-pointers-on-64-bit-arm).
 
 **Enable CPU profiling** (`.with_cpu_profiling` on the recorder):
 

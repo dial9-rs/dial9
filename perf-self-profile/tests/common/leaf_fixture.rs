@@ -13,7 +13,7 @@
 //!   the recovery unless this is checked.
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dial9_perf_self_profile::unwinder::Unwinder;
+use super::leaf_probe::leaf_frame_pointers_present;
 use dial9_perf_self_profile::{
     ActiveCpuBackend, EventSource, PerfSampler, Sample, SamplerConfig, SamplingMode, resolve_symbol,
 };
@@ -76,7 +76,7 @@ fn check_expected_framing() {
         return;
     };
     let want = want.to_string_lossy().to_string();
-    let got = Unwinder::leaf_frame_pointers_present();
+    let got = leaf_frame_pointers_present();
     let expected = match want.as_str() {
         "frameless" => Some(false),
         "framed" => Some(true),
@@ -143,7 +143,7 @@ fn count_leaf_samples(samples: &[Sample], recover: bool) {
     // The control: with recovery off, a frameless leaf must still lose its
     // caller. Otherwise the setting does nothing and the "on" run proves
     // nothing about it.
-    if !recover && Unwinder::leaf_frame_pointers_present() == Some(false) {
+    if !recover && leaf_frame_pointers_present() == Some(false) {
         assert_eq!(
             with_mid, 0,
             "recovery is off and the leaf is frameless, so the x29 chain must \

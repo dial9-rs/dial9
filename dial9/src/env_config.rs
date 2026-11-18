@@ -745,26 +745,33 @@ fn build_env_disk_writer(
 
 /// Register the flush-thread `Source`s (cpu / sched / rusage / socket) selected
 /// by env config onto the core recorder builder.
+#[cfg(feature = "cpu-profiling")]
+fn cpu_profiling_config(config: &RuntimeEnvConfig) -> dial9_perf_self_profile::CpuProfilingConfig {
+    let cpu = dial9_perf_self_profile::CpuProfilingConfig::default();
+    match config.cpu_sample_hz {
+        Some(hz) => cpu.frequency_hz(hz),
+        None => cpu,
+    }
+    .recover_leaf_callers(config.recover_leaf_callers)
+}
+
+#[cfg(feature = "cpu-profiling")]
+fn sched_event_config(config: &RuntimeEnvConfig) -> dial9_perf_self_profile::SchedEventConfig {
+    dial9_perf_self_profile::SchedEventConfig::default()
+        .recover_leaf_callers(config.recover_leaf_callers)
+}
+
 fn apply_core_sources(
     #[allow(unused_mut)] mut core: dial9_core::recorder::RecorderBuilder<Disk>,
     config: &RuntimeEnvConfig,
 ) -> dial9_core::recorder::RecorderBuilder<Disk> {
     #[cfg(feature = "cpu-profiling")]
     {
-        use dial9_perf_self_profile::{CpuProfilingConfig, SchedEventConfig};
-
         if config.cpu_profile_enabled {
-            let cpu_config = match config.cpu_sample_hz {
-                Some(hz) => CpuProfilingConfig::default().frequency_hz(hz),
-                None => CpuProfilingConfig::default(),
-            };
-            core = core
-                .with_cpu_profiling(cpu_config.recover_leaf_callers(config.recover_leaf_callers));
+            core = core.with_cpu_profiling(cpu_profiling_config(config));
         }
         if config.schedule_profile_enabled {
-            core = core.with_sched_events(
-                SchedEventConfig::default().recover_leaf_callers(config.recover_leaf_callers),
-            );
+            core = core.with_sched_events(sched_event_config(config));
         }
     }
     #[cfg(not(feature = "cpu-profiling"))]
@@ -1407,5 +1414,35 @@ mod tests {
             !rt.block_on(async { crate::core::current_handle().is_enabled() }),
             "Dial9Handle::current() should remain inert without Tokio hooks"
         );
+    }
+
+    /// `DIAL9_RECOVER_LEAF_CALLERS` must survive resolving and reach both the
+    /// CPU and the scheduler config. Their fields are private to
+    /// `dial9-perf-self-profile`, so this reads them through `Debug`.
+    #[cfg(feature = "cpu-profiling")]
+    #[rstest::rstest]
+    #[case::set_true(Some("true"), true)]
+    #[case::set_false(Some("false"), false)]
+    #[case::unset(None, false)]
+    fn recover_leaf_callers_reaches_the_cpu_and_sched_configs(
+        #[case] value: Option<&str>,
+        #[case] want: bool,
+    ) {
+        let env = match value {
+            Some(v) => FakeEnv::default().with("DIAL9_RECOVER_LEAF_CALLERS", v),
+            None => FakeEnv::default(),
+        };
+        let resolved = resolve_env_config(parse_env_config(&env));
+        assert_eq!(resolved.recover_leaf_callers, want);
+
+        // `DIAL9_ENABLED` is unset, so no recorder is built.
+        let (_recorder, runtime) = env_recorder(resolved);
+        let expected = format!("recover_leaf_callers: {want}");
+        for config in [
+            format!("{:?}", cpu_profiling_config(&runtime)),
+            format!("{:?}", sched_event_config(&runtime)),
+        ] {
+            assert!(config.contains(&expected), "{config}");
+        }
     }
 }

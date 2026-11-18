@@ -1,6 +1,8 @@
-//! Detects whether this binary gives *leaf* functions a frame record.
+//! Test helper: detects whether this binary gives *leaf* functions a frame
+//! record. Integration tests are built with the same flags as the code under
+//! test, so this probe's prologue reflects the build being tested.
 //!
-//! The recursion self-test in [`crate::unwinder`] cannot: its `recurse` helper
+//! The recursion self-test (`Unwinder::self_test_frame_pointers`) cannot: its helper
 //! makes a call, so `-C force-frame-pointers=non-leaf` gives it a frame record
 //! and the self-test passes while leaves stay frameless. That is the aarch64
 //! default, so omitting `-C force-frame-pointers=yes` lands there.
@@ -22,7 +24,7 @@ const SCAN_WORDS: usize = 8;
 
 /// Whether leaf functions in this binary carry a frame record. `None` on an
 /// unrecognised architecture.
-pub(crate) fn leaf_frame_pointers_present() -> Option<bool> {
+pub fn leaf_frame_pointers_present() -> Option<bool> {
     // Keep the probe from being optimised away entirely.
     std::hint::black_box(probe_leaf(std::hint::black_box(1)));
     let entry = probe_leaf as *const ();
@@ -34,7 +36,7 @@ pub(crate) fn leaf_frame_pointers_present() -> Option<bool> {
 }
 
 #[cfg(target_arch = "aarch64")]
-unsafe fn decode_prologue(entry: *const ()) -> Option<bool> {
+pub unsafe fn decode_prologue(entry: *const ()) -> Option<bool> {
     let words = entry as *const u32;
     for i in 0..SCAN_WORDS {
         // SAFETY: see caller; reading within the probe function's own code.
@@ -51,12 +53,12 @@ unsafe fn decode_prologue(entry: *const ()) -> Option<bool> {
 }
 
 #[cfg(target_arch = "aarch64")]
-const RET: u32 = 0xD65F_03C0;
+pub const RET: u32 = 0xD65F_03C0;
 
 /// `ADD x29, sp, #imm`: how both AAPCS64 prologue shapes set the frame
 /// pointer, including `mov x29, sp` (`0x910003FD`).
 #[cfg(target_arch = "aarch64")]
-fn establishes_frame_pointer_aarch64(insn: u32) -> bool {
+pub fn establishes_frame_pointer_aarch64(insn: u32) -> bool {
     const ADD_IMM64_MASK: u32 = 0xFF80_0000;
     const ADD_IMM64: u32 = 0x9100_0000;
     let rd = insn & 0x1F;
@@ -65,7 +67,7 @@ fn establishes_frame_pointer_aarch64(insn: u32) -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
-unsafe fn decode_prologue(entry: *const ()) -> Option<bool> {
+pub unsafe fn decode_prologue(entry: *const ()) -> Option<bool> {
     let bytes = entry as *const u8;
     // `mov %rsp, %rbp` is `48 89 e5`, possibly after `endbr64`.
     for i in 0..SCAN_WORDS * 4 {
@@ -87,65 +89,6 @@ unsafe fn decode_prologue(entry: *const ()) -> Option<bool> {
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-unsafe fn decode_prologue(_entry: *const ()) -> Option<bool> {
+pub unsafe fn decode_prologue(_entry: *const ()) -> Option<bool> {
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// On the architectures we decode, the answer must be conclusive.
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    #[test]
-    fn detection_is_conclusive_on_supported_arch() {
-        assert!(leaf_frame_pointers_present().is_some());
-    }
-
-    /// A non-leaf must carry a frame record whenever a leaf does. This holds
-    /// under either `force-frame-pointers` setting and gives the probe a
-    /// cross-check that needs no knowledge of the build flags.
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    #[test]
-    fn leaf_coverage_implies_non_leaf_coverage() {
-        #[inline(never)]
-        extern "C" fn probe_non_leaf(x: u64) -> u64 {
-            // The call makes this a non-leaf under any setting.
-            std::hint::black_box(x).wrapping_add(1)
-        }
-        let leaf = leaf_frame_pointers_present().expect("supported arch");
-        // SAFETY: reading our own executable text, as in the production path.
-        let non_leaf =
-            unsafe { decode_prologue(probe_non_leaf as *const ()) }.expect("supported arch");
-        if leaf {
-            assert!(
-                non_leaf,
-                "leaf has a frame record but non-leaf does not; probe is misreading codegen"
-            );
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    fn recognises_frame_pointer_establishing_instructions() {
-        // mov x29, sp  == add x29, sp, #0
-        assert!(establishes_frame_pointer_aarch64(0x9100_03FD));
-        // add x29, sp, #16
-        assert!(establishes_frame_pointer_aarch64(0x9100_43FD));
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    fn rejects_unrelated_instructions() {
-        // add x0, sp, #0 - wrong Rd
-        assert!(!establishes_frame_pointer_aarch64(0x9100_03E0));
-        // add x29, x0, #0 - wrong Rn
-        assert!(!establishes_frame_pointer_aarch64(0x9100_001D));
-        // stp x29, x30, [sp, #-16]! - saves the pair but does not set x29
-        assert!(!establishes_frame_pointer_aarch64(0xA9BF_7BFD));
-        // ret
-        assert!(!establishes_frame_pointer_aarch64(RET));
-        // sub sp, sp, #16
-        assert!(!establishes_frame_pointer_aarch64(0xD100_43FF));
-    }
 }
