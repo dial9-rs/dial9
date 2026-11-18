@@ -1,6 +1,6 @@
 [package]
 name = "dial9"
-version = "0.5.8"
+version = "0.5.9"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -146,7 +146,9 @@ linux-socket = [
 ]
 
 [dev-dependencies]
-dial9-sampling = { workspace = true, features = ["s3"] }
+# Keep this path-only so Cargo omits it from the published manifest. A versioned
+# dependency would require dial9-sampling to publish before dial9.
+dial9-sampling = { path = "../dial9-sampling", features = ["s3"] }
 sha2 = "0.10"
 s3s = "0.14.1"
 s3s-fs = "0.14.1"

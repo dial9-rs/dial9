@@ -199,6 +199,7 @@ const initialState: StoreState = {
     lanesScrollTop: 40,
     selectedSpanNames: new Set(),
     selectedEventNames: new Set(),
+    revealedEventNames: new Set(),
     spanFilter: "",
     spanPctFilter: 0,
     timeMode: "rel",
