@@ -235,6 +235,48 @@ Failing to update it will cause the viewer to fail when loading the demo.
   target each dependent PR at the preceding branch, keep every layer independently
   buildable, and rebase or retarget the remaining stack as lower layers merge.
 
+### Adding a publishable workspace crate
+
+Before merging a new crate:
+
+1. Confirm its crates.io name is available or project-owned. Add it to workspace
+   `members` and update `Cargo.lock`. Add a `[workspace.dependencies]` entry
+   (`version` and `path`) only if another member inherits it.
+2. Keep the publication graph acyclic. Normal and build dependencies on
+   workspace crates keep both `version` and `path`. A development dependency
+   from an existing crate on the new crate MUST be path-only, so Cargo omits the
+   unpublished crate from the existing crate's published manifest. Leave
+   unrelated development dependencies unchanged.
+3. Add the crate to `release-plz.toml` and to the `Verify all publishable crates
+   package cleanly` list in `.github/workflows/ci.yml`. Add it to `dial9`'s
+   `changelog_include` if its changes should release the facade. Leave it out of
+   the semver list for now: that job uses `--baseline-rev origin/main`, and
+   `cargo semver-checks` fails when the package is absent there.
+4. Add the crate to the `Verify the release publication boundary` command only
+   if it is in `dial9`'s normal dependency closure. The command models the
+   registry when release-plz packages `dial9`, so it excludes crates that
+   publish later and that `dial9` uses only for development. Packaging every
+   workspace crate together would mask ordering errors.
+5. From a clean checkout of the reviewed commit, run `cargo package -p <crate>`,
+   `cargo publish -p <crate> --dry-run`, and the updated publication-boundary
+   command from `.github/workflows/ci.yml`. Inspect
+   `cargo package -p <crate> --list` and the archive's normalized `Cargo.toml`
+   for unintended files, secrets, and wrong dependency versions. The publish
+   command MUST stay a dry run.
+6. After the package contents receive final approval, stop and ask a crates.io
+   owner to approve `<crate>@<version>` from that exact commit and publish it
+   with their own credential. Never request, handle, store, or print their
+   token, and never publish with `--allow-dirty` or `--no-verify`. Any later
+   change to packaged content requires a version bump and another owner-approved
+   publication. Then ask the owner to configure the
+   [trusted publisher](https://crates.io/docs/trusted-publishing) for
+   `dial9-rs/dial9`, `release.yml`, and the `release` environment. Finish both
+   before merging: trusted publishing cannot create a crate, so release-plz
+   would fail on its first publication.
+
+Once the crate is on `origin/main`, add it to the semver list in a follow-up PR.
+The publication-boundary step runs only on `release-plz/` PRs.
+
 ## Agent skills
 
 ### Where the skills live
