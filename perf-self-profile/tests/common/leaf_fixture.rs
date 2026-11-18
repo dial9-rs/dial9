@@ -1,7 +1,8 @@
 //! Shared fixture for the two leaf-caller-recovery tests.
 //!
 //! Both backends run the same chain, the same backend check and the same
-//! assertions, so a change to one applies to both.
+//! assertions, so a change to one applies to both. Each runs twice: with
+//! `recover_leaf_callers(true)`, and then with it off as the control.
 //!
 //! Environment:
 //! * `DIAL9_NO_SKIP=1` — a skip becomes a failure. In CI a skip reads as a
@@ -89,7 +90,7 @@ fn check_expected_framing() {
 }
 
 /// Check every sample whose innermost frame is the frameless leaf.
-fn count_leaf_samples(samples: &[Sample]) {
+fn count_leaf_samples(samples: &[Sample], recover: bool) {
     let mut leaf = 0usize;
     let mut with_mid = 0usize;
     let mut duplicated: Option<Vec<String>> = None;
@@ -129,13 +130,9 @@ fn count_leaf_samples(samples: &[Sample]) {
         return;
     }
 
-    println!("leaf_samples={leaf} reporting_immediate_caller={with_mid} example={example:?}");
-    assert_eq!(
-        with_mid, leaf,
-        "every sample in the frameless leaf must report mid_frame as its \
-         immediate caller, directly above the leaf; got {with_mid}/{leaf}. The \
-         x29 chain drops it, so the recorded LR must be re-inserted. Example \
-         chain: {example:?}"
+    println!(
+        "recover_leaf_callers={recover} leaf_samples={leaf} \
+         reporting_immediate_caller={with_mid} example={example:?}"
     );
     // Under `=yes` the chain already names mid_frame, so recovery must not add
     // a second copy.
@@ -143,28 +140,59 @@ fn count_leaf_samples(samples: &[Sample]) {
         duplicated.is_none(),
         "mid_frame appears more than once: {duplicated:?}"
     );
+    // The control: with recovery off, a frameless leaf must still lose its
+    // caller. Otherwise the setting does nothing and the "on" run proves
+    // nothing about it.
+    if !recover && Unwinder::leaf_frame_pointers_present() == Some(false) {
+        assert_eq!(
+            with_mid, 0,
+            "recovery is off and the leaf is frameless, so the x29 chain must \
+             drop mid_frame; got {with_mid}/{leaf}. Example chain: {example:?}"
+        );
+        return;
+    }
+    assert_eq!(
+        with_mid, leaf,
+        "every sample in the frameless leaf must report mid_frame as its \
+         immediate caller, directly above the leaf; got {with_mid}/{leaf}. The \
+         x29 chain drops it, so the recorded LR must be re-inserted. Example \
+         chain: {example:?}"
+    );
 }
 
-/// Start the sampler on the wanted backend, drive the fixture, and check the
-/// result. `how` explains what the caller must set for that backend.
+/// Run the fixture on the wanted backend with recovery on, then again with it
+/// off. `how` explains what the caller must set for that backend.
+///
+/// "On" first: by the time "off" runs the function table already exists, so
+/// the control checks the setting itself, not just whether a table was built.
 pub fn run(want_perf: bool, how: &str) {
     check_expected_framing();
+    for recover in [true, false] {
+        if !run_once(want_perf, recover, how) {
+            return;
+        }
+    }
+}
 
+/// One sampling run. Returns `false` if it was skipped.
+fn run_once(want_perf: bool, recover: bool, how: &str) -> bool {
     let Ok(mut sampler) = PerfSampler::start(
         SamplerConfig::default()
             .event_source(EventSource::SwCpuClock)
-            .sampling(SamplingMode::FrequencyHz(999)),
+            .sampling(SamplingMode::FrequencyHz(999))
+            .recover_leaf_callers(recover),
     ) else {
         skip_or_fail("no CPU sampling backend available");
-        return;
+        return false;
     };
     if !require_backend(&sampler.active_backend(), want_perf, how) {
-        return;
+        return false;
     }
 
     drive();
     sampler.disable();
-    count_leaf_samples(&sampler.drain_samples());
+    count_leaf_samples(&sampler.drain_samples(), recover);
+    true
 }
 
 /// Run the fixture hard enough that samples land inside the leaf.

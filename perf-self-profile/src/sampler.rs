@@ -41,6 +41,7 @@ pub struct SamplerConfig {
     pub(crate) event_source: EventSource,
     pub(crate) sampling: SamplingMode,
     pub(crate) include_kernel: bool,
+    pub(crate) recover_leaf_callers: bool,
     /// Maximum number of threads that can be tracked simultaneously in
     /// per-thread mode. Prevents unbounded fd/mmap growth if cleanup fails.
     /// Default: 256.
@@ -53,6 +54,7 @@ impl Default for SamplerConfig {
             sampling: SamplingMode::FrequencyHz(999),
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
+            recover_leaf_callers: false,
             max_tracked_threads: 256,
         }
     }
@@ -75,6 +77,20 @@ impl SamplerConfig {
     /// Requires `perf_event_paranoid` <= 1 (or CAP_PERFMON).
     pub fn include_kernel(mut self, yes: bool) -> Self {
         self.include_kernel = yes;
+        self
+    }
+
+    /// Recover a frameless leaf function's immediate caller from the link
+    /// register. Default: `false`.
+    ///
+    /// On 64-bit Arm, Rust gives leaf functions no frame record by default, so
+    /// a frame-pointer stack walk skips each leaf's immediate caller. With this
+    /// on, that frame is put back, so `-C force-frame-pointers=yes` is not
+    /// needed to see it. Costs one 64-bit value per perf sample and a table of
+    /// function start addresses built once per process. Does nothing on other
+    /// architectures. See `docs/design/leaf-caller-recovery.md`.
+    pub fn recover_leaf_callers(mut self, yes: bool) -> Self {
+        self.recover_leaf_callers = yes;
         self
     }
 

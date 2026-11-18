@@ -213,7 +213,9 @@ pub unsafe fn unwind_with_lr(
     unsafe { unwind(pc, fp, sp, out) }
 }
 
-/// Unwind from inside a signal handler given the raw ucontext.
+/// Unwind from inside a signal handler given the raw ucontext. With
+/// `recover_leaf_callers`, a frameless leaf's immediate caller is recovered
+/// from the link register; see [`unwind_with_lr`].
 ///
 /// See [`unwind`] for details on the return value.
 ///
@@ -222,9 +224,14 @@ pub unsafe fn unwind_with_lr(
 pub(crate) unsafe fn unwind_from_ucontext(
     ucontext: *mut libc::c_void,
     out: &mut [u64],
+    recover_leaf_callers: bool,
 ) -> CaptureResult {
     let (pc, fp, sp, lr) = unsafe { read_pc_fp_sp_lr(ucontext) };
-    unsafe { unwind_with_lr(pc, fp, sp, lr, out) }
+    if recover_leaf_callers {
+        unsafe { unwind_with_lr(pc, fp, sp, lr, out) }
+    } else {
+        unsafe { unwind(pc, fp, sp, out) }
+    }
 }
 
 /// x86-64 has no link register, so the fourth element is always 0 and the

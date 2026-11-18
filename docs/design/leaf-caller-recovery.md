@@ -40,6 +40,26 @@ The reason is the calling convention: a frame record on 64-bit Arm is the *pair*
 of the frame pointer and the link register. Forcing a frame into a leaf
 therefore also saves a link register the leaf never needed.
 
+## Turning it on
+
+Recovery is opt-in, off by default:
+
+```rust
+CpuProfilingConfig::default().recover_leaf_callers(true)
+SchedEventConfig::default().recover_leaf_callers(true)
+```
+
+The same setter exists on the lower-level `SamplerConfig`, and the environment
+config reads `DIAL9_RECOVER_LEAF_CALLERS=true`. With it on, CPU and scheduler
+profiling on 64-bit Arm do not need `-C force-frame-pointers=yes`. With it off,
+nothing below runs: no table is built, the perf backend does not ask for the
+link register, and the ctimer walk ignores it. The trace's segment metadata
+records which way it was set, as `cpu.profile.recover_leaf_callers`.
+
+The ctimer signal handler has its own on/off flag rather than checking whether
+the table exists. Otherwise, a scheduler profiler that turned recovery on and
+built the table would silently turn it on for a CPU profiler that left it off.
+
 ## How other profilers handle it
 
 They all read the link register. What differs is how they decide whether it
@@ -77,14 +97,15 @@ real unwind; "What this cannot do" below says exactly where.
 Samples that landed inside a frameless leaf, on Graviton3. The count varies per
 run; what matters is that it is all-or-nothing:
 
-| path | default? | before | after |
+| path | default? | setting off | setting on |
 |---|---|---|---|
 | perf backend (`perf_event_open`) | yes | 0/308 | 308/308 |
 | ctimer backend (`SIGPROF` timer signal) | fallback | 0/31 | 31/31 |
 
-"Before" means the same tree with the recovery removed, by hand rather than in
-continuous integration. With `-C force-frame-pointers=yes` still set, both
-backends report every leaf sample and no frame is duplicated.
+Both columns run in CI: each backend test runs with the setting on and then off,
+in that order, so the "off" run happens after the table is built and checks the
+setting itself. With `-C force-frame-pointers=yes`, both backends report every
+leaf sample either way and no frame is duplicated.
 
 The same effect shows up in a real program. `examples/rayon-fanout` has two
 call-free functions, `score_document` and `hash_block`; `objdump` confirms
@@ -359,7 +380,7 @@ no locks. *Building* it is not. So there are two entry points over one
 
 | entry point | caller | why |
 |---|---|---|
-| `init()` | `CtimerSampler::start` | the signal handler reads the table from signal context and cannot build it on demand, so it must already exist |
+| `init()` | `CtimerSampler::start`, when the setting is on | the signal handler reads the table from signal context and cannot build it on demand, so it must already exist |
 | `get_or_build()` | the perf backend's sample drain | ordinary context, so build on first use — a perf-only process never pays for a table it will not read |
 
 The ctimer sampler builds it rather than `install_handler`, because the signal
@@ -383,8 +404,8 @@ cargo test --release -p dial9-perf-self-profile --lib \
 
 ## Cost per sample
 
-The perf path adds one extra 64-bit value per sample in the ring buffer: the
-link register, requested through `PERF_SAMPLE_REGS_USER`. `lr_from_regs` reads
+With the setting on, the perf path adds one extra 64-bit value per sample in the
+ring buffer: the link register, requested through `PERF_SAMPLE_REGS_USER`. `lr_from_regs` reads
 it back and strips pointer authentication bits, which the kernel does for stack
 addresses but not for registers.
 
@@ -454,7 +475,7 @@ leaf recovery at all, and async-profiler does.
 | `perf_backend_leaf_caller.rs` | the perf path | `perf_event_paranoid <= 1` |
 | `leaf_caller_recovery.rs` | the ctimer path | `DIAL9_FORCE_CTIMER=1` |
 | `leaf_frame_pointers.rs` | leaf detection, and the self-test blind spot | — |
-| `leaf-caller-recovery` job | both backends, built without the flag | `DIAL9_NO_SKIP`, `DIAL9_EXPECT_LEAVES` |
+| `leaf-caller-recovery` job | both backends, built without the flag, with the setting on and then off | `DIAL9_NO_SKIP`, `DIAL9_EXPECT_LEAVES` |
 | `rule_tests` | the rule, one case per row of the table above, plus scratch and signed values | — |
 | `func_starts` unit tests | lookups, the bounds, load offsets, section bounds, the per-module symbol cap, and the loaded-image check | — |
 | note-walk tests (`rstest`) | empty descriptor, another vendor's name, other GNU note types, an id behind an earlier note, unpadded and oversized descriptors, truncation, sizes near the 32-bit limit | — |

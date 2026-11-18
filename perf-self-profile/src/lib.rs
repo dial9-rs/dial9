@@ -15,6 +15,12 @@
 //! rustflags = ["-C", "force-frame-pointers=yes"]
 //! ```
 //!
+//! On 64-bit Arm (aarch64) you can drop that flag and set
+//! [`SamplerConfig::recover_leaf_callers`] (or the same setting on
+//! `CpuProfilingConfig` / `SchedEventConfig`) instead. Rust's default build
+//! there gives every function a frame record except leaves, and the setting
+//! recovers each leaf's missing caller from the link register.
+//!
 //! ## Quick start
 //!
 //! ```no_run

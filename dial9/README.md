@@ -26,7 +26,7 @@ For a fleet where only some processes should record, see [Startup sampling](#sta
 
 You can also find a full [example service](https://github.com/dial9-rs/dial9/blob/HEAD/examples).
 
-dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime: poll spans, task spawn and terminate, and per-worker queue depth. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder. These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
+dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime: poll spans, task spawn and terminate, and per-worker queue depth. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder; on 64-bit Arm, CPU profiling can do without the flag (see [Frame pointers on 64-bit Arm](#frame-pointers-on-64-bit-arm)). These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
 
 ```toml
 # .cargo/config.toml
@@ -366,6 +366,8 @@ dial9 = { version = "0.5", features = ["cpu-profiling"] }
 rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 ```
 
+On 64-bit Arm (aarch64) you can drop `-C force-frame-pointers=yes` for CPU profiling; see [Frame pointers on 64-bit Arm](#frame-pointers-on-64-bit-arm).
+
 **Enable CPU profiling** (`.with_cpu_profiling` on the recorder):
 
 ```rust,no_run
@@ -424,6 +426,39 @@ DIAL9_TOKIO_INSTRUMENTATION_ENABLED=false
 In this mode, dial9 does not install its own Tokio runtime hooks. APIs that
 depend on those hooks will not observe runtime context. Hooks you pass via
 `TokioHooks` are still installed.
+
+#### Frame pointers on 64-bit Arm
+
+On 64-bit Arm (aarch64), Rust's default build already gives every function that
+calls something a frame record. Only *leaf* functions, the ones that call
+nothing, are left without one. A frame-pointer stack walk then skips each
+leaf's immediate caller, which is why the setup above asks for
+`-C force-frame-pointers=yes`. That flag gives leaves a frame record too, but
+adds overhead.
+
+Turn on `recover_leaf_callers` instead, and dial9 recovers the missing caller
+from the link register. With it on, you do not need
+`-C force-frame-pointers=yes` for CPU or scheduler profiling on 64-bit Arm:
+
+```rust,no_run
+use dial9::cpu::{CpuProfilingConfig, SchedEventConfig};
+use dial9::RecorderPerfExt;
+# let writer = dial9::MemoryBuffer::new(1 << 20).unwrap();
+let recorder = dial9::recorder(writer)
+    .with_cpu_profiling(CpuProfilingConfig::default().recover_leaf_callers(true))
+    .with_sched_events(SchedEventConfig::default().recover_leaf_callers(true))
+    .build();
+```
+
+Or set `DIAL9_RECOVER_LEAF_CALLERS=true` with the environment config.
+
+It is off by default. It adds one 64-bit value to each perf sample, and a table
+of function start addresses built once per process. It does nothing on other
+architectures: on x86-64, Rust's default build has no frame pointers at all, so
+keep `-C force-frame-pointers=yes` there. It also does not change memory
+profiling, which keeps its own frame-pointer requirement. How it works and what
+it cannot recover are in
+[`docs/design/leaf-caller-recovery.md`](https://github.com/dial9-rs/dial9/blob/HEAD/docs/design/leaf-caller-recovery.md).
 
 #### System requirements
 - `perf_event_paranoid`: CPU profiling requires <= 2. `sched_events` requires <= 1.
