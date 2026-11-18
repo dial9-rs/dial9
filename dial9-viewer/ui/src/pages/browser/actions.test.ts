@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createActions, ROW_H } from "./actions.js";
+import { Dial9Creds } from "../../lib/trace/creds.js";
 import type { BrowserEls } from "./dom.js";
 import { createBrowserStore, type HeatmapSegment } from "./state.js";
 import { toRows } from "./segments.js";
@@ -86,6 +87,208 @@ describe("prefix discovery", () => {
       );
     },
   );
+});
+
+describe("prefix scope", () => {
+  const ROLE_ARN = "arn:aws:iam::123456789012:role/trace-reader";
+
+  function jsonResponse(body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  function setup(service = "") {
+    stubUrlEnv();
+    vi.stubGlobal("alert", vi.fn());
+    const fetchMock = vi.fn(async (url: string) =>
+      url.startsWith("/api/credentials/check")
+        ? jsonResponse({ ok: true, region: "us-west-2", error: null })
+        : url.startsWith("/api/prefixes")
+          ? jsonResponse(["dial9-traces/", "other/"])
+          : jsonResponse({ objects: [] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const store = createBrowserStore();
+    const els = browserEls(service);
+    Object.assign(els, { credsRegion: input() });
+    const actions = createActions(store, els);
+    const urls = () => fetchMock.mock.calls.map(([url]) => url);
+    return { store, els, actions, urls };
+  }
+
+  it.each([
+    { name: "a visible prefix", server: false },
+    { name: "a server prefix", server: true },
+  ])("skips root prefix discovery for $name", async ({ server }) => {
+    const { store, els, actions, urls } = setup();
+    store.update("config", { serverHasPrefix: server });
+
+    await actions.discoverPrefixes();
+
+    expect(urls()).toEqual([]);
+    expect(els.prefixInput.value).toBe("dial9-traces");
+  });
+
+  it.each([
+    { name: "the visible prefix", prefix: "dial9-traces", server: false, sent: "dial9-traces" },
+    // The check applies the server default itself, as browse does.
+    { name: "the server prefix", prefix: "dial9-traces", server: true, sent: null },
+    { name: "the bucket", prefix: "", server: false, sent: null },
+  ])("checks and reads at $name", async ({ prefix, server, sent }) => {
+    const { store, els, actions, urls } = setup("checkout-api");
+    Object.assign(window, { dispatchEvent: vi.fn() });
+    Dial9Creds.setRoleArn(ROLE_ARN);
+    try {
+      store.update("source", {
+        ...store.getState().source,
+        credentials: { kind: "role", roleArn: ROLE_ARN },
+      });
+      store.update("config", { serverHasPrefix: server });
+      els.prefixInput.value = prefix;
+
+      await actions.detectRegionForBucket("traces-bucket");
+      await actions.doTimeRangeSearch();
+
+      const requests = urls().map((url) => new URL(url, "http://x"));
+      expect(requests.map((url) => url.pathname)).toEqual([
+        "/api/credentials/check",
+        "/api/browse",
+        "/api/browse",
+      ]);
+      for (const url of requests) {
+        expect(url.searchParams.get("bucket")).toBe("traces-bucket");
+        expect(url.searchParams.get("prefix") || null).toBe(sent);
+      }
+      expect(store.getState().source.region).toBe("us-west-2");
+    } finally {
+      Dial9Creds.setAmbient();
+    }
+  });
+
+  it("starts a new bucket from its root", async () => {
+    const { store, els, actions, urls } = setup();
+    els.prefixInput.value = "";
+    await actions.discoverPrefixes();
+    expect(els.prefixInput.value).toBe("dial9-traces");
+
+    actions.resetPrefixForBucketChange("traces-bucket", "other-bucket");
+    expect(els.prefixInput.value).toBe("");
+    expect(store.getState().search.suggestions).toEqual([]);
+    els.bucketInput.value = "other-bucket";
+    await actions.discoverPrefixes();
+
+    expect(urls()).toEqual([
+      "/api/prefixes?bucket=traces-bucket",
+      "/api/prefixes?bucket=other-bucket",
+    ]);
+  });
+
+  it.each([
+    { name: "a prefix entered before any bucket", previous: "" },
+    { name: "the same bucket", previous: "traces-bucket" },
+  ])("keeps $name", ({ previous }) => {
+    const { els, actions } = setup();
+
+    actions.resetPrefixForBucketChange(previous, "traces-bucket");
+
+    expect(els.prefixInput.value).toBe("dial9-traces");
+  });
+
+  it.each([
+    {
+      name: "omits an implicit server-default bucket but keeps a typed, URL or chip-selected prefix",
+      fromServerDefault: true,
+      prefixAutoSelected: false,
+      bucket: null,
+      prefix: "dial9-traces",
+    },
+    {
+      name: "omits an implicit server-default bucket and its auto-selected prefix",
+      fromServerDefault: true,
+      prefixAutoSelected: true,
+      bucket: null,
+      prefix: null,
+    },
+    {
+      name: "serializes an explicit bucket and its auto-selected prefix",
+      fromServerDefault: false,
+      prefixAutoSelected: true,
+      bucket: "traces-bucket",
+      prefix: "dial9-traces",
+    },
+  ])(
+    "$name from the URL",
+    ({ fromServerDefault, prefixAutoSelected, bucket, prefix }) => {
+      const replaceState = stubUrlEnv();
+      const store = createBrowserStore();
+      const els = browserEls("");
+      Object.assign(els, { credsRegion: input() });
+      store.update("form", {
+        bucketFromServerDefault: fromServerDefault,
+        prefixAutoSelected,
+      });
+      const actions = createActions(store, els);
+
+      actions.syncUrl();
+
+      const url = String(replaceState.mock.calls.at(-1)?.[2]);
+      const params = new URL(url, "http://x").searchParams;
+      expect(params.get("bucket")).toBe(bucket);
+      expect(params.get("prefix")).toBe(prefix);
+      // The page keeps browsing the source even when it stays out of the URL.
+      expect(store.getState().source.bucket).toBe("traces-bucket");
+      expect(els.prefixInput.value).toBe("dial9-traces");
+    },
+  );
+
+  it.each([
+    { name: "clears an auto-selected prefix", selection: "auto", expected: "" },
+    // A chip click mirrors the prefix as an explicit selection.
+    { name: "keeps a chip-selected prefix", selection: "chip", expected: "dial9-traces" },
+    { name: "keeps a typed prefix", selection: "typed", expected: "dial9-traces" },
+  ] as const)("$name when its bucket is dropped", async ({ selection, expected }) => {
+    const { store, els, actions } = setup();
+    if (selection === "typed") {
+      actions.mirrorPrefix();
+      store.update("search", { suggestions: ["dial9-traces"] });
+    } else {
+      els.prefixInput.value = "";
+      await actions.discoverPrefixes();
+      expect(els.prefixInput.value).toBe("dial9-traces");
+      expect(store.getState().form.prefixAutoSelected).toBe(true);
+      if (selection === "chip") actions.mirrorPrefix();
+    }
+
+    actions.dropAutoSelectedPrefix();
+
+    expect(els.prefixInput.value).toBe(expected);
+    expect(store.getState().form.prefix).toBe(expected);
+    expect(store.getState().form.prefixAutoSelected).toBe(false);
+    expect(store.getState().search.suggestions).toEqual([]);
+  });
+
+  it("lists empty-result sample keys under the search prefix", async () => {
+    const { actions, urls } = setup("checkout-api");
+
+    await actions.doTimeRangeSearch();
+
+    expect(urls()).toHaveLength(2);
+    for (const url of urls()) {
+      expect(new URL(url, "http://x").searchParams.get("prefix")).toBe("dial9-traces");
+    }
+  });
+
+  it("lists raw empty-result sample keys under the search prefix", async () => {
+    const { els, actions, urls } = setup();
+    els.rawSearchInput.value = "dial9-traces/version=1/";
+
+    await actions.doRawSearch();
+
+    expect(urls()).toHaveLength(2);
+    expect(new URL(urls()[1]!, "http://x").searchParams.get("prefix")).toBe("dial9-traces");
+  });
 });
 
 describe("URL service loading", () => {

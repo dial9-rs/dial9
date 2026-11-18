@@ -17,27 +17,9 @@ import {
   sourceScopeFromStored,
 } from "../../lib/trace/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
+import { sideBCheckRequest, sideBHeaders, type SideBCreds } from "./diff-creds.js";
 import type { PageEls } from "./dom.js";
 import { readDiffState, writeDiffState } from "./diff-state.js";
-
-/** In-memory credentials for side B (never stored, never in the URL). */
-interface SideBCreds {
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
-  region?: string;
-}
-
-/** Build x-dial9-aws-* headers from an explicit credential set. */
-function credsToHeaders(c: SideBCreds): Record<string, string> {
-  const h: Record<string, string> = {
-    "x-dial9-aws-access-key-id": c.accessKeyId,
-    "x-dial9-aws-secret-access-key": c.secretAccessKey,
-  };
-  if (c.sessionToken) h["x-dial9-aws-session-token"] = c.sessionToken;
-  if (c.region) h["x-dial9-aws-region"] = c.region;
-  return h;
-}
 
 /**
  * Run the diff view for a versioned `?diff=` URL. Returns without rendering
@@ -71,26 +53,26 @@ export function runDiffMode(params: URLSearchParams, els: PageEls): void {
 
   // Per-side credentials: both default to this tab's session creds; `credsB`
   // overrides B once supplied (held in memory for this tab only).
+  const bScope = diffParsed.b;
   let credsB: SideBCreds | null = null;
   const headersFor = (side: "a" | "b"): Record<string, string> =>
     Dial9Session.headers(
-      side === "b" && credsB !== null ? credsToHeaders(credsB) : Dial9Creds.headers(),
+      side === "b" ? sideBHeaders(bScope, credsB, Dial9Creds.headers()) : Dial9Creds.headers(),
     );
 
   let view: DiffViewHandle | null = null;
   let bCredsPrompted = false;
 
-  // Validate candidate B creds against B's bucket via /api/credentials/check
+  // Validate candidate B creds against B's scope via /api/credentials/check
   // (both confirms access and resolves B's region for the S3 endpoint).
-  const bBucket = diffParsed.b.get("bucket");
+  const bBucket = bScope.get("bucket");
   async function checkBCreds(
     creds: SideBCreds,
   ): Promise<{ ok: boolean; region?: string | null; error?: string }> {
-    const url =
-      "/api/credentials/check" + (bBucket ? "?bucket=" + encodeURIComponent(bBucket) : "");
+    const { url, headers } = sideBCheckRequest(bScope, creds);
     const resp = await Dial9Session.fetch(url, {
       method: "POST",
-      headers: credsToHeaders(creds),
+      headers,
     });
     if (!resp.ok) {
       return { ok: false, error: await resp.text().catch(() => "check failed") };

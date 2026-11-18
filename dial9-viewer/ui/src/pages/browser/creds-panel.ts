@@ -70,44 +70,85 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     store.update("creds", { panelOpen: open });
   }
 
+  // The panel resumes discovery itself after its own credential writes; the
+  // credentials-changed reaction below is for writes made elsewhere (e.g. a
+  // userscript calling Dial9Creds.set). Covers only the synchronous part of
+  // `write`, where creds.js dispatches the change event.
+  let ownWrite = false;
+  function writeCreds(write: () => void): void {
+    ownWrite = true;
+    try {
+      write();
+    } finally {
+      ownWrite = false;
+    }
+  }
+
+  // Continue once a bucket is usable: discover its prefixes and services,
+  // and re-run a raw query (the panel's own writes skip the change reaction).
+  function resumeWithBucket(): void {
+    void actions.discoverPrefixes().then(() => actions.discoverServices());
+    if (store.getState().ui.tab === "raw") actions.reRunCurrentSearch();
+  }
+
+  // A server-default bucket belongs to the ambient identity, so drop it with
+  // its auto-selected prefix, suggestions, service and results before
+  // another identity browses. An explicit prefix stays for the first
+  // explicit bucket.
+  function dropServerDefaultBucket(): void {
+    if (!store.getState().form.bucketFromServerDefault) return;
+    els.bucketInput.value = "";
+    store.update("form", { bucketFromServerDefault: false });
+    actions.dropAutoSelectedPrefix();
+    actions.resetBrowsePane();
+  }
+
   // Choose a bucket. ListBuckets normally supplies its region directly;
   // fall back to /api/credentials/check for compatible S3 implementations
   // that omit the newer BucketRegion field.
   async function selectBucket(bucket: BucketInfo): Promise<void> {
-    const { name } = bucket;
+    const { name, region } = bucket;
     // Switching to a different bucket invalidates any active/leftover service:
     // it belongs to the previous bucket, and discoverServices would otherwise
     // bypass discovery and browse it against the new bucket. Clearing it forces
     // fresh discovery. A same-bucket re-select (e.g. boot-time auto-select of a
-    // URL-restored bucket) keeps a URL-requested service intact.
-    if (els.bucketInput.value.trim() !== name) els.serviceInput.value = "";
+    // URL-restored bucket) keeps a URL-requested service intact. The previous
+    // bucket's prefix goes too.
+    const previous = els.bucketInput.value.trim();
+    if (previous !== name) els.serviceInput.value = "";
+    actions.resetPrefixForBucketChange(previous, name);
     store.update("creds", { selectedBucket: name });
     els.bucketInput.value = name;
+    // A picked bucket is explicit, even when it matches the server default.
+    if (store.getState().form.bucketFromServerDefault) {
+      store.update("form", { bucketFromServerDefault: false });
+    }
     actions.syncUrl();
-    if (bucket.region) {
-      els.credsRegion.value = bucket.region;
-      creds.setRegion(bucket.region);
+    if (region) {
+      els.credsRegion.value = region;
+      writeCreds(() => creds.setRegion(region));
       actions.syncUrl();
-      setStatus(`Using ${name} · region ${bucket.region}`, "ok");
-      void actions.discoverPrefixes().then(() => actions.discoverServices());
+      setStatus(`Using ${name} · region ${region}`, "ok");
+      resumeWithBucket();
       return;
     }
     setStatus(`Detecting region for ${name}…`, null);
-    const result = await creds.check(name);
+    const result = await creds.check(name, { prefix: actions.requestPrefix() });
     if (result.ok) {
-      if (result.region) {
-        els.credsRegion.value = result.region;
+      const detected = result.region;
+      if (detected) {
+        els.credsRegion.value = detected;
         // Persist the resolved region so it rides on every request, then
         // mirror it into the URL (aws_region) so a shared link reproduces
         // the cross-region bucket.
-        creds.setRegion(result.region);
+        writeCreds(() => creds.setRegion(detected));
         actions.syncUrl();
       }
-      setStatus(`Using ${name}${result.region ? ` · region ${result.region}` : ""}`, "ok");
-      void actions.discoverPrefixes().then(() => actions.discoverServices());
-    } else {
-      setStatus(`Cannot use ${name}: ${result.error || "unknown error"}`, "error");
+      setStatus(`Using ${name}${detected ? ` · region ${detected}` : ""}`, "ok");
+      resumeWithBucket();
+      return;
     }
+    setStatus(`Cannot use ${name}: ${result.error || "unknown error"}`, "error");
   }
 
   // Auto-select when there's exactly one filter-matching bucket - the
@@ -134,8 +175,8 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     setStatus("Listing buckets…", null);
     try {
       const buckets = await creds.listBuckets();
-      setStatus(`${buckets.length} bucket(s) — pick one below`, "ok");
       store.update("creds", { buckets, bucketsRowVisible: true });
+      setStatus(`${buckets.length} bucket(s) — pick one below`, "ok");
       autoSelectSingleMatch();
     } catch (e) {
       setStatus("Rejected: " + (e instanceof Error ? e.message : String(e)), "error");
@@ -304,28 +345,37 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       setStatus("Filled from pasted JSON — review and click Apply", "ok");
     });
 
-    // Apply: validate, drop any prior bucket selection (it belongs to a
-    // different identity), store the creds, list the visible buckets.
+    // Apply: store the credentials, then validate them. An explicit bucket is
+    // kept and checked at the request prefix, without ListBuckets (credentials
+    // scoped to it may be denied that). Without one, listing the visible
+    // buckets validates them and powers the picker. A failed check keeps the
+    // credentials stored.
     els.credsApply.addEventListener("click", () => {
       void (async () => {
         if (!els.credsAkid.value.trim() || !els.credsSecret.value.trim()) {
           setStatus("Access key ID and secret are required", "error");
           return;
         }
-        els.bucketInput.value = "";
-        actions.syncUrl();
-        // Store the credentials (no region detection yet - we don't have a
-        // bucket). Then list the buckets these credentials can see; this
-        // both validates the credentials and powers the picker.
-        await creds.set({
-          accessKeyId: els.credsAkid.value,
-          secretAccessKey: els.credsSecret.value,
-          sessionToken: els.credsToken.value,
-          region: els.credsRegion.value,
-          autoDetectRegion: false,
+        // A previous listing belongs to a different identity.
+        store.update("creds", { buckets: [], bucketsRowVisible: false, selectedBucket: null });
+        dropServerDefaultBucket();
+        // Store only; the bucket check or listing below validates them. The
+        // write's change event fires synchronously, inside writeCreds.
+        let stored!: Promise<unknown>;
+        writeCreds(() => {
+          stored = creds.set({
+            accessKeyId: els.credsAkid.value,
+            secretAccessKey: els.credsSecret.value,
+            sessionToken: els.credsToken.value,
+            region: els.credsRegion.value,
+            autoDetectRegion: false,
+          });
         });
+        await stored;
         actions.syncUrl();
-        await loadBuckets();
+        const bucket = els.bucketInput.value.trim();
+        if (bucket) await selectBucket({ name: bucket, region: null });
+        else await loadBuckets();
       })();
     });
 
@@ -339,8 +389,11 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       els.credsRegion.value = "";
       // The selected bucket belonged to the now-removed identity; drop it
       // so a later search can't query a foreign bucket as the server's
-      // ambient identity (which would 500/leak).
+      // ambient identity (which would 500/leak). Its auto-selected prefix and
+      // suggestions go first, so neither carries to the next bucket.
+      actions.dropAutoSelectedPrefix();
       els.bucketInput.value = "";
+      store.update("form", { bucketFromServerDefault: false });
       actions.syncUrl();
       store.update("creds", {
         buckets: [],
@@ -352,13 +405,17 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     });
 
     // React to programmatic changes (e.g. an injected userscript calling
-    // Dial9Creds.set) as well as the panel's own actions. An active service is
-    // reloaded; an already-picked bucket with no active service runs only the
-    // lightweight discovery query.
+    // Dial9Creds.set). The panel's own writes resume via resumeWithBucket. A
+    // server-default bucket gives way to the new identity's picker; an
+    // active service is reloaded; an already-picked bucket with no active
+    // service runs only the lightweight discovery query.
     window.addEventListener("dial9:credentials-changed", () => {
       refreshFields();
-      if (!creds.has()) return;
-      if (actions.canRerunCurrentSearch()) {
+      if (ownWrite || !creds.has()) return;
+      if (store.getState().form.bucketFromServerDefault) {
+        dropServerDefaultBucket();
+        void loadBuckets();
+      } else if (actions.canRerunCurrentSearch()) {
         actions.reRunCurrentSearch();
       } else if (els.bucketInput.value.trim()) {
         void actions.discoverPrefixes().then(() => actions.discoverServices());
@@ -369,8 +426,10 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
 
     // Returning user: credentials already in sessionStorage. Keep the panel
     // closed (the green button signals creds are active) but re-list their
-    // buckets in the background so the picker is ready when opened.
-    if (creds.has()) {
+    // buckets in the background so the picker is ready when opened. A
+    // supplied bucket needs no picker, and credentials scoped to it may be
+    // denied ListBuckets; boot discovers its prefixes separately.
+    if (creds.has() && !els.bucketInput.value.trim()) {
       void loadBuckets();
     }
   }

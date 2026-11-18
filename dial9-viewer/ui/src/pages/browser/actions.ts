@@ -64,7 +64,10 @@ export const ROW_H = 26;
 export interface BrowserActions {
   syncUrl(historyMode?: "replace" | "push"): void;
   setRestoring(on: boolean): void;
-  mirrorPrefix(): void;
+  mirrorPrefix(autoSelected?: boolean): void;
+  requestPrefix(): string;
+  resetPrefixForBucketChange(previous: string, next: string): void;
+  dropAutoSelectedPrefix(): void;
   setQuickRange(hours: number): void;
   clearQuickRange(): void;
   switchTab(tab: "browse" | "raw"): void;
@@ -144,13 +147,20 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
     const s = store.getState();
     const state: UrlStateFields = {
-      bucket: source.bucket,
+      // A server-default source stays implicit: on reload /api/config
+      // supplies the bucket again and discovery re-selects its prefix. A
+      // typed, URL, suggestion-chip or server-configured prefix remains
+      // explicit.
+      bucket: s.form.bucketFromServerDefault ? "" : source.bucket,
       region: source.region,
       credentialMode: source.credentials.kind,
       ...(source.credentials.kind === "role"
         ? { roleArn: source.credentials.roleArn }
         : {}),
-      prefix: els.prefixInput.value.trim(),
+      prefix:
+        s.form.bucketFromServerDefault && s.form.prefixAutoSelected
+          ? ""
+          : els.prefixInput.value.trim(),
       service: els.serviceInput.value.trim(),
       tab: s.ui.tab,
       tz: s.ui.useLocalTz ? "local" : "utc",
@@ -201,8 +211,44 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     );
   }
 
-  function mirrorPrefix(): void {
-    store.update("form", { prefix: els.prefixInput.value });
+  // Mirror the prefix input and record whether discovery picked it
+  // automatically.
+  function mirrorPrefix(autoSelected = false): void {
+    store.update("form", {
+      prefix: els.prefixInput.value,
+      prefixAutoSelected: autoSelected,
+    });
+  }
+
+  // The key prefix sent with every source request: credential checks,
+  // discovery and browsing all read this one scope. When the server has its
+  // own prefix it owns prefixing; otherwise the visible prefix is passed and
+  // the server combines it with any default.
+  function requestPrefix(): string {
+    return store.getState().config.serverHasPrefix ? "" : els.prefixInput.value.trim();
+  }
+
+  // A prefix and its suggestion chips describe one bucket's layout. Drop
+  // them when one bucket replaces another so the new bucket's check,
+  // discovery and reads start from its root. A prefix entered before any
+  // bucket belongs to the first one, and a server prefix to every bucket.
+  function resetPrefixForBucketChange(previous: string, next: string): void {
+    if (!previous || previous === next) return;
+    if (!store.getState().config.serverHasPrefix) {
+      els.prefixInput.value = "";
+      mirrorPrefix();
+    }
+    store.update("search", { suggestions: [], activeSuggestion: null });
+  }
+
+  // Drop the suggestions of a bucket that is being dropped, and the prefix
+  // discovery auto-selected in it. An explicit prefix is kept for the next
+  // bucket.
+  function dropAutoSelectedPrefix(): void {
+    store.update("search", { suggestions: [], activeSuggestion: null });
+    if (!store.getState().form.prefixAutoSelected) return;
+    els.prefixInput.value = "";
+    mirrorPrefix();
   }
 
   function setQuickRange(hours: number): void {
@@ -321,11 +367,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
 
     const fromEpoch = Math.floor(from.getTime() / 1000);
     const toEpoch = Math.floor(to.getTime() / 1000);
-    // When the server has its own prefix it owns prefixing; otherwise pass
-    // the user-entered key prefix. The server combines it with any default.
-    const keyPrefix = !store.getState().config.serverHasPrefix
-      ? els.prefixInput.value.trim()
-      : "";
+    const keyPrefix = requestPrefix();
     const service = els.serviceInput.value.trim();
     if (!service) {
       await discoverServices();
@@ -410,7 +452,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         // Show sample keys to help the user understand the bucket layout
         let status: StatusState;
         try {
-          const sampleKeys = await sampleBucketKeys(bucket, { service });
+          const sampleKeys = await sampleBucketKeys(bucket, { prefix: keyPrefix, service });
           if (generation !== browseGeneration) return;
           status = sampleKeys.length > 0
             ? {
@@ -510,7 +552,9 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       });
       let statusPatch: Partial<StatusState>;
       try {
-        const sampleKeys = await sampleBucketKeys(els.bucketInput.value.trim());
+        const sampleKeys = await sampleBucketKeys(els.bucketInput.value.trim(), {
+          prefix: requestPrefix(),
+        });
         statusPatch = sampleKeys.length > 0
           ? { text: "No results found. Sample keys in this bucket:", sampleKeys }
           : { text: "No results found. Bucket appears empty.", sampleKeys: null };
@@ -538,6 +582,12 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       store.update("search", { prefixPlaceholder: "e.g. traces" });
       return;
     }
+    // A known prefix (visible or the server's) already names the scope;
+    // listing the bucket root could need access beyond it.
+    if (store.getState().config.serverHasPrefix || requestPrefix()) {
+      store.update("search", { prefixPlaceholder: "e.g. traces" });
+      return;
+    }
     try {
       const resp = await apiFetch(`/api/prefixes?bucket=${encodeURIComponent(bucket)}`);
       if (!resp.ok) {
@@ -561,13 +611,12 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       const hasRootLayout =
         isDateLayer(prefixes) ||
         prefixes.some((prefix) => lastSegment(prefix) === "version=1");
-      if (!store.getState().config.serverHasPrefix && hasRootLayout) {
+      if (hasRootLayout) {
         els.prefixInput.value = "";
         mirrorPrefix();
         store.update("search", {
           prefixPlaceholder: "(no prefix — layout at root)",
         });
-        store.update("config", { serverHasPrefix: false });
         syncUrl();
         return;
       }
@@ -578,7 +627,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         const preferred = preferredPrefix(prefixes);
         if (preferred) {
           els.prefixInput.value = preferred;
-          mirrorPrefix();
+          mirrorPrefix(true);
           syncUrl();
         }
       }
@@ -640,9 +689,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
 
     const fromEpoch = Math.floor(from.getTime() / 1000);
     const toEpoch = Math.floor(to.getTime() / 1000);
-    const keyPrefix = !store.getState().config.serverHasPrefix
-      ? els.prefixInput.value.trim()
-      : "";
+    const keyPrefix = requestPrefix();
     const requested = els.serviceInput.value.trim();
     const requestedSelection = resolveRequestedService(requested);
     if (requestedSelection) {
@@ -778,14 +825,15 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
 
   // Region auto-detection: resolve a (possibly cross-region) bucket's real
   // region via /api/credentials/check before any data endpoint is hit, and
-  // persist it into the stored credentials. No-op without credentials.
+  // persist it into the stored credentials. No-op without credentials. The
+  // check reads the same prefix scope as browsing.
   async function detectRegionForBucket(bucket: string): Promise<void> {
     const source = currentSource();
     const configured =
       source.credentials.kind === "role" || isLiteralConfigured(source.credentials);
     if (!bucket || !configured) return;
     try {
-      const result = await Dial9Creds.check(bucket);
+      const result = await Dial9Creds.check(bucket, { prefix: requestPrefix() });
       if (result.ok && result.region && source.region !== result.region) {
         Dial9Creds.setRegion(result.region);
         els.credsRegion.value = result.region;
@@ -1135,6 +1183,9 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       restoring = on;
     },
     mirrorPrefix,
+    dropAutoSelectedPrefix,
+    requestPrefix,
+    resetPrefixForBucketChange,
     setQuickRange,
     clearQuickRange,
     switchTab,

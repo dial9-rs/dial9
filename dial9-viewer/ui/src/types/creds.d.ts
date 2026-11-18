@@ -42,12 +42,19 @@ declare module "*/creds.js" {
     region?: string;
     autoDetectRegion?: boolean;
     bucket?: string;
+    /** Validate access under this key prefix instead of the whole bucket. */
+    prefix?: string;
   }
 
   export interface CredentialCheckResult {
     ok: boolean;
     region?: string | null;
     error: string | null;
+  }
+
+  export interface CredentialCheckOptions {
+    /** Validate access under this key prefix instead of the whole bucket. */
+    prefix?: string;
   }
 
   export interface CredentialStorage {
@@ -59,7 +66,7 @@ declare module "*/creds.js" {
   /** Exact public facade used by the private Tampermonkey integration. */
   export interface Dial9CredsUserscriptApi {
     set(creds: SetCredentialsInput): Promise<CredentialCheckResult>;
-    check(bucket?: string): Promise<CredentialCheckResult>;
+    check(bucket?: string, opts?: CredentialCheckOptions): Promise<CredentialCheckResult>;
     setRegion(region: string): StoredCredentials;
   }
 

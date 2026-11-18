@@ -105,6 +105,9 @@ describe("prefix changes", () => {
       expect(store.getState().browse.activeService).toBe("checkout-api");
       expect(store.getState().browse.rows).toHaveLength(1);
       fetchMock.mockClear();
+      // An auto-selected prefix under an implicit server-default bucket stays
+      // out of the URL; replacing it by typing or a chip click is explicit.
+      store.update("form", { bucketFromServerDefault: true, prefixAutoSelected: true });
 
       if (edit === "input") {
         elements.prefixInput.value = "worker-traces";
@@ -120,6 +123,7 @@ describe("prefix changes", () => {
       expect(store.getState().browse.activeService).toBeNull();
       expect(store.getState().browse.services).toEqual([]);
       expect(store.getState().browse.rows).toEqual([]);
+      expect(store.getState().form.prefixAutoSelected).toBe(false);
       const url = new URL(replaceState.mock.lastCall![2], "http://localhost");
       expect(url.searchParams.get("prefix")).toBe("worker-traces");
       expect(url.searchParams.get("service")).toBe("");
