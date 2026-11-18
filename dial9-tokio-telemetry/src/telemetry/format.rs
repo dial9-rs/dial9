@@ -115,7 +115,8 @@ pub struct WorkerParkEvent {
     pub cpu_time_ns: u64,
     /// OS thread ID of the parking thread: `gettid()` on Linux/Android,
     /// `pthread_getthreadid_np()` on FreeBSD, or a synthetic per-process
-    /// counter on other platforms — see `events::current_tid`.
+    /// counter on other platforms, read once per thread and cached; see
+    /// `dial9_core::thread::cached_tid`.
     pub tid: u32,
 }
 
@@ -139,7 +140,8 @@ pub struct WorkerUnparkEvent {
     pub sched_wait_ns: Option<u64>,
     /// OS thread ID of the unparking thread: `gettid()` on Linux/Android,
     /// `pthread_getthreadid_np()` on FreeBSD, or a synthetic per-process
-    /// counter on other platforms — see `events::current_tid`.
+    /// counter on other platforms, read once per thread and cached; see
+    /// `dial9_core::thread::cached_tid`.
     pub tid: u32,
 }
 

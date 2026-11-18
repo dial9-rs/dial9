@@ -959,7 +959,7 @@ fn make_worker_park(ctx: &RuntimeContext) -> WorkerParkEvent {
         worker_id,
         local_queue: worker_local_queue_depth as u8,
         cpu_time_ns: cpu_time_nanos,
-        tid: crate::telemetry::events::current_tid(),
+        tid: crate::telemetry::events::cached_tid(),
     }
 }
 
@@ -987,7 +987,7 @@ fn make_worker_unpark(ctx: &RuntimeContext) -> WorkerUnparkEvent {
         local_queue: worker_local_queue_depth as u8,
         cpu_time_ns: cpu_time_nanos,
         sched_wait_ns: sched_wait_delta_nanos,
-        tid: crate::telemetry::events::current_tid(),
+        tid: crate::telemetry::events::cached_tid(),
     }
 }
 
@@ -1005,6 +1005,24 @@ mod tests {
         ));
         ctx.worker_ids.lock().unwrap().insert(worker_id);
         contexts.lock().unwrap().push(ctx);
+    }
+
+    /// Park/unpark events carry the calling thread's kernel tid even though
+    /// the hooks read it from a per-thread cache instead of calling `gettid`.
+    #[test]
+    fn park_unpark_events_carry_calling_thread_tid() {
+        fn tids() -> (u32, u32, u32) {
+            let ctx =
+                RuntimeContext::new(None, Dial9Handle::disabled(), Arc::new(AtomicU64::new(0)));
+            let park = make_worker_park(&ctx);
+            let unpark = make_worker_unpark(&ctx);
+            (park.tid, unpark.tid, dial9_core::thread::current_tid())
+        }
+        let (park, unpark, tid) = tids();
+        assert_eq!((park, unpark), (tid, tid));
+        let (other_park, other_unpark, other_tid) = std::thread::spawn(tids).join().unwrap();
+        assert_eq!((other_park, other_unpark), (other_tid, other_tid));
+        assert_ne!(other_tid, tid, "each thread must report its own tid");
     }
 
     #[test]
