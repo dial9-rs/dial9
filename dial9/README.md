@@ -8,7 +8,7 @@ dial9 is a microscope for Tokio and Rust applications in general. It allows you 
 
 [Demo (Youtube)](https://www.youtube.com/watch?v=kr0RYMu57kU) | [Demo Application](https://dial9-tokio-telemetry.netlify.app/?trace=demo-trace.bin) 
 
-<img width="1288" height="741" alt="dial9 trace viewer showing worker timelines, scheduling delays, metrics, spans, and a task flamegraph" src="../docs/images/dial9-viewer.png" href="https://dial9-tokio-telemetry.netlify.app/?trace=demo-trace.bin" />
+<img width="2007" height="1154" alt="dial9 trace viewer showing worker timelines, scheduling delays, metrics, spans, and a task flamegraph" src="https://github.com/user-attachments/assets/93d51607-d033-47ff-887f-ba9b76960aaa" href="https://dial9-tokio-telemetry.netlify.app/?trace=demo-trace.bin" />
 
 ## Quick Start
 
