@@ -107,25 +107,26 @@
       (c.kind === "literal" && !!c.accessKeyId && !!c.secretAccessKey);
   }
 
-  /** Write a fully-formed credential object to storage and notify listeners.
+  /** Write a fully-formed credential object to storage and notify listeners
+   * unless `notify` is false (the caller then notifies once it is done).
    * The object is trusted as-is; callers build it via [`storeStatic`] /
    * [`storeRole`] / [`setRegion`], which own the per-kind shape and trimming. */
-  function persist(obj) {
+  function persist(obj, notify = true) {
     storage().setItem(STORAGE_KEY, JSON.stringify(obj));
-    notifyChanged();
+    if (notify) notifyChanged();
     return obj;
   }
 
   /** Persist a literal bring-your-own key pair as the active credential. Replaces
    * whatever was stored, so a prior role ARN cannot linger alongside the keys. */
-  function storeStatic(creds) {
+  function storeStatic(creds, notify = true) {
     return persist({
       kind: "literal",
       accessKeyId: (creds.accessKeyId || "").trim(),
       secretAccessKey: (creds.secretAccessKey || "").trim(),
       sessionToken: (creds.sessionToken || "").trim() || undefined,
       region: (creds.region || "").trim() || undefined,
-    });
+    }, notify);
   }
 
   /** Persist an assume-role ARN as the active credential. Replaces whatever was
@@ -274,37 +275,46 @@
    * credentials with a single call:
    *
    *   await window.Dial9Creds.set({ accessKeyId, secretAccessKey, sessionToken,
-   *                                 region, autoDetectRegion: true });
+   *                                 region, autoDetectRegion: true,
+   *                                 bucket, prefix });
    *
-   * When `autoDetectRegion` is true (and no region is given) the credentials are
-   * validated against `/api/credentials/check` for the given (or current
-   * default) bucket, and the resolved region is stored. Returns a result object
-   * `{ ok, region, error }`. In Node (no fetch) the validation step is skipped
-   * and the credentials are stored as-is.
+   * When `autoDetectRegion` is true, or omitted and no region is given, the
+   * credentials are validated against `/api/credentials/check` for the given
+   * (or current default) bucket, under `prefix` when one is given, and the
+   * resolved region is stored. Pass the page's explicit bucket and prefix
+   * (from the URL or the user, not the server default): credentials scoped to
+   * that prefix can then validate, and a cross-Region bucket gets its Region.
+   * Listeners get one `dial9:credentials-changed` event, after the region is
+   * stored, so they never browse before it. An explicit
+   * `autoDetectRegion: false` only stores them. Returns a result object
+   * `{ ok, region, error }`. In Node (no fetch) the validation step is
+   * skipped and the credentials are stored as-is.
    *
    * @param {{accessKeyId, secretAccessKey, sessionToken?, region?,
-   *          autoDetectRegion?: boolean, bucket?: string}} creds
+   *          autoDetectRegion?: boolean, bucket?: string, prefix?: string}} creds
    */
   async function set(creds) {
     if (!creds || !creds.accessKeyId || !creds.secretAccessKey) {
       throw new Error("accessKeyId and secretAccessKey are required");
     }
 
-    // Store first so the headers are available to the check request itself.
-    storeStatic(creds);
+    const autoDetect =
+      creds.autoDetectRegion != null ? !!creds.autoDetectRegion : !creds.region;
+    const wantCheck = autoDetect && typeof fetch !== "undefined";
 
-    const wantCheck =
-      (creds.autoDetectRegion || !creds.region) &&
-      typeof fetch !== "undefined";
+    // Store first so the headers are available to the check request itself.
+    // With a check pending, notify only after it (below).
+    storeStatic(creds, !wantCheck);
     if (!wantCheck) {
       return { ok: true, region: creds.region || undefined, error: null };
     }
 
     try {
-      const result = await check(creds.bucket);
+      const result = await check(creds.bucket, { prefix: creds.prefix });
       if (result.ok && result.region) {
-        // Persist the resolved region for subsequent requests.
-        setRegion(result.region);
+        // Persist the normalized resolved region for subsequent requests;
+        // notify below after the credential state is complete.
+        persist({ ...get(), region: result.region.trim() || undefined }, false);
       }
       // Intentionally do NOT clear the stored credentials when the check fails.
       // A failed check is often bucket-specific (wrong bucket name, or no access
@@ -316,20 +326,28 @@
       return result;
     } catch (e) {
       return { ok: false, region: null, error: String(e && e.message || e) };
+    } finally {
+      notifyChanged();
     }
   }
 
   /**
    * Validate the stored credentials and detect the bucket's region via
    * `POST /api/credentials/check`. Browser-only (needs fetch + the backend).
+   * With a non-empty `prefix` the server validates read access under that
+   * prefix only; without one it validates the whole bucket.
    *
    * @param {string} [bucket] bucket to check; defaults to the server default
+   * @param {{prefix?: string}} [opts]
    * @returns {Promise<{ok, region, error}>}
    */
-  async function check(bucket) {
-    const url =
-      "/api/credentials/check" +
-      (bucket ? "?bucket=" + encodeURIComponent(bucket) : "");
+  async function check(bucket, opts = {}) {
+    const params = new URLSearchParams();
+    if (bucket) params.set("bucket", bucket);
+    const prefix = (opts.prefix || "").trim();
+    if (prefix) params.set("prefix", prefix);
+    const query = params.toString();
+    const url = "/api/credentials/check" + (query ? "?" + query : "");
     const request =
       typeof Dial9Session !== "undefined" ? Dial9Session.fetch : fetch;
     const resp = await request(url, {

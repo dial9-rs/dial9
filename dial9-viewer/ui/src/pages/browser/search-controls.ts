@@ -9,15 +9,26 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   // (change), detecting the bucket's region FIRST - discovery is itself a
   // signed S3 call.
   els.bucketInput.addEventListener("input", () => {
+    // A typed bucket is explicit, even when it matches the server default.
+    if (store.getState().form.bucketFromServerDefault) {
+      store.update("form", { bucketFromServerDefault: false });
+    }
     actions.syncUrl();
+  });
+  // `change` fires when the value differs from the one at focus.
+  let bucketAtFocus = "";
+  els.bucketInput.addEventListener("focus", () => {
+    bucketAtFocus = els.bucketInput.value.trim();
   });
   els.bucketInput.addEventListener("change", () => {
     void (async () => {
       // A committed bucket edit points at a (possibly) new bucket, so any
       // leftover service belongs to the old one. Clear it: otherwise
       // discoverServices sees a non-empty serviceInput, skips discovery, and
-      // browses the stale service against the new bucket.
+      // browses the stale service against the new bucket. The old bucket's
+      // prefix goes too.
       els.serviceInput.value = "";
+      actions.resetPrefixForBucketChange(bucketAtFocus, els.bucketInput.value.trim());
       await actions.detectRegionForBucket(els.bucketInput.value.trim());
       await actions.discoverPrefixes();
       await actions.discoverServices();
@@ -26,7 +37,8 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   });
 
   // A service and its results belong to the previous prefix. Invalidate
-  // them on edits and chip clicks so Search discovers the new scope.
+  // them on edits and chip clicks so Search discovers the new scope. Both
+  // are explicit selections.
   function syncEditedPrefix(): void {
     const changed = store.getState().form.prefix.trim() !== els.prefixInput.value.trim();
     actions.mirrorPrefix();

@@ -15,11 +15,16 @@ export function apiFetch(url: string, opts: RequestInit = {}): Promise<Response>
 }
 
 /** The first few keys in a bucket over the last day, for the empty-result hint
- * ("nothing matched -- here is what the bucket actually looks like"). Empty on
- * any failure: this is a diagnostic aid, never the page's answer. */
+ * ("nothing matched -- here is what the bucket actually looks like"). Listed
+ * under `prefix` when given, as the search was. Empty on any failure: this is
+ * a diagnostic aid, never the page's answer. */
 export async function sampleBucketKeys(
   bucket: string,
-  options: { limit?: number; service?: string | undefined } = {},
+  options: {
+    limit?: number;
+    prefix?: string | undefined;
+    service?: string | undefined;
+  } = {},
 ): Promise<string[]> {
   const nowSec = Math.floor(Date.now() / 1000);
   const resp = await apiFetch(
@@ -27,6 +32,7 @@ export async function sampleBucketKeys(
       bucket,
       from: nowSec - 86400,
       to: nowSec,
+      prefix: options.prefix,
       service: options.service,
     }),
   );

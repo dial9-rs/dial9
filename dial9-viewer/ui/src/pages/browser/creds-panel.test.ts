@@ -173,6 +173,7 @@ describe("mountCredsPanel", () => {
     const discoverServices = vi.fn(async () => {});
     const actions = {
       syncUrl: vi.fn(),
+      resetPrefixForBucketChange: vi.fn(),
       discoverPrefixes,
       discoverServices,
     } as unknown as BrowserActions;
@@ -226,6 +227,7 @@ describe("mountCredsPanel", () => {
     const discoverServices = vi.fn(async () => {});
     const actions = {
       syncUrl: vi.fn(),
+      resetPrefixForBucketChange: vi.fn(),
       discoverPrefixes: vi.fn(async () => {}),
       discoverServices,
     } as unknown as BrowserActions;
@@ -276,6 +278,7 @@ describe("mountCredsPanel", () => {
     const discoverServices = vi.fn(async () => {});
     const actions = {
       syncUrl: vi.fn(),
+      resetPrefixForBucketChange: vi.fn(),
       discoverPrefixes: vi.fn(async () => {}),
       discoverServices,
     } as unknown as BrowserActions;
@@ -296,26 +299,34 @@ describe("mountCredsPanel", () => {
     expect(discoverServices).not.toHaveBeenCalled();
   });
 
-  it("does not force the panel open when a bucket is already selected", async () => {
+  it.each([
+    // Credentials scoped to a supplied bucket may be denied ListBuckets.
+    {
+      name: "skips the page-load bucket listing for a supplied bucket",
+      bucket: "dial9-team-traces",
+      lists: 0,
+      panelOpen: false,
+    },
+    {
+      name: "opens the picker on page load when no bucket is supplied",
+      bucket: "",
+      lists: 1,
+      panelOpen: true,
+    },
+  ])("$name", async ({ bucket, lists, panelOpen }) => {
+    const listBuckets = vi.fn(async () => [
+      { name: "dial9-team-traces", region: "us-east-1" },
+      { name: "dial9-other-traces", region: "us-east-1" },
+    ]);
     const creds = {
       has: vi.fn(() => true),
       get: vi.fn(() => ({ kind: "role", roleArn: "arn:aws:iam::123456789012:role/R" })),
-      listBuckets: vi.fn(async () => [
-        { name: "dial9-traces-one", region: "us-east-1" },
-        { name: "dial9-traces-two", region: "us-east-1" },
-      ]),
+      listBuckets,
     } as unknown as Dial9CredsApi;
-    vi.stubGlobal("window", {
-      Dial9Creds: creds,
-      addEventListener: vi.fn(),
-    });
+    vi.stubGlobal("window", { Dial9Creds: creds, addEventListener: vi.fn() });
     vi.stubGlobal("document", {
       createElement: () => new FakeElement(),
-      createTextNode: (text: string) => {
-        const node = new FakeElement();
-        node.textContent = text;
-        return node;
-      },
+      createTextNode: () => new FakeElement(),
     });
 
     const actions = {
@@ -325,14 +336,162 @@ describe("mountCredsPanel", () => {
     } as unknown as BrowserActions;
     const store = createBrowserStore();
     const els = fakeEls();
-    // A bucket restored from a shared link is already pinned before boot.
-    els.bucketInput.value = "dial9-traces-one";
-    const panel = mountCredsPanel({ store, els, actions });
-    panel.init();
-    // Returning user: has() is true, so boot re-lists their buckets.
+    els.bucketInput.value = bucket;
+    mountCredsPanel({ store, els, actions }).init();
     await drainMicrotasks();
 
-    expect(store.getState().creds.panelOpen).toBe(false);
+    expect(listBuckets).toHaveBeenCalledTimes(lists);
+    expect(store.getState().creds.panelOpen).toBe(panelOpen);
+  });
+
+  describe("Apply and Clear", () => {
+    function setup(bucket: string, checkOk = true, fromServerDefault = false) {
+      let active = false;
+      let changed: Listener | undefined;
+      // Like creds.js, every write dispatches the change event synchronously.
+      const write = () => {
+        active = true;
+        changed?.();
+      };
+      const check = vi.fn(async () =>
+        checkOk
+          ? { ok: true, region: "eu-west-1", error: null }
+          : { ok: false, region: null, error: "HTTP 403" },
+      );
+      const listBuckets = vi.fn(async () => [{ name: "dial9-traces", region: null }]);
+      const creds = {
+        has: vi.fn(() => active),
+        get: vi.fn(() => ({ kind: "ambient" })),
+        set: vi.fn(async () => {
+          write();
+          return { ok: true, error: null };
+        }),
+        setRegion: vi.fn(write),
+        clear: vi.fn(),
+        check,
+        listBuckets,
+      } as unknown as Dial9CredsApi;
+      vi.stubGlobal("window", {
+        Dial9Creds: creds,
+        addEventListener: vi.fn((type: string, listener: Listener) => {
+          if (type === "dial9:credentials-changed") changed = listener;
+        }),
+      });
+      vi.stubGlobal("document", {
+        createElement: () => new FakeElement(),
+        createTextNode: () => new FakeElement(),
+      });
+      const actions = {
+        syncUrl: vi.fn(),
+        canRerunCurrentSearch: vi.fn(() => false),
+        resetPrefixForBucketChange: vi.fn(),
+        dropAutoSelectedPrefix: vi.fn(),
+        resetBrowsePane: vi.fn(),
+        discoverPrefixes: vi.fn(async () => {}),
+        discoverServices: vi.fn(async () => {}),
+        requestPrefix: vi.fn(() => "traces/svc"),
+      } as unknown as BrowserActions;
+      const store = createBrowserStore();
+      const els = fakeEls();
+      els.bucketInput.value = bucket;
+      store.update("form", { bucketFromServerDefault: fromServerDefault });
+      mountCredsPanel({ store, els, actions }).init();
+      els.credsAkid.value = "AK";
+      els.credsSecret.value = "SK";
+      return { store, els, actions, creds, check, listBuckets };
+    }
+
+    it.each([
+      // Credentials scoped to a supplied source may be denied ListBuckets.
+      {
+        name: "checks a supplied bucket at the request prefix",
+        bucket: "dial9-traces",
+        fromServerDefault: false,
+        lists: 0,
+      },
+      { name: "lists buckets when no bucket is supplied", bucket: "", fromServerDefault: false, lists: 1 },
+      // The server default belongs to the ambient identity, even when the new
+      // credentials can also see it.
+      {
+        name: "lists buckets instead of checking a server-default bucket",
+        bucket: "dial9-traces",
+        fromServerDefault: true,
+        lists: 1,
+      },
+    ])("$name", async ({ bucket, fromServerDefault, lists }) => {
+      const { store, els, actions, creds, check, listBuckets } = setup(
+        bucket,
+        true,
+        fromServerDefault,
+      );
+
+      els.credsApply.click();
+      await drainMicrotasks();
+
+      expect(listBuckets).toHaveBeenCalledTimes(lists);
+      expect(check).toHaveBeenCalledOnce();
+      expect(check).toHaveBeenCalledWith("dial9-traces", { prefix: "traces/svc" });
+      expect(els.bucketInput.value).toBe("dial9-traces");
+      expect(store.getState().form.bucketFromServerDefault).toBe(false);
+      // A prefix entered before the first explicit bucket is kept for it;
+      // the server default's service and results are not.
+      expect(actions.resetPrefixForBucketChange).toHaveBeenCalledWith(
+        fromServerDefault ? "" : bucket,
+        "dial9-traces",
+      );
+      expect(actions.resetBrowsePane).toHaveBeenCalledTimes(fromServerDefault ? 1 : 0);
+      // A prefix discovered in the server default goes before ListBuckets.
+      expect(actions.dropAutoSelectedPrefix).toHaveBeenCalledTimes(
+        fromServerDefault ? 1 : 0,
+      );
+      if (fromServerDefault) {
+        expect(
+          vi.mocked(actions.dropAutoSelectedPrefix).mock.invocationCallOrder[0],
+        ).toBeLessThan(listBuckets.mock.invocationCallOrder[0]!);
+      }
+      expect(creds.setRegion).toHaveBeenCalledWith("eu-west-1");
+      // The panel's own writes do not start a second discovery.
+      expect(actions.discoverServices).toHaveBeenCalledOnce();
+    });
+
+    it("drops an auto-selected prefix before Clear drops a server-default bucket", () => {
+      const { store, els, actions } = setup("dial9-traces", true, true);
+      let bucketAtDrop: { value: string; fromServerDefault: boolean } | undefined;
+      vi.mocked(actions.dropAutoSelectedPrefix).mockImplementation(() => {
+        bucketAtDrop = {
+          value: els.bucketInput.value,
+          fromServerDefault: store.getState().form.bucketFromServerDefault,
+        };
+      });
+
+      els.credsClear.click();
+
+      expect(actions.dropAutoSelectedPrefix).toHaveBeenCalledOnce();
+      expect(bucketAtDrop).toEqual({ value: "dial9-traces", fromServerDefault: true });
+      expect(
+        vi.mocked(actions.dropAutoSelectedPrefix).mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(actions.syncUrl).mock.invocationCallOrder[0]!);
+      expect(els.bucketInput.value).toBe("");
+      expect(store.getState().form.bucketFromServerDefault).toBe(false);
+    });
+
+    it("keeps a rejected supplied bucket without listing buckets", async () => {
+      const { store, els, actions, check, listBuckets } = setup("dial9-traces", false);
+
+      els.credsApply.click();
+      await drainMicrotasks();
+
+      expect(check).toHaveBeenCalledOnce();
+      expect(check).toHaveBeenCalledWith("dial9-traces", { prefix: "traces/svc" });
+      expect(listBuckets).not.toHaveBeenCalled();
+      expect(els.bucketInput.value).toBe("dial9-traces");
+      expect(store.getState().creds.bucketsRowVisible).toBe(false);
+      expect(store.getState().creds.status).toEqual({
+        text: "Cannot use dial9-traces: HTTP 403",
+        kind: "error",
+      });
+      expect(actions.discoverServices).not.toHaveBeenCalled();
+    });
   });
 
   it("discovers services when userscript credentials arrive for a picked bucket", async () => {

@@ -116,6 +116,14 @@ export interface ConfigSlice {
 /** DOM-input mirror for renders that depend on typed values (see header). */
 export interface FormSlice {
   prefix: string;
+  /** The bucket input holds /api/config's default_bucket, which belongs to
+   * the server's ambient identity. Cleared when the bucket is typed or
+   * dropped, so a typed bucket equal to the default still counts as explicit. */
+  bucketFromServerDefault: boolean;
+  /** The prefix input holds the prefix discovery picked automatically for
+   * the current bucket. Typed, URL, suggestion-chip and server-configured
+   * prefixes are explicit and leave it false. */
+  prefixAutoSelected: boolean;
 }
 
 export interface SearchSlice {
@@ -237,7 +245,7 @@ export function initialBrowserState(): BrowserState {
       bucketFilter: DEFAULT_BUCKET_FILTER,
       bucketFilterOverride: null,
     },
-    form: { prefix: "" },
+    form: { prefix: "", bucketFromServerDefault: false, prefixAutoSelected: false },
     search: {
       quickRange: null,
       suggestions: [],
