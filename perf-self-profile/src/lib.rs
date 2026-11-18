@@ -67,7 +67,6 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod leaf_probe;
 pub mod offline_symbolize;
 mod sampler;
 mod symbolize;

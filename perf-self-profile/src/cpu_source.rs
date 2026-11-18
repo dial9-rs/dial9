@@ -315,6 +315,21 @@ impl CpuProfilingConfig {
         self.recover_leaf_callers = yes;
         self
     }
+
+    /// The sampler settings this config starts. Ctimer cannot sample kernel
+    /// stacks or other event sources, so those are left at their defaults.
+    fn sampler_config(&self) -> SamplerConfig {
+        let base = SamplerConfig::default()
+            .sampling(SamplingMode::FrequencyHz(self.frequency_hz))
+            .recover_leaf_callers(self.recover_leaf_callers);
+        match self.backend {
+            CpuBackend::Ctimer => base.include_kernel(false),
+            CpuBackend::Auto | CpuBackend::Perf => base
+                .event_source(self.event_source)
+                .include_kernel(self.include_kernel)
+                .ring_buffer_size(self.ring_buffer_bytes.unwrap_or(DEFAULT_RING_BUFFER_BYTES)),
+        }
+    }
 }
 
 /// Configuration for per-thread sched event capture (context switches).
@@ -366,6 +381,16 @@ impl SchedEventConfig {
     pub fn recover_leaf_callers(mut self, yes: bool) -> Self {
         self.recover_leaf_callers = yes;
         self
+    }
+
+    /// The sampler settings this config starts.
+    fn sampler_config(&self) -> SamplerConfig {
+        SamplerConfig::default()
+            .event_source(EventSource::SwContextSwitches)
+            .sampling(SamplingMode::Period(self.sampling_interval.unwrap_or(1)))
+            .include_kernel(self.include_kernel)
+            .ring_buffer_size(self.ring_buffer_bytes.unwrap_or(DEFAULT_RING_BUFFER_BYTES))
+            .recover_leaf_callers(self.recover_leaf_callers)
     }
 }
 
@@ -460,32 +485,11 @@ impl CpuProfiler {
 
     /// Start the process-wide CPU profiler with the given config.
     pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
-        let ring_bytes = config
-            .ring_buffer_bytes
-            .unwrap_or(DEFAULT_RING_BUFFER_BYTES);
+        let sampler_config = config.sampler_config();
         let sampler = match config.backend {
-            CpuBackend::Auto => PerfSampler::start(
-                SamplerConfig::default()
-                    .event_source(config.event_source)
-                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(config.include_kernel)
-                    .ring_buffer_size(ring_bytes)
-                    .recover_leaf_callers(config.recover_leaf_callers),
-            )?,
-            CpuBackend::Perf => PerfSampler::start_perf_only(
-                SamplerConfig::default()
-                    .event_source(config.event_source)
-                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(config.include_kernel)
-                    .ring_buffer_size(ring_bytes)
-                    .recover_leaf_callers(config.recover_leaf_callers),
-            )?,
-            CpuBackend::Ctimer => PerfSampler::start_ctimer_only(
-                SamplerConfig::default()
-                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(false)
-                    .recover_leaf_callers(config.recover_leaf_callers),
-            )?,
+            CpuBackend::Auto => PerfSampler::start(sampler_config)?,
+            CpuBackend::Perf => PerfSampler::start_perf_only(sampler_config)?,
+            CpuBackend::Ctimer => PerfSampler::start_ctimer_only(sampler_config)?,
         };
         // `Auto` resolves inside the sampler, which reports what it picked.
         let active_backend = sampler.active_backend();
@@ -710,18 +714,7 @@ impl std::fmt::Debug for SchedProfiler {
 impl SchedProfiler {
     /// Create a new sched profiler with the given config.
     pub fn new(config: SchedEventConfig) -> io::Result<Self> {
-        let sampler = PerfSampler::new_per_thread(
-            SamplerConfig::default()
-                .event_source(EventSource::SwContextSwitches)
-                .sampling(SamplingMode::Period(config.sampling_interval.unwrap_or(1)))
-                .include_kernel(config.include_kernel)
-                .ring_buffer_size(
-                    config
-                        .ring_buffer_bytes
-                        .unwrap_or(DEFAULT_RING_BUFFER_BYTES),
-                )
-                .recover_leaf_callers(config.recover_leaf_callers),
-        )?;
+        let sampler = PerfSampler::new_per_thread(config.sampler_config())?;
         Ok(Self {
             sampler,
             config,
@@ -975,6 +968,75 @@ mod thread_name_tests {
         };
         stop_thread(&mut profiler, false);
         assert!(profiler.stopped_tids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sampler_config_tests {
+    use super::*;
+    use rstest::rstest;
+
+    /// Every way of starting a profiler must pass the setting to the sampler.
+    /// Pure: needs no perf access, so it runs everywhere.
+    #[rstest]
+    fn cpu_config_passes_recover_leaf_callers_to_the_sampler(
+        #[values(
+            CpuProfilingConfig::default(),
+            CpuProfilingConfig::with_perf_backend(),
+            CpuProfilingConfig::with_ctimer_backend()
+        )]
+        config: CpuProfilingConfig,
+        #[values(true, false)] recover: bool,
+    ) {
+        let sampler = config.recover_leaf_callers(recover).sampler_config();
+        assert_eq!(sampler.recover_leaf_callers, recover);
+    }
+
+    #[rstest]
+    fn sched_config_passes_recover_leaf_callers_to_the_sampler(
+        #[values(true, false)] recover: bool,
+    ) {
+        let sampler = SchedEventConfig::default()
+            .recover_leaf_callers(recover)
+            .sampler_config();
+        assert_eq!(sampler.recover_leaf_callers, recover);
+    }
+
+    /// The configured perf ring size reaches the sampler; ctimer has no ring.
+    #[rstest]
+    #[case::auto(CpuProfilingConfig::default(), true)]
+    #[case::perf(CpuProfilingConfig::with_perf_backend(), true)]
+    #[case::ctimer(CpuProfilingConfig::with_ctimer_backend(), false)]
+    fn cpu_config_passes_the_ring_buffer_size(
+        #[case] config: CpuProfilingConfig,
+        #[case] passed: bool,
+    ) {
+        let size = NonZeroUsize::new(64 * 1024).unwrap();
+        let sampler = config.ring_buffer_size(size).sampler_config();
+        let want = if passed {
+            size
+        } else {
+            DEFAULT_RING_BUFFER_BYTES
+        };
+        assert_eq!(sampler.ring_buffer_bytes, want);
+    }
+
+    #[test]
+    fn sched_config_passes_the_ring_buffer_size() {
+        let size = NonZeroUsize::new(64 * 1024).unwrap();
+        let sampler = SchedEventConfig::default()
+            .ring_buffer_size(size)
+            .sampler_config();
+        assert_eq!(sampler.ring_buffer_bytes, size);
+    }
+
+    /// Ctimer cannot sample kernel stacks, whatever the config asks for.
+    #[test]
+    fn ctimer_never_asks_for_kernel_stacks() {
+        let sampler = CpuProfilingConfig::with_ctimer_backend()
+            .include_kernel(true)
+            .sampler_config();
+        assert!(!sampler.include_kernel);
     }
 }
 

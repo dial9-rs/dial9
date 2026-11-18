@@ -542,8 +542,9 @@ does no x86-64 leaf recovery at all, and async-profiler does.
   breaks the chain wherever it is not a leaf, and nothing recovers that.
 * **The recursion self-test cannot see this class of bug.** Its helper makes a
   call, so it is a non-leaf and gets a frame record; the self-test passes while
-  leaves are frameless. `Unwinder::leaf_frame_pointers_present()` closes that by
-  reading the prologue of a known leaf in dial9's own code.
+  leaves are frameless. Nothing checks for it at runtime. The tests do, with a
+  probe in `tests/common/leaf_probe.rs` that reads the prologue of a known leaf
+  built with the same flags.
 
 ## Testing
 
@@ -551,7 +552,7 @@ does no x86-64 leaf recovery at all, and async-profiler does.
 |---|---|---|
 | `perf_backend_leaf_caller.rs` | the perf path | `perf_event_paranoid <= 1` |
 | `leaf_caller_recovery.rs` | the ctimer path | `DIAL9_FORCE_CTIMER=1` |
-| `leaf_frame_pointers.rs` | leaf detection, and the self-test blind spot | — |
+| `leaf_frame_pointers.rs` | the test-only leaf probe, and the self-test blind spot | — |
 | `leaf-caller-recovery` job | both backends, built without the flag, with the setting on and then off | `DIAL9_NO_SKIP`, `DIAL9_EXPECT_LEAVES` |
 | `rule_tests` | the rule, one case per row of the table above, plus scratch and signed values | — |
 | `func_starts` unit tests | lookups, the bounds, load offsets, section bounds, the per-module symbol cap, and the loaded-image check | — |
