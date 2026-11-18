@@ -37,11 +37,11 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   });
 
   // A service and its results belong to the previous prefix. Invalidate
-  // them on edits and chip clicks so Search discovers the new scope. A chip
-  // is a prefix discovered in the current bucket; a typed prefix is not.
-  function syncEditedPrefix(fromBucketDiscovery = false): void {
+  // them on edits and chip clicks so Search discovers the new scope. Both
+  // are explicit selections.
+  function syncEditedPrefix(): void {
     const changed = store.getState().form.prefix.trim() !== els.prefixInput.value.trim();
-    actions.mirrorPrefix(fromBucketDiscovery);
+    actions.mirrorPrefix();
     if (changed) actions.resetBrowsePane();
     else actions.syncUrl();
   }
@@ -103,7 +103,7 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
         btn.style.cssText = "font-size:0.75em;padding:2px 8px";
         btn.addEventListener("click", () => {
           els.prefixInput.value = label;
-          syncEditedPrefix(true);
+          syncEditedPrefix();
           store.update("search", { activeSuggestion: label });
         });
         els.prefixSuggestions.appendChild(btn);

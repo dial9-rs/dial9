@@ -334,7 +334,7 @@ describe("mountCredsPanel", () => {
     expect(store.getState().creds.panelOpen).toBe(false);
   });
 
-  describe("Apply", () => {
+  describe("Apply and Clear", () => {
     function setup(bucket: string, checkOk = true, fromServerDefault = false) {
       let active = false;
       let changed: Listener | undefined;
@@ -357,6 +357,7 @@ describe("mountCredsPanel", () => {
           return { ok: true, error: null };
         }),
         setRegion: vi.fn(write),
+        clear: vi.fn(),
         check,
         listBuckets,
       } as unknown as Dial9CredsApi;
@@ -374,7 +375,7 @@ describe("mountCredsPanel", () => {
         syncUrl: vi.fn(),
         canRerunCurrentSearch: vi.fn(() => false),
         resetPrefixForBucketChange: vi.fn(),
-        dropBucketDiscoveredPrefix: vi.fn(),
+        dropAutoSelectedPrefix: vi.fn(),
         resetBrowsePane: vi.fn(),
         discoverPrefixes: vi.fn(async () => {}),
         discoverServices: vi.fn(async () => {}),
@@ -430,17 +431,38 @@ describe("mountCredsPanel", () => {
       );
       expect(actions.resetBrowsePane).toHaveBeenCalledTimes(fromServerDefault ? 1 : 0);
       // A prefix discovered in the server default goes before ListBuckets.
-      expect(actions.dropBucketDiscoveredPrefix).toHaveBeenCalledTimes(
+      expect(actions.dropAutoSelectedPrefix).toHaveBeenCalledTimes(
         fromServerDefault ? 1 : 0,
       );
       if (fromServerDefault) {
         expect(
-          vi.mocked(actions.dropBucketDiscoveredPrefix).mock.invocationCallOrder[0],
+          vi.mocked(actions.dropAutoSelectedPrefix).mock.invocationCallOrder[0],
         ).toBeLessThan(listBuckets.mock.invocationCallOrder[0]!);
       }
       expect(creds.setRegion).toHaveBeenCalledWith("eu-west-1");
       // The panel's own writes do not start a second discovery.
       expect(actions.discoverServices).toHaveBeenCalledOnce();
+    });
+
+    it("drops an auto-selected prefix before Clear drops a server-default bucket", () => {
+      const { store, els, actions } = setup("dial9-traces", true, true);
+      let bucketAtDrop: { value: string; fromServerDefault: boolean } | undefined;
+      vi.mocked(actions.dropAutoSelectedPrefix).mockImplementation(() => {
+        bucketAtDrop = {
+          value: els.bucketInput.value,
+          fromServerDefault: store.getState().form.bucketFromServerDefault,
+        };
+      });
+
+      els.credsClear.click();
+
+      expect(actions.dropAutoSelectedPrefix).toHaveBeenCalledOnce();
+      expect(bucketAtDrop).toEqual({ value: "dial9-traces", fromServerDefault: true });
+      expect(
+        vi.mocked(actions.dropAutoSelectedPrefix).mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(actions.syncUrl).mock.invocationCallOrder[0]!);
+      expect(els.bucketInput.value).toBe("");
+      expect(store.getState().form.bucketFromServerDefault).toBe(false);
     });
 
     it("keeps a rejected supplied bucket without listing buckets", async () => {

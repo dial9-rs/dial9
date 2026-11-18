@@ -120,10 +120,10 @@ export interface FormSlice {
    * the server's ambient identity. Cleared when the bucket is typed or
    * dropped, so a typed bucket equal to the default still counts as explicit. */
   bucketFromServerDefault: boolean;
-  /** The prefix input holds a prefix discovered in the current bucket (an
-   * auto-selected or suggested prefix). URL, typed and server-configured
-   * prefixes leave it false. */
-  prefixFromBucketDiscovery: boolean;
+  /** The prefix input holds the prefix discovery picked automatically for
+   * the current bucket. Typed, URL, suggestion-chip and server-configured
+   * prefixes are explicit and leave it false. */
+  prefixAutoSelected: boolean;
 }
 
 export interface SearchSlice {
@@ -245,7 +245,7 @@ export function initialBrowserState(): BrowserState {
       bucketFilter: DEFAULT_BUCKET_FILTER,
       bucketFilterOverride: null,
     },
-    form: { prefix: "", bucketFromServerDefault: false, prefixFromBucketDiscovery: false },
+    form: { prefix: "", bucketFromServerDefault: false, prefixAutoSelected: false },
     search: {
       quickRange: null,
       suggestions: [],

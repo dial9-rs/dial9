@@ -92,14 +92,14 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
   }
 
   // A server-default bucket belongs to the ambient identity, so drop it with
-  // its discovered prefix, suggestions, service and results before another
-  // identity browses. A typed or URL prefix stays for the first explicit
-  // bucket.
+  // its auto-selected prefix, suggestions, service and results before
+  // another identity browses. An explicit prefix stays for the first
+  // explicit bucket.
   function dropServerDefaultBucket(): void {
     if (!store.getState().form.bucketFromServerDefault) return;
     els.bucketInput.value = "";
     store.update("form", { bucketFromServerDefault: false });
-    actions.dropBucketDiscoveredPrefix();
+    actions.dropAutoSelectedPrefix();
     actions.resetBrowsePane();
   }
 
@@ -389,7 +389,9 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       els.credsRegion.value = "";
       // The selected bucket belonged to the now-removed identity; drop it
       // so a later search can't query a foreign bucket as the server's
-      // ambient identity (which would 500/leak).
+      // ambient identity (which would 500/leak). Its auto-selected prefix and
+      // suggestions go first, so neither carries to the next bucket.
+      actions.dropAutoSelectedPrefix();
       els.bucketInput.value = "";
       store.update("form", { bucketFromServerDefault: false });
       actions.syncUrl();

@@ -207,36 +207,36 @@ describe("prefix scope", () => {
 
   it.each([
     {
-      name: "omits an implicit server-default bucket but keeps a typed prefix",
+      name: "omits an implicit server-default bucket but keeps a typed, URL or chip-selected prefix",
       fromServerDefault: true,
-      prefixFromBucketDiscovery: false,
+      prefixAutoSelected: false,
       bucket: null,
       prefix: "dial9-traces",
     },
     {
-      name: "omits an implicit server-default bucket and its discovered prefix",
+      name: "omits an implicit server-default bucket and its auto-selected prefix",
       fromServerDefault: true,
-      prefixFromBucketDiscovery: true,
+      prefixAutoSelected: true,
       bucket: null,
       prefix: null,
     },
     {
-      name: "serializes an explicit bucket and its discovered prefix",
+      name: "serializes an explicit bucket and its auto-selected prefix",
       fromServerDefault: false,
-      prefixFromBucketDiscovery: true,
+      prefixAutoSelected: true,
       bucket: "traces-bucket",
       prefix: "dial9-traces",
     },
   ])(
     "$name from the URL",
-    ({ fromServerDefault, prefixFromBucketDiscovery, bucket, prefix }) => {
+    ({ fromServerDefault, prefixAutoSelected, bucket, prefix }) => {
       const replaceState = stubUrlEnv();
       const store = createBrowserStore();
       const els = browserEls("");
       Object.assign(els, { credsRegion: input() });
       store.update("form", {
         bucketFromServerDefault: fromServerDefault,
-        prefixFromBucketDiscovery,
+        prefixAutoSelected,
       });
       const actions = createActions(store, els);
 
@@ -253,25 +253,28 @@ describe("prefix scope", () => {
   );
 
   it.each([
-    { name: "clears a discovered prefix", discover: true, expected: "" },
-    { name: "keeps a typed prefix", discover: false, expected: "dial9-traces" },
-  ])("$name when its bucket is dropped", async ({ discover, expected }) => {
+    { name: "clears an auto-selected prefix", selection: "auto", expected: "" },
+    // A chip click mirrors the prefix as an explicit selection.
+    { name: "keeps a chip-selected prefix", selection: "chip", expected: "dial9-traces" },
+    { name: "keeps a typed prefix", selection: "typed", expected: "dial9-traces" },
+  ] as const)("$name when its bucket is dropped", async ({ selection, expected }) => {
     const { store, els, actions } = setup();
-    if (discover) {
+    if (selection === "typed") {
+      actions.mirrorPrefix();
+      store.update("search", { suggestions: ["dial9-traces"] });
+    } else {
       els.prefixInput.value = "";
       await actions.discoverPrefixes();
       expect(els.prefixInput.value).toBe("dial9-traces");
-      expect(store.getState().form.prefixFromBucketDiscovery).toBe(true);
-    } else {
-      actions.mirrorPrefix();
-      store.update("search", { suggestions: ["dial9-traces"] });
+      expect(store.getState().form.prefixAutoSelected).toBe(true);
+      if (selection === "chip") actions.mirrorPrefix();
     }
 
-    actions.dropBucketDiscoveredPrefix();
+    actions.dropAutoSelectedPrefix();
 
     expect(els.prefixInput.value).toBe(expected);
     expect(store.getState().form.prefix).toBe(expected);
-    expect(store.getState().form.prefixFromBucketDiscovery).toBe(false);
+    expect(store.getState().form.prefixAutoSelected).toBe(false);
     expect(store.getState().search.suggestions).toEqual([]);
   });
 

@@ -64,10 +64,10 @@ export const ROW_H = 26;
 export interface BrowserActions {
   syncUrl(historyMode?: "replace" | "push"): void;
   setRestoring(on: boolean): void;
-  mirrorPrefix(fromBucketDiscovery?: boolean): void;
+  mirrorPrefix(autoSelected?: boolean): void;
   requestPrefix(): string;
   resetPrefixForBucketChange(previous: string, next: string): void;
-  dropBucketDiscoveredPrefix(): void;
+  dropAutoSelectedPrefix(): void;
   setQuickRange(hours: number): void;
   clearQuickRange(): void;
   switchTab(tab: "browse" | "raw"): void;
@@ -148,8 +148,9 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     const s = store.getState();
     const state: UrlStateFields = {
       // A server-default source stays implicit: on reload /api/config
-      // supplies the bucket again and discovery resolves its prefix. A typed,
-      // URL, or server-configured prefix remains explicit.
+      // supplies the bucket again and discovery re-selects its prefix. A
+      // typed, URL, suggestion-chip or server-configured prefix remains
+      // explicit.
       bucket: s.form.bucketFromServerDefault ? "" : source.bucket,
       region: source.region,
       credentialMode: source.credentials.kind,
@@ -157,7 +158,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         ? { roleArn: source.credentials.roleArn }
         : {}),
       prefix:
-        s.form.bucketFromServerDefault && s.form.prefixFromBucketDiscovery
+        s.form.bucketFromServerDefault && s.form.prefixAutoSelected
           ? ""
           : els.prefixInput.value.trim(),
       service: els.serviceInput.value.trim(),
@@ -210,11 +211,12 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     );
   }
 
-  // Mirror the prefix input and record whether bucket discovery chose it.
-  function mirrorPrefix(fromBucketDiscovery = false): void {
+  // Mirror the prefix input and record whether discovery picked it
+  // automatically.
+  function mirrorPrefix(autoSelected = false): void {
     store.update("form", {
       prefix: els.prefixInput.value,
-      prefixFromBucketDiscovery: fromBucketDiscovery,
+      prefixAutoSelected: autoSelected,
     });
   }
 
@@ -239,11 +241,12 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("search", { suggestions: [], activeSuggestion: null });
   }
 
-  // Drop a prefix discovered in a bucket that is being dropped, with its
-  // suggestions. A typed or URL prefix is kept for the next bucket.
-  function dropBucketDiscoveredPrefix(): void {
+  // Drop the suggestions of a bucket that is being dropped, and the prefix
+  // discovery auto-selected in it. An explicit prefix is kept for the next
+  // bucket.
+  function dropAutoSelectedPrefix(): void {
     store.update("search", { suggestions: [], activeSuggestion: null });
-    if (!store.getState().form.prefixFromBucketDiscovery) return;
+    if (!store.getState().form.prefixAutoSelected) return;
     els.prefixInput.value = "";
     mirrorPrefix();
   }
@@ -1180,7 +1183,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       restoring = on;
     },
     mirrorPrefix,
-    dropBucketDiscoveredPrefix,
+    dropAutoSelectedPrefix,
     requestPrefix,
     resetPrefixForBucketChange,
     setQuickRange,
