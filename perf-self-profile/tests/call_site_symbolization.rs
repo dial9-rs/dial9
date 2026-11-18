@@ -20,6 +20,10 @@ fn spin(deadline: Instant) {
 
 static SPIN_CALL_LINE: AtomicU32 = AtomicU32::new(0);
 
+fn symbol_leaf(name: &str) -> &str {
+    name.rsplit_once("::").map_or(name, |(_, leaf)| leaf)
+}
+
 #[inline(never)]
 fn caller(deadline: Instant) {
     SPIN_CALL_LINE.store(line!() + 1, Ordering::Relaxed);
@@ -48,7 +52,7 @@ fn caller_frame_symbolizes_to_call_site() {
         let is_spin = |&addr: &u64| {
             resolve_symbol(addr)
                 .name
-                .is_some_and(|n| n.ends_with("::spin"))
+                .is_some_and(|name| symbol_leaf(&name) == "spin")
         };
         let Some(spin_idx) = sample.callchain.iter().position(is_spin) else {
             continue;
