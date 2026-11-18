@@ -555,6 +555,25 @@ jobs:
             -p dial9-tokio-telemetry \
             -p dial9-viewer \
             -p dial9
+      - name: Verify the release publication boundary
+        if: startsWith(github.head_ref, 'release-plz/')
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: |
+          # Model the registry state when release-plz reaches dial9: its normal
+          # dependency closure is available, but later dev-only crates are not.
+          cargo package --no-verify \
+            -p dial9-trace-format-derive \
+            -p dial9-trace-format \
+            -p dial9-core \
+            -p dial9-destinations-s3 \
+            -p dial9-perf-self-profile \
+            -p dial9-tokio-telemetry \
+            -p dial9-macro \
+            -p dial9-metrique \
+            -p dial9-utils \
+            -p dial9-viewer \
+            -p dial9
       - name: Verify the skills are packaged as real files
         # `dial9/skills`, the toolkit libraries and the viewer URL contract are
         # symlinks; cargo must materialize them. `cargo package --list` cannot
