@@ -226,44 +226,55 @@ pub(crate) unsafe fn unwind_from_ucontext(
     out: &mut [u64],
     recover_leaf_callers: bool,
 ) -> CaptureResult {
-    let (pc, fp, sp, lr) = unsafe { read_pc_fp_sp_lr(ucontext) };
+    let r = unsafe { read_regs(ucontext) };
     if recover_leaf_callers {
-        unsafe { unwind_with_lr(pc, fp, sp, lr, out) }
+        unsafe { unwind_with_lr(r.pc, r.fp, r.sp, r.lr, out) }
     } else {
-        unsafe { unwind(pc, fp, sp, out) }
+        unsafe { unwind(r.pc, r.fp, r.sp, out) }
     }
 }
 
-/// x86-64 has no link register, so the fourth element is always 0 and the
-/// recovery path is gated off. Not a gap: rustc's x86_64 target omits frame
+/// The registers a frame-pointer walk starts from, read from a signal frame.
+#[derive(Clone, Copy)]
+pub(crate) struct Regs {
+    pub(crate) pc: usize,
+    pub(crate) fp: usize,
+    pub(crate) sp: usize,
+    /// Link register, used to recover a frameless leaf's immediate caller. 0 on
+    /// x86-64, which has none.
+    pub(crate) lr: usize,
+}
+
+/// x86-64 has no link register, so `lr` is always 0 and the recovery path is
+/// gated off. Not a gap: rustc's x86_64 target omits frame
 /// pointers entirely and `-fno-omit-frame-pointer` covers leaves there, so
 /// there is no default build with framed callers and frameless leaves. See
 /// `docs/design/leaf-caller-recovery.md`.
 #[cfg(target_arch = "x86_64")]
-unsafe fn read_pc_fp_sp_lr(uc: *mut libc::c_void) -> (usize, usize, usize, usize) {
+unsafe fn read_regs(uc: *mut libc::c_void) -> Regs {
     let uc = uc as *mut libc::ucontext_t;
     unsafe {
         let g = &(*uc).uc_mcontext.gregs;
-        (
-            g[libc::REG_RIP as usize] as usize,
-            g[libc::REG_RBP as usize] as usize,
-            g[libc::REG_RSP as usize] as usize,
-            0,
-        )
+        Regs {
+            pc: g[libc::REG_RIP as usize] as usize,
+            fp: g[libc::REG_RBP as usize] as usize,
+            sp: g[libc::REG_RSP as usize] as usize,
+            lr: 0,
+        }
     }
 }
 
 #[cfg(all(target_arch = "aarch64", not(target_os = "android")))]
-unsafe fn read_pc_fp_sp_lr(uc: *mut libc::c_void) -> (usize, usize, usize, usize) {
+unsafe fn read_regs(uc: *mut libc::c_void) -> Regs {
     let uc = uc as *mut libc::ucontext_t;
     unsafe {
         let m = &(*uc).uc_mcontext;
-        (
-            m.pc as usize,
-            m.regs[29] as usize, // x29 is the frame pointer
-            m.sp as usize,
-            m.regs[30] as usize, // x30 is the link register
-        )
+        Regs {
+            pc: m.pc as usize,
+            fp: m.regs[29] as usize, // x29 is the frame pointer
+            sp: m.sp as usize,
+            lr: m.regs[30] as usize, // x30 is the link register
+        }
     }
 }
 
@@ -271,11 +282,10 @@ unsafe fn read_pc_fp_sp_lr(uc: *mut libc::c_void) -> (usize, usize, usize, usize
 /// sigmask padding, so we use Bionic's documented layout. See
 /// [`super::bionic_arm64`] for details.
 #[cfg(all(target_arch = "aarch64", target_os = "android"))]
-unsafe fn read_pc_fp_sp_lr(uc: *mut libc::c_void) -> (usize, usize, usize, usize) {
+unsafe fn read_regs(uc: *mut libc::c_void) -> Regs {
     // SAFETY: `uc` is the kernel-provided ucontext to a SA_SIGINFO handler;
     // `bionic_arm64::struct_ucontext` matches Bionic's layout for aarch64.
-    let (pc, fp, sp, lr) = unsafe { super::bionic_arm64::android_ucontext_pc_fp_sp_lr(uc) };
-    (pc as usize, fp as usize, sp as usize, lr as usize)
+    unsafe { super::bionic_arm64::android_ucontext_regs(uc) }
 }
 
 #[cfg(test)]
