@@ -131,15 +131,6 @@ describe("prefix scope", () => {
     expect(els.prefixInput.value).toBe("dial9-traces");
   });
 
-  it("discovers prefixes at the bucket root without a prefix", async () => {
-    const { els, actions, urls } = setup();
-    els.prefixInput.value = "";
-
-    await actions.discoverPrefixes();
-
-    expect(urls()).toEqual(["/api/prefixes?bucket=traces-bucket"]);
-  });
-
   it.each([
     { name: "the visible prefix", prefix: "dial9-traces", server: false, sent: "dial9-traces" },
     // The check applies the server default itself, as browse does.

@@ -301,12 +301,22 @@ describe("mountCredsPanel", () => {
 
   it.each([
     // Credentials scoped to a supplied bucket may be denied ListBuckets.
-    { name: "skips the page-load bucket listing for a supplied bucket", bucket: "team-traces", lists: 0 },
-    { name: "lists buckets on page load when no bucket is supplied", bucket: "", lists: 1 },
-  ])("$name", async ({ bucket, lists }) => {
+    {
+      name: "skips the page-load bucket listing for a supplied bucket",
+      bucket: "dial9-team-traces",
+      lists: 0,
+      panelOpen: false,
+    },
+    {
+      name: "opens the picker on page load when no bucket is supplied",
+      bucket: "",
+      lists: 1,
+      panelOpen: true,
+    },
+  ])("$name", async ({ bucket, lists, panelOpen }) => {
     const listBuckets = vi.fn(async () => [
-      { name: "team-traces", region: "us-east-1" },
-      { name: "other-traces", region: "us-east-1" },
+      { name: "dial9-team-traces", region: "us-east-1" },
+      { name: "dial9-other-traces", region: "us-east-1" },
     ]);
     const creds = {
       has: vi.fn(() => true),
@@ -331,7 +341,7 @@ describe("mountCredsPanel", () => {
     await drainMicrotasks();
 
     expect(listBuckets).toHaveBeenCalledTimes(lists);
-    expect(store.getState().creds.panelOpen).toBe(false);
+    expect(store.getState().creds.panelOpen).toBe(panelOpen);
   });
 
   describe("Apply and Clear", () => {

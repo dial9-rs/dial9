@@ -47,7 +47,7 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   }
 
   // Prefix edits gate the Search button and ride the URL.
-  els.prefixInput.addEventListener("input", () => syncEditedPrefix());
+  els.prefixInput.addEventListener("input", syncEditedPrefix);
 
   // Quick-range buttons.
   for (const btn of els.quickBtns) {
