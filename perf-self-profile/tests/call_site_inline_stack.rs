@@ -71,6 +71,11 @@ struct Symbol {
     inline_depth: u64,
 }
 
+fn symbol_leaf(name: &str) -> &str {
+    // Full debug info yields qualified names; line tables may yield only DW_AT_name.
+    name.rsplit_once("::").map_or(name, |(_, leaf)| leaf)
+}
+
 fn check_inline_stack(config: CpuProfilingConfig, backend: &str) {
     let _lock = SAMPLER.lock().expect("sampler lock");
     let profiler = match CpuProfiler::start(config.frequency_hz(999)) {
@@ -136,7 +141,7 @@ fn check_inline_stack(config: CpuProfilingConfig, backend: &str) {
                 by_addr.get(addr).is_some_and(|symbols| {
                     symbols
                         .iter()
-                        .any(|symbol| symbol.symbol_name.ends_with("::sampled_work"))
+                        .any(|symbol| symbol_leaf(&symbol.symbol_name) == "sampled_work")
                 })
             }) else {
                 continue;
@@ -152,17 +157,19 @@ fn check_inline_stack(config: CpuProfilingConfig, backend: &str) {
             assert!(
                 names
                     .first()
-                    .is_some_and(|name| name.ends_with("::caller_then_drop")),
+                    .is_some_and(|name| symbol_leaf(name) == "caller_then_drop"),
                 "{backend}: wrong physical caller: {names:?}"
-            );
-            assert!(
-                names.iter().any(|name| name.ends_with("::inline_caller")),
-                "{backend}: lost the actual inline caller, got {names:?}"
             );
             assert!(
                 names
                     .iter()
-                    .all(|name| !name.contains("AfterReturn") && !name.contains("::drop")),
+                    .any(|name| symbol_leaf(name) == "inline_caller"),
+                "{backend}: lost the actual inline caller, got {names:?}"
+            );
+            assert!(
+                names.iter().all(|name| {
+                    !name.contains("AfterReturn") && !symbol_leaf(name).starts_with("drop")
+                }),
                 "{backend}: destructor after return appeared on the sampled stack: {names:?}"
             );
             if checked == 0 {
