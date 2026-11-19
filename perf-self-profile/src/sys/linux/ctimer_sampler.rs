@@ -89,11 +89,6 @@ impl SamplerBackend for CtimerSampler {
     }
 
     fn for_each_sample(&mut self, f: &mut dyn FnMut(&Sample)) {
-        let dropped = sample_buffer::take_dropped_count();
-        if dropped > 0 {
-            tracing::debug!("[ctimer] dropped {dropped} samples (buffer full)");
-        }
-
         let mut sample = Sample {
             ip: 0,
             pid: 0,
@@ -127,6 +122,10 @@ impl SamplerBackend for CtimerSampler {
         let mut samples = Vec::new();
         self.for_each_sample(&mut |s| samples.push(s.clone()));
         samples
+    }
+
+    fn take_lost(&mut self) -> u64 {
+        sample_buffer::take_dropped_count() as u64
     }
 
     fn disable(&self) {
@@ -245,15 +244,12 @@ extern "C" fn sigprof_handler(
 mod tests {
     use super::*;
     use crate::SamplingMode;
-    use crate::sampler::EventSource;
 
     #[test]
     fn start_rejects_period_mode() {
         let config = SamplerConfig {
             sampling: SamplingMode::Period(1),
-            event_source: EventSource::SwCpuClock,
-            include_kernel: false,
-            max_tracked_threads: 256,
+            ..Default::default()
         };
         let err = CtimerSampler::start(&config).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);

@@ -5,6 +5,7 @@
 //! are parsed via `perf-event-data`.
 
 use std::io;
+use std::num::NonZeroUsize;
 use std::ptr;
 
 use perf_event_data::Record;
@@ -39,13 +40,96 @@ impl Drop for PerfEvent {
     }
 }
 
-const PAGE_COUNT: usize = 512; // power of 2; 2 MB at 4 KB pages
+/// Data pages for a ring holding at least `bytes`. perf requires a power of two.
+fn ring_page_count(bytes: NonZeroUsize, page_size: usize) -> io::Result<usize> {
+    bytes
+        .get()
+        .div_ceil(page_size)
+        .checked_next_power_of_two()
+        // The metadata page and the byte size must fit in `usize` too.
+        .filter(|pages| {
+            pages
+                .checked_add(1)
+                .and_then(|p| p.checked_mul(page_size))
+                .is_some()
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("perf ring buffer size of {bytes} bytes is too large"),
+            )
+        })
+}
 
-/// Open a perf event fd, mmap the ring buffer, and enable it.
-fn open_perf_event(attr: &mut perf_event_attr, pid: i32, cpu: i32) -> io::Result<PerfEvent> {
+/// `mmap` of a perf ring buffer was refused with `EPERM`: the mapping would
+/// exceed the perf mlock budget. Not a `perf_event_open` restriction.
+#[derive(Debug)]
+pub(super) struct RingMlockBudgetError {
+    mmap_bytes: usize,
+    /// `kernel.perf_event_mlock_kb`, if readable.
+    mlock_kb: Option<u64>,
+    /// Soft `RLIMIT_MEMLOCK` in bytes, if readable.
+    memlock: Option<libc::rlim_t>,
+}
+
+impl RingMlockBudgetError {
+    fn for_mmap(mmap_bytes: usize) -> Self {
+        let mlock_kb = std::fs::read_to_string("/proc/sys/kernel/perf_event_mlock_kb")
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a valid, writable `rlimit` for the call's duration.
+        let memlock = (unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } == 0)
+            .then_some(limit.rlim_cur);
+        Self {
+            mmap_bytes,
+            mlock_kb,
+            memlock,
+        }
+    }
+}
+
+impl std::fmt::Display for RingMlockBudgetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "mmap of a {} KiB perf ring buffer failed with EPERM: over the perf mlock budget. \
+             Unprivileged perf ring buffers are limited to kernel.perf_event_mlock_kb",
+            self.mmap_bytes / 1024
+        )?;
+        if let Some(kb) = self.mlock_kb {
+            write!(f, " ({kb} KiB)")?;
+        }
+        f.write_str(" per CPU for each user, plus RLIMIT_MEMLOCK")?;
+        match self.memlock {
+            Some(libc::RLIM_INFINITY) => f.write_str(" (unlimited)")?,
+            Some(bytes) => write!(f, " ({} KiB)", bytes / 1024)?,
+            None => {}
+        }
+        f.write_str(
+            " for the process. Raise either limit, grant CAP_IPC_LOCK, or use smaller ring \
+             buffers. perf_event_open itself succeeded, so this is not the perf_event_paranoid \
+             level needed to open events",
+        )
+    }
+}
+
+impl std::error::Error for RingMlockBudgetError {}
+
+/// Open a perf event fd, mmap a ring buffer of `page_count` data pages, and
+/// enable it.
+fn open_perf_event(
+    attr: &mut perf_event_attr,
+    pid: i32,
+    cpu: i32,
+    page_count: usize,
+) -> io::Result<PerfEvent> {
     let page_size = page_size();
-    let data_size = PAGE_COUNT * page_size;
-    let mmap_size = (PAGE_COUNT + 1) * page_size;
+    let data_size = page_count * page_size;
+    let mmap_size = (page_count + 1) * page_size;
 
     let fd = unsafe {
         perf_event_open_sys::perf_event_open(
@@ -74,6 +158,14 @@ fn open_perf_event(attr: &mut perf_event_attr, pid: i32, cpu: i32) -> io::Result
     if base == libc::MAP_FAILED {
         let err = io::Error::last_os_error();
         unsafe { libc::close(fd) };
+        // perf_mmap returns EPERM only when the ring would exceed the mlock
+        // budget; a bare EPERM reads like a perf_event_paranoid problem.
+        if err.raw_os_error() == Some(libc::EPERM) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                RingMlockBudgetError::for_mmap(mmap_size),
+            ));
+        }
         return Err(err);
     }
 
@@ -94,11 +186,16 @@ pub(super) struct PerfSamplerImpl {
     attr: perf_event_attr,
     include_kernel: bool,
     max_tracked_threads: usize,
+    /// Data pages per ring buffer.
+    page_count: usize,
+    /// Samples the kernel dropped on full rings, not yet taken by `take_lost`.
+    lost: u64,
 }
 
 impl PerfSamplerImpl {
     pub(super) fn start_for_pid(pid: i32, config: &SamplerConfig) -> io::Result<Self> {
         let mut attr = Self::build_attr(config)?;
+        let page_count = ring_page_count(config.ring_buffer_bytes, page_size())?;
 
         let is_event_based = matches!(
             config.event_source,
@@ -108,7 +205,7 @@ impl PerfSamplerImpl {
 
         if is_event_based {
             // Single fd, cpu=-1, pid=target process
-            events.push(open_perf_event(&mut attr, pid, -1)?);
+            events.push(open_perf_event(&mut attr, pid, -1, page_count)?);
         } else {
             // With inherit + sampling, the kernel forbids cpu=-1 for mmap. We open
             // one event per CPU in the process's affinity mask. Using affinity
@@ -118,7 +215,7 @@ impl PerfSamplerImpl {
             let cpus = get_affinity_cpus()?;
             events.reserve(cpus.len());
             for &cpu in &cpus {
-                events.push(open_perf_event(&mut attr, pid, cpu)?);
+                events.push(open_perf_event(&mut attr, pid, cpu, page_count)?);
             }
         }
 
@@ -128,11 +225,14 @@ impl PerfSamplerImpl {
             attr,
             include_kernel: config.include_kernel,
             max_tracked_threads: config.max_tracked_threads,
+            page_count,
+            lost: 0,
         })
     }
 
     pub(super) fn new_per_thread(config: &SamplerConfig) -> io::Result<Self> {
         let mut attr = Self::build_attr(config)?;
+        let page_count = ring_page_count(config.ring_buffer_bytes, page_size())?;
 
         // Probe perf_event_open to detect if it's blocked (e.g., seccomp on
         // ECS/Fargate). Without this, creation succeeds but every subsequent
@@ -157,6 +257,8 @@ impl PerfSamplerImpl {
             attr,
             include_kernel: config.include_kernel,
             max_tracked_threads: config.max_tracked_threads,
+            page_count,
+            lost: 0,
         })
     }
 
@@ -308,7 +410,7 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
                 self.max_tracked_threads
             )));
         }
-        let mut ev = open_perf_event(&mut self.attr, 0, -1)?;
+        let mut ev = open_perf_event(&mut self.attr, 0, -1, self.page_count)?;
         // open_perf_event stores tid=0 (the "current thread" sentinel passed to
         // perf_event_open). Resolve to the real tid so stop_tracking_current_thread
         // can find this event later.
@@ -370,7 +472,9 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
                         }
                     }
                     Record::Lost(lost) => {
+                        // Ring buffer overflow; surfaced through `take_lost`.
                         tracing::debug!("[perf] lost {} events (ring buffer overflow)", lost.lost);
+                        self.lost = self.lost.saturating_add(lost.lost);
                         return;
                     }
                     _ => return,
@@ -385,6 +489,10 @@ impl super::sampler::SamplerBackend for PerfSamplerImpl {
         let mut samples = Vec::new();
         self.for_each_sample(&mut |s| samples.push(s.clone()));
         samples
+    }
+
+    fn take_lost(&mut self) -> u64 {
+        std::mem::take(&mut self.lost)
     }
 
     /// Pause collection. Ring buffers remain mapped and pending samples can
@@ -507,6 +615,111 @@ mod tests {
             u64::MAX - 128,
         ];
         assert!(filter_callchain(&markers, true).is_empty());
+    }
+
+    #[test]
+    fn ring_page_count_defaults_and_rounds_up_to_power_of_two_pages() {
+        let default = crate::sampler::DEFAULT_RING_BUFFER_BYTES;
+        assert_eq!(ring_page_count(default, 4096).unwrap(), 128);
+        assert_eq!(ring_page_count(default, 65536).unwrap(), 8);
+        let pages = |bytes| ring_page_count(NonZeroUsize::new(bytes).unwrap(), 4096).unwrap();
+        assert_eq!(pages(1), 1);
+        assert_eq!(pages(4096), 1);
+        assert_eq!(pages(4097), 2);
+        assert_eq!(pages(3 * 4096), 4);
+    }
+
+    #[test]
+    fn ring_page_count_rejects_sizes_that_overflow() {
+        for bytes in [usize::MAX, usize::MAX - 4096] {
+            let err = ring_page_count(NonZeroUsize::new(bytes).unwrap(), 4096).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn mlock_budget_error_names_both_limits() {
+        let msg = RingMlockBudgetError {
+            mmap_bytes: 516 * 1024,
+            mlock_kb: Some(516),
+            memlock: Some(8 * 1024 * 1024),
+        }
+        .to_string();
+        assert!(msg.contains("516 KiB perf ring buffer"), "{msg}");
+        assert!(
+            msg.contains("kernel.perf_event_mlock_kb (516 KiB)"),
+            "{msg}"
+        );
+        assert!(msg.contains("RLIMIT_MEMLOCK (8192 KiB)"), "{msg}");
+        assert!(msg.contains("perf_event_open itself succeeded"), "{msg}");
+
+        let msg = RingMlockBudgetError {
+            mmap_bytes: 4096,
+            mlock_kb: None,
+            memlock: Some(libc::RLIM_INFINITY),
+        }
+        .to_string();
+        assert!(msg.contains("kernel.perf_event_mlock_kb per CPU"), "{msg}");
+        assert!(msg.contains("RLIMIT_MEMLOCK (unlimited)"), "{msg}");
+
+        let err = io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            RingMlockBudgetError::for_mmap(0),
+        );
+        assert!(
+            crate::sys::linux::sampler::is_perf_blocked(&err),
+            "an over-budget ring must still fall back to ctimer"
+        );
+    }
+
+    #[test]
+    fn ring_over_the_mlock_budget_names_the_limits() {
+        // `perf_event_mlock_kb` per online CPU plus `RLIMIT_MEMLOCK`. Online
+        // CPUs as the kernel counts them, not this process's affinity.
+        // SAFETY: `sysconf` reads no caller memory.
+        let online_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        let online_cpus = u64::try_from(online_cpus).expect("online CPU count");
+        let limits = RingMlockBudgetError::for_mmap(0);
+        let (Some(mlock_kb), Some(memlock)) = (limits.mlock_kb, limits.memlock) else {
+            eprintln!("skipping: perf mlock limits unreadable");
+            return;
+        };
+        // `rlim_t` is 32 bits wide on some targets.
+        #[allow(clippy::unnecessary_cast)]
+        let budget = (mlock_kb * 1024)
+            .saturating_mul(online_cpus)
+            .saturating_add(memlock as u64);
+        // One ring larger than the whole budget fails on its own, without
+        // first using up the budget other perf users of this uid share.
+        let ring_bytes = budget.saturating_add(1);
+        if ring_bytes > 256 << 20 {
+            eprintln!("skipping: mlock budget of {budget} bytes is too large to exceed");
+            return;
+        }
+        let config = SamplerConfig::default().ring_buffer_size(
+            usize::try_from(ring_bytes)
+                .ok()
+                .and_then(NonZeroUsize::new)
+                .expect("ring size fits usize"),
+        );
+
+        let err = match PerfSamplerImpl::start_for_pid(0, &config) {
+            // root, CAP_IPC_LOCK and perf_event_paranoid=-1 are exempt.
+            Ok(_) => {
+                eprintln!("skipping: this process is exempt from the perf mlock budget");
+                return;
+            }
+            Err(e) if e.raw_os_error().is_some() => {
+                eprintln!("skipping: perf_event_open unavailable: {e}");
+                return;
+            }
+            Err(e) => e,
+        };
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("perf_event_mlock_kb"), "{msg}");
+        assert!(msg.contains("RLIMIT_MEMLOCK"), "{msg}");
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! Shared types for the sampler: event source, configuration, and sample data.
 
+use std::num::NonZeroUsize;
+
 /// Which event source to sample on.
 // TODO: these variants are currently Linux-specific (perf_event_open constants),
 // consider cfg-gating individual variants when adding other platform backends.
@@ -45,7 +47,14 @@ pub struct SamplerConfig {
     /// per-thread mode. Prevents unbounded fd/mmap growth if cleanup fails.
     /// Default: 256.
     pub(crate) max_tracked_threads: usize,
+    /// Requested data size of each perf ring buffer, in bytes.
+    pub(crate) ring_buffer_bytes: NonZeroUsize,
 }
+
+/// Default perf ring buffer size: with its metadata page at 4 KiB pages,
+/// exactly the 516 KiB one CPU contributes to the default
+/// `kernel.perf_event_mlock_kb` budget.
+pub(crate) const DEFAULT_RING_BUFFER_BYTES: NonZeroUsize = NonZeroUsize::new(512 * 1024).unwrap();
 
 impl Default for SamplerConfig {
     fn default() -> Self {
@@ -54,6 +63,7 @@ impl Default for SamplerConfig {
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
             max_tracked_threads: 256,
+            ring_buffer_bytes: DEFAULT_RING_BUFFER_BYTES,
         }
     }
 }
@@ -83,6 +93,21 @@ impl SamplerConfig {
     /// of opening another fd. Default: 256.
     pub fn max_tracked_threads(mut self, max: usize) -> Self {
         self.max_tracked_threads = max;
+        self
+    }
+
+    /// Data size of each perf ring buffer, in bytes, rounded up to a power of
+    /// two pages. Default: 512 KiB.
+    ///
+    /// One ring is mapped per CPU in process-wide mode and per tracked thread
+    /// in per-thread mode. Unprivileged rings count against the perf mlock
+    /// budget (`kernel.perf_event_mlock_kb` per CPU plus `RLIMIT_MEMLOCK`).
+    /// A ring that fills before it is drained drops samples; see
+    /// [`PerfSampler::take_lost_samples`](crate::PerfSampler::take_lost_samples).
+    ///
+    /// Ignored by the ctimer backend.
+    pub fn ring_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
+        self.ring_buffer_bytes = bytes;
         self
     }
 }
