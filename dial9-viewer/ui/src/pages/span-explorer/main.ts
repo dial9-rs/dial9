@@ -194,8 +194,7 @@ function linkState(): SpanExplorerState | null {
 }
 
 function syncUrl(): void {
-  // Keep the pathname explicit: a bare "?qs" would resolve against <base href="/">
-  // and rewrite this page's path to "/".
+  // Keep the pathname explicit so URL updates preserve the current page route.
   const next = `${window.location.pathname}?${buildBrowserQuery(
     scope, view(), analysisView, new URLSearchParams(window.location.search),
   )}${window.location.hash}`;

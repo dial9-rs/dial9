@@ -37,10 +37,10 @@ import {
 import { readScope } from "../../lib/trace/trace_scope.js";
 
 // `?trace=` passthrough - redirect to the viewer preserving all params
-// (including repeated `trace=` components). Relative target resolves to
-// /viewer.html via <base href="/">. The rest of the boot is skipped:
-// nothing observable renders before the replace lands, and it avoids
-// firing stray /api requests from a page that is going away.
+// (including repeated `trace=` components). The browser entry is served from
+// the origin root, so the relative target resolves to /viewer.html. The rest of
+// the boot is skipped: nothing observable renders before the replace lands, and
+// it avoids firing stray /api requests from a page that is going away.
 const qs = window.location.search;
 if (new URLSearchParams(qs).has("trace")) {
   window.location.replace("viewer.html" + qs);

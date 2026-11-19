@@ -1,7 +1,7 @@
 // Footer component: the demo-trace button, the "Open Trace Viewer" link
 // (static markup) and the whole-page drag-and-drop that opens a dropped
-// .bin in the viewer. The relative viewer.html targets resolve against
-// <base href="/">.
+// .bin in the viewer. The browser entry is served from the origin root, so
+// its relative targets resolve to the root viewer routes.
 
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";

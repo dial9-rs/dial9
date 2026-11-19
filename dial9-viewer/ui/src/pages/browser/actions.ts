@@ -202,8 +202,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         service: "",
       }).query;
     }
-    // Keep the pathname explicit: a bare "?qs" would resolve against
-    // <base href="/"> and rewrite this off-root page's path to "/".
+    // Keep the pathname explicit so URL updates preserve the current page route.
     history[historyMode === "push" ? "pushState" : "replaceState"](
       null,
       "",

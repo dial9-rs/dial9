@@ -121,8 +121,7 @@ function syncUrl(): void {
   // scope cannot be expressed by buildSyncQuery); the
   // p{i}_ period sync is for the normal same-scope multi-period case.
   if (diffMode) return;
-  // Keep the pathname explicit: a bare "?qs" would resolve against this page's
-  // <base href="/"> and rewrite the off-root path to "/".
+  // Keep the pathname explicit so URL updates preserve the current page route.
   history.replaceState(null, "", window.location.pathname + "?" + buildSyncQuery(scope, periods));
 }
 
