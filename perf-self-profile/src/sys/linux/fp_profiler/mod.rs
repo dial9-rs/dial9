@@ -128,7 +128,11 @@ mod supported {
         // SA_NODEFER: safe_load may fault inside SIGPROF, without this the second
         // SIGSEGV queues instead of fires. Invariant: neither this handler nor any
         // chained handler may fault, or we recurse without bound.
-        new_action.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
+        // SA_ONSTACK: a stack-overflow SIGSEGV can only be delivered on the
+        // thread's sigaltstack (std registers one per thread). Without it the
+        // kernel kills the process before any handler runs.
+        // Threads with no sigaltstack still get the current stack.
+        new_action.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER | libc::SA_ONSTACK;
         unsafe { libc::sigemptyset(&mut new_action.sa_mask) };
 
         let old_storage = Box::into_raw(Box::new(unsafe { std::mem::zeroed::<libc::sigaction>() }));
@@ -278,7 +282,9 @@ mod supported {
                 if old_ref.sa_flags & libc::SA_SIGINFO != 0 {
                     let f: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
                         std::mem::transmute(old_ref.sa_sigaction);
+                    let prev = block_chained_mask(old_ref);
                     f(signo, info, ucontext);
+                    restore_mask(&prev);
                     return;
                 }
                 let h = old_ref.sa_sigaction;
@@ -294,10 +300,43 @@ mod supported {
                     // SAFETY: SA_SIGINFO is not set, the old handler uses the 1-arg
                     // `void (*)(int)` signal-handler signature.
                     let f: extern "C" fn(libc::c_int) = std::mem::transmute(h);
+                    let prev = block_chained_mask(old_ref);
                     f(signo);
+                    restore_mask(&prev);
                 }
             }
         }
+    }
+
+    /// Blocks the signals the kernel would have blocked had it delivered
+    /// SIGSEGV to `old` directly: its `sa_mask`, plus SIGSEGV itself unless
+    /// `old` set `SA_NODEFER`. A fault inside a chained handler that did not
+    /// opt into `SA_NODEFER` then hits a blocked synchronous SIGSEGV, which the
+    /// kernel turns into a default kill instead of re-entering
+    /// [`sigsegv_handler`]. Returns the mask to restore afterwards.
+    ///
+    /// Must be called from signal context with a valid `sigaction`.
+    unsafe fn block_chained_mask(old: &libc::sigaction) -> libc::sigset_t {
+        // SAFETY: pthread_sigmask is async-signal-safe and both sets are valid.
+        // It fails only on an invalid `how`, which is a constant here, and
+        // nothing async-signal-safe could report a failure anyway.
+        unsafe {
+            let mut mask = old.sa_mask;
+            if old.sa_flags & libc::SA_NODEFER == 0 {
+                libc::sigaddset(&mut mask, libc::SIGSEGV);
+            }
+            let mut prev: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, &mask, &mut prev);
+            prev
+        }
+    }
+
+    /// Restores the signal mask saved by [`block_chained_mask`].
+    ///
+    /// Must be called from signal context.
+    unsafe fn restore_mask(prev: &libc::sigset_t) {
+        // SAFETY: see `block_chained_mask`.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, prev, ptr::null_mut()) };
     }
 
     /// libsigchain "special handler" variant of [`sigsegv_handler`]. Returns
