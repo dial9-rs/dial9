@@ -292,13 +292,14 @@ struct ActiveDump {
     id: crate::dump::DumpId,
     triggered_at: SystemTime,
     window: EpochWindow,
-    /// `Some` for a finite look-forward deadline. An overflowing forward
-    /// window leaves this `None`; `forward_window` distinguishes that from
-    /// no forward window.
+    /// `Some` for a finite look-forward deadline. A forward window whose
+    /// deadline is not safely representable (see [`forward_deadline`])
+    /// leaves this `None`; `forward_window` distinguishes that from no
+    /// forward window.
     deadline: Option<crate::primitives::time::Instant>,
     /// True when a non-zero look-forward was requested. Kept separately from
-    /// `deadline` because an overflowing deadline is unbounded rather than
-    /// absent: `Duration::MAX` must keep the dump open for the process
+    /// `deadline` because an unrepresentable deadline is unbounded rather
+    /// than absent: `Duration::MAX` must keep the dump open for the process
     /// lifetime, not resolve it immediately.
     forward_window: bool,
     metadata: Vec<(String, String)>,
@@ -328,10 +329,13 @@ impl ActiveDump {
         let forward_window = !req.lookforward.is_zero();
         let deadline = if forward_window {
             // Anchor at trigger time so worker pickup latency does not
-            // extend the forward window. An overflow leaves the dump without
-            // a representable deadline, so it stays open until shutdown.
+            // extend the forward window. An unrepresentable deadline leaves
+            // the dump without one, so it stays open until shutdown.
             let elapsed = req.elapsed_since_trigger();
-            crate::primitives::time::now().checked_add(req.lookforward.saturating_sub(elapsed))
+            forward_deadline(
+                crate::primitives::time::now(),
+                req.lookforward.saturating_sub(elapsed),
+            )
         } else {
             None
         };
@@ -355,8 +359,8 @@ impl ActiveDump {
     /// forward window, or its deadline elapsed.
     fn due(&self, now: crate::primitives::time::Instant) -> bool {
         // An absent deadline means immediate only when no forward window was
-        // requested. An overflowing forward window has no representable
-        // deadline and stays open until the worker shuts down.
+        // requested. A forward window without a safely representable
+        // deadline stays open until the worker shuts down.
         self.deadline
             .map_or(!self.forward_window, |deadline| now >= deadline)
     }
@@ -426,6 +430,25 @@ impl ActiveDump {
         };
         (tx, result)
     }
+}
+
+/// Headroom a timer deadline keeps below `Instant`'s maximum. Tokio rounds
+/// every deadline up to the next millisecond with an unchecked add
+/// (`deadline_to_tick`), so a deadline within that margin of the maximum
+/// panics the first time `sleep_until` polls it. One second covers the
+/// sub-millisecond rounding with room to spare.
+const TIMER_DEADLINE_HEADROOM: Duration = Duration::from_secs(1);
+
+/// `now + remaining` as a timer deadline, or `None` when it is not safely
+/// representable: it overflows `Instant`, or lands within
+/// [`TIMER_DEADLINE_HEADROOM`] of the maximum. `None` means the forward
+/// window is unbounded.
+fn forward_deadline(
+    now: crate::primitives::time::Instant,
+    remaining: Duration,
+) -> Option<crate::primitives::time::Instant> {
+    now.checked_add(remaining.saturating_add(TIMER_DEADLINE_HEADROOM))?;
+    now.checked_add(remaining)
 }
 
 fn epoch_to_system(epoch_secs: u64) -> SystemTime {

@@ -2521,3 +2521,78 @@ mod finalize_dump_tests {
         worker.await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod forward_deadline_tests {
+    use crate::worker::{TIMER_DEADLINE_HEADROOM, forward_deadline};
+    use assert2::check;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    /// Largest `d` with `now.checked_add(d)` representable.
+    fn max_remaining(now: Instant) -> Duration {
+        let (mut lo, mut hi) = (0u128, Duration::MAX.as_nanos());
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            if now.checked_add(from_nanos(mid)).is_some() {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        from_nanos(lo)
+    }
+
+    fn from_nanos(n: u128) -> Duration {
+        Duration::new((n / 1_000_000_000) as u64, (n % 1_000_000_000) as u32)
+    }
+
+    /// Every deadline `forward_deadline` hands out must be safe to arm:
+    /// tokio rounds the deadline up with an unchecked add, so one within a
+    /// millisecond of `Instant`'s maximum panics on the first poll.
+    #[tokio::test(start_paused = true)]
+    async fn deadlines_near_instant_max_are_unbounded_or_safe_to_arm() {
+        let now = Instant::now();
+        let max = max_remaining(now);
+        let below_max = [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_micros(500),
+            Duration::from_nanos(999_999),
+            Duration::from_millis(1),
+            TIMER_DEADLINE_HEADROOM - Duration::from_nanos(1),
+        ];
+        for gap in below_max {
+            check!(forward_deadline(now, max - gap).is_none(), "gap {gap:?}");
+        }
+        check!(forward_deadline(now, Duration::MAX).is_none());
+
+        for gap in [TIMER_DEADLINE_HEADROOM, Duration::from_secs(3600)] {
+            let deadline = forward_deadline(now, max - gap);
+            check!(deadline == now.checked_add(max - gap), "gap {gap:?}");
+        }
+        for gap in below_max
+            .into_iter()
+            .chain([TIMER_DEADLINE_HEADROOM, Duration::from_secs(3600)])
+        {
+            if let Some(deadline) = forward_deadline(now, max - gap) {
+                // Arms the timer; panics for a deadline tokio cannot round up.
+                let armed =
+                    tokio::time::timeout(Duration::ZERO, tokio::time::sleep_until(deadline)).await;
+                check!(armed.is_err(), "gap {gap:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_deadlines_are_unchanged() {
+        let now = Instant::now();
+        for remaining in [
+            Duration::from_nanos(1),
+            Duration::from_secs(30),
+            Duration::from_secs(86_400 * 365 * 100),
+        ] {
+            check!(forward_deadline(now, remaining) == Some(now + remaining));
+        }
+    }
+}
