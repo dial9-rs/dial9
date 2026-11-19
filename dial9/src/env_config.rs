@@ -743,8 +743,7 @@ fn build_env_disk_writer(
     Ok(writer)
 }
 
-/// Register the flush-thread `Source`s (cpu / sched / rusage / socket) selected
-/// by env config onto the core recorder builder.
+/// The CPU profiling config selected by env config.
 #[cfg(feature = "cpu-profiling")]
 fn cpu_profiling_config(config: &RuntimeEnvConfig) -> dial9_perf_self_profile::CpuProfilingConfig {
     let cpu = dial9_perf_self_profile::CpuProfilingConfig::default();
@@ -755,12 +754,15 @@ fn cpu_profiling_config(config: &RuntimeEnvConfig) -> dial9_perf_self_profile::C
     .recover_leaf_callers(config.recover_leaf_callers)
 }
 
+/// The scheduler profiling config selected by env config.
 #[cfg(feature = "cpu-profiling")]
 fn sched_event_config(config: &RuntimeEnvConfig) -> dial9_perf_self_profile::SchedEventConfig {
     dial9_perf_self_profile::SchedEventConfig::default()
         .recover_leaf_callers(config.recover_leaf_callers)
 }
 
+/// Register the flush-thread `Source`s (cpu / sched / rusage / socket) selected
+/// by env config onto the core recorder builder.
 fn apply_core_sources(
     #[allow(unused_mut)] mut core: dial9_core::recorder::RecorderBuilder<Disk>,
     config: &RuntimeEnvConfig,
