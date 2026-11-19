@@ -59,6 +59,12 @@ impl CtimerSampler {
             })?;
         }
 
+        // The SIGPROF walk reads the function-start table from signal context,
+        // where it cannot be built, so build it before the first sample. Only
+        // the aarch64 walk reads it; elsewhere `unwind_with_lr` ignores `lr`.
+        #[cfg(target_arch = "aarch64")]
+        crate::sys::func_starts::init();
+
         unsafe {
             ctimer::start(interval_ns, sigprof_handler)
                 .map_err(|e| io::Error::other(format!("failed to start ctimer: {e}")))?;
