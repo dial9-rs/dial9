@@ -111,8 +111,9 @@ impl Default for ViewerConfig {
     }
 }
 
-/// Source-identity policy for [`build_app_with_options`]. Caller-selected S3
-/// reads require BYOC credentials or an assumed-role ARN by default.
+/// Embedder options for [`build_app_with_options`] and
+/// [`build_app_with_backend_and_options`]. Caller-selected S3 source reads
+/// require BYOC credentials or an assumed-role ARN by default.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct ViewerAppOptions {
     /// Permit caller-selected S3 source reads to fall back to the server's AWS
@@ -120,12 +121,30 @@ pub struct ViewerAppOptions {
     /// operator-configured ambient mode.
     #[builder(default = false)]
     allow_ambient_source_identity: bool,
+    /// Optional same-origin path shown as a Home link in the trace browser.
+    /// Must begin with one `/`; protocol-relative and external URLs are rejected.
+    #[builder(into)]
+    browser_home_path: Option<String>,
 }
 
 impl Default for ViewerAppOptions {
     fn default() -> Self {
         Self::builder().build()
     }
+}
+
+fn validate_browser_home_path(path: Option<&str>) -> anyhow::Result<()> {
+    if let Some(path) = path
+        && (!path.starts_with('/')
+            || path.starts_with("//")
+            || path.contains('\\')
+            || path
+                .bytes()
+                .any(|byte| matches!(byte, b'\t' | b'\n' | b'\r')))
+    {
+        anyhow::bail!("browser_home_path must be a same-origin path beginning with one `/`");
+    }
+    Ok(())
 }
 
 /// Initialize the process-global tracing subscriber: JSON logs by default (so
@@ -170,7 +189,7 @@ pub async fn build_app(config: ViewerConfig) -> anyhow::Result<axum::Router> {
     build_app_with_options(config, ViewerAppOptions::default()).await
 }
 
-/// [`build_app`] with source-identity policy from [`ViewerAppOptions`].
+/// [`build_app`] with custom embedder options from [`ViewerAppOptions`].
 pub async fn build_app_with_options(
     config: ViewerConfig,
     options: ViewerAppOptions,
@@ -215,7 +234,17 @@ pub async fn build_app_with_backend(
     config: ViewerConfig,
     backend: std::sync::Arc<dyn storage::StorageBackend>,
 ) -> anyhow::Result<axum::Router> {
-    build_app_from(config, Some(backend), ViewerAppOptions::default()).await
+    build_app_with_backend_and_options(config, backend, ViewerAppOptions::default()).await
+}
+
+/// [`build_app_with_backend`] with custom embedder options from
+/// [`ViewerAppOptions`].
+pub async fn build_app_with_backend_and_options(
+    config: ViewerConfig,
+    backend: std::sync::Arc<dyn storage::StorageBackend>,
+    options: ViewerAppOptions,
+) -> anyhow::Result<axum::Router> {
+    build_app_from(config, Some(backend), options).await
 }
 
 async fn build_app_from(
@@ -235,8 +264,11 @@ async fn build_app_from(
     supplied_backend: Option<std::sync::Arc<dyn storage::StorageBackend>>,
     ViewerAppOptions {
         allow_ambient_source_identity,
+        browser_home_path,
     }: ViewerAppOptions,
 ) -> anyhow::Result<axum::Router> {
+    validate_browser_home_path(browser_home_path.as_deref())?;
+
     match &supplied_backend {
         // A supplied backend answers for the source, so the built-in source
         // selection — and the S3-feature checks that police it — do not apply.
@@ -395,6 +427,7 @@ async fn build_app_from(
         .with_byo_creds(source_is_s3)
         .with_agg_output(agg_output)
         .with_agg_segment_secs(agg_segment_secs)
+        .with_browser_home_path(browser_home_path)
         .with_require_explicit_source_identity(source_is_s3 && !allow_ambient_source_identity);
     // For an S3 source, also offer the assume-role path: a request may name a
     // role ARN and the viewer assumes it with its own (ambient) identity via
@@ -424,6 +457,79 @@ pub async fn shutdown_signal() {
         .await
         .expect("failed to install CTRL+C handler");
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod browser_home_path_tests {
+    use super::{
+        ViewerAppOptions, ViewerConfig, build_app_with_options, validate_browser_home_path,
+    };
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use rstest::rstest;
+    use tower::ServiceExt;
+
+    #[test]
+    fn browser_home_path_is_opt_in() {
+        assert!(ViewerAppOptions::default().browser_home_path.is_none());
+    }
+
+    #[rstest]
+    #[case("")]
+    #[case("landing")]
+    #[case("//example.com/landing")]
+    #[case("/\\example.com/landing")]
+    #[case("/\t/example.com/landing")]
+    #[case("/\n/example.com/landing")]
+    #[case("/\r/example.com/landing")]
+    #[case("https://example.com/landing")]
+    fn browser_home_path_rejects_non_local_targets(#[case] path: &str) {
+        let error = validate_browser_home_path(Some(path)).unwrap_err();
+        assert!(error.to_string().contains("same-origin path"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn build_app_rejects_invalid_browser_home_path() {
+        let traces = tempfile::tempdir().unwrap();
+        let error = build_app_with_options(
+            ViewerConfig {
+                local_dir: Some(traces.path().to_path_buf()),
+                ..ViewerConfig::default()
+            },
+            ViewerAppOptions::builder()
+                .browser_home_path("https://example.com/landing")
+                .build(),
+        )
+        .await
+        .expect_err("an external browser home URL should not build");
+
+        assert!(error.to_string().contains("same-origin path"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn browser_home_path_is_advertised_to_the_ui() {
+        let traces = tempfile::tempdir().unwrap();
+        let app = build_app_with_options(
+            ViewerConfig {
+                local_dir: Some(traces.path().to_path_buf()),
+                ..ViewerConfig::default()
+            },
+            ViewerAppOptions::builder()
+                .browser_home_path("/landing")
+                .build(),
+        )
+        .await
+        .unwrap();
+
+        let response = app
+            .oneshot(Request::get("/api/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(config["browser_home_path"], "/landing");
+    }
 }
 
 #[cfg(all(test, feature = "s3"))]
@@ -459,8 +565,14 @@ mod app_options_tests {
 
 #[cfg(test)]
 mod supplied_backend_tests {
-    use super::{ViewerConfig, build_app_with_backend, storage};
+    use super::{
+        ViewerAppOptions, ViewerConfig, build_app_with_backend, build_app_with_backend_and_options,
+        storage,
+    };
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
     use std::sync::Arc;
+    use tower::ServiceExt;
 
     fn backend(dir: &std::path::Path) -> Arc<dyn storage::StorageBackend> {
         Arc::new(storage::LocalBackend::new(dir))
@@ -474,6 +586,29 @@ mod supplied_backend_tests {
         let traces = tempfile::tempdir().unwrap();
         let app = build_app_with_backend(ViewerConfig::default(), backend(traces.path())).await;
         assert!(app.is_ok(), "{:?}", app.err());
+    }
+
+    #[tokio::test]
+    async fn browser_home_path_is_advertised_with_supplied_backend() {
+        let traces = tempfile::tempdir().unwrap();
+        let app = build_app_with_backend_and_options(
+            ViewerConfig::default(),
+            backend(traces.path()),
+            ViewerAppOptions::builder()
+                .browser_home_path("/landing")
+                .build(),
+        )
+        .await
+        .unwrap();
+
+        let response = app
+            .oneshot(Request::get("/api/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(config["browser_home_path"], "/landing");
     }
 
     #[tokio::test]

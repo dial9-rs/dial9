@@ -17,6 +17,10 @@ header {
     display: flex; align-items: center; gap: 12px;
 }
 header h1 { font-size: 1.1em; color: #6c63ff; }
+header .home-link {
+    color: #8b9dff; font-size: 0.85em; text-decoration: none; white-space: nowrap;
+}
+header .home-link:hover { text-decoration: underline; }
 /* Contrast: legacy #666 on #16213e was ~2.8:1 (axe serious). Lifted to
    a muted grey that clears 4.5:1 on the header/controls background. Brighter
    text on this all-dark page can only raise contrast, never regress it. */

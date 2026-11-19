@@ -268,6 +268,9 @@ pub struct AppState {
     /// Defaults to "dial9"; empty disables filtering. See
     /// [`Self::with_bucket_filter`].
     pub bucket_filter: String,
+    /// Optional same-origin destination shown as a Home link in the trace
+    /// browser. Configured by an embedder through [`crate::ViewerAppOptions`].
+    pub(crate) browser_home_path: Option<String>,
     /// Process-global concurrency limits for the demand-driven fold pipeline,
     /// shared across all in-flight `/api/flamegraph` requests so total fold work
     /// is bounded application-wide (see [`FoldLimits`]).
@@ -300,6 +303,7 @@ impl AppState {
             agg_output: AggOutput::temporary(),
             agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
             bucket_filter: "dial9".to_string(),
+            browser_home_path: None,
             fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
     }
@@ -393,6 +397,11 @@ impl AppState {
 
     pub fn with_agg_segment_secs(mut self, secs: i64) -> Self {
         self.agg_segment_secs = secs;
+        self
+    }
+
+    pub(crate) fn with_browser_home_path(mut self, path: Option<String>) -> Self {
+        self.browser_home_path = path;
         self
     }
 

@@ -16,7 +16,7 @@ import type { PageCtx } from "./ctx.js";
 import { queryEls } from "./dom.js";
 import { mountFooter } from "./footer.js";
 import { dateToPickerStr } from "./format.js";
-import { mountHeader } from "./header.js";
+import { configureHomeLink, mountHeader } from "./header.js";
 import { mountHeatmapInteraction } from "./heatmap-interact.js";
 import { mountHeatmapKeys } from "./heatmap-keys.js";
 import { mountHeatmapLabelResize } from "./heatmap-label-resize.js";
@@ -160,6 +160,7 @@ function boot(): void {
       return r.json() as Promise<ApiConfig>;
     })
     .then((config) => {
+      configureHomeLink(els.homeLink, config.browser_home_path);
       // The server's default bucket belongs to the server's identity. Don't
       // prefill it when the user has brought their own credentials - that
       // bucket isn't theirs; they pick from their own buckets instead. Ask

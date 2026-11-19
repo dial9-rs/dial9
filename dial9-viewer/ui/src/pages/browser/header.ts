@@ -6,6 +6,15 @@ import { assertInScheduledRender } from "../../store/store.js";
 import { tzName } from "./format.js";
 import type { PageCtx } from "./ctx.js";
 
+export function configureHomeLink(
+  link: HTMLAnchorElement,
+  path: string | undefined,
+): void {
+  if (!path) return;
+  link.href = path;
+  link.hidden = false;
+}
+
 export function mountHeader({ store, els, actions }: PageCtx): void {
   els.tzBtn.addEventListener("click", () => {
     actions.toggleTz();
