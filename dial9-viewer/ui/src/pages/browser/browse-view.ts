@@ -138,10 +138,14 @@ export function mountBrowseView({ store, els, actions }: PageCtx): void {
       els.heatmapLabels.appendChild(label);
       if (row === focusRow) label.focus();
     }
+    // The clear above detached the Show all hosts button. While a host is
+    // focused, put it back right below that host's row.
+    if (store.getState().browse.unfocusedRows) els.heatmapLabels.appendChild(els.heatmapShowAllHosts);
     const firstRow = els.heatmapLabels.querySelector<HTMLElement>(".row");
     const context = document.createElement("canvas").getContext("2d");
     if (!firstRow || !context) return;
     context.font = getComputedStyle(firstRow).font;
+    if (store.getState().browse.unfocusedRows) labels.push(els.heatmapShowAllHosts.textContent ?? "");
     const width = contentFitLabelWidth(
       labels.map((label) => context.measureText(label).width),
       els.heatmapBody.clientWidth,

@@ -278,7 +278,9 @@ describe("host focus controls", () => {
 
     expect(store.getState().browse.rows).toEqual([rows[1]]);
     expect(store.getState().browse.domain).toBe(DOMAIN);
-    expect(labels.children).toHaveLength(1);
+    // Show all hosts sits directly below the focused host's row.
+    expect(labels.children).toHaveLength(2);
+    expect(labels.children[1]).toBe(showAllHosts);
     expect(document.activeElement).toBe(labels.children[0]);
     expect(canvas.height).toBe(ROW_H);
     expect(showAllHosts.style["display"]).toBe("");
@@ -289,13 +291,14 @@ describe("host focus controls", () => {
 
     expect(store.getState().browse.rows).toBe(rows);
     expect(labels.children).toHaveLength(2);
+    expect(labels.children).not.toContain(showAllHosts);
     expect(document.activeElement).toBe(labels.children[1]);
     expect(canvas.height).toBe(2 * ROW_H);
     expect(showAllHosts.style["display"]).toBe("none");
   });
 
   it("keeps the focused row and aligned time axis when resized", async () => {
-    const { store, labels, canvas, plot, axis } = setup();
+    const { store, labels, canvas, plot, axis, showAllHosts } = setup();
     const rows = [row(), { ...row(), host: "h2", label: "api / h2" }];
     store.update("browse", { rows, domain: DOMAIN, heatmapVisible: true });
     await flushStore();
@@ -308,7 +311,7 @@ describe("host focus controls", () => {
     store.update("browse", { renderEpoch: 1 });
     await flushStore();
 
-    expect(labels.children).toEqual([focusedLabel]);
+    expect(labels.children).toEqual([focusedLabel, showAllHosts]);
     expect(canvas.width).toBe(500);
     expect(canvas.height).toBe(ROW_H);
     expect(store.getState().browse.domain).toBe(DOMAIN);
