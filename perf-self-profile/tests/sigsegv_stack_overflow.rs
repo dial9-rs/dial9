@@ -57,6 +57,12 @@ fn stack_overflow_is_reported_after_install() {
         unreachable!("thread should have overflowed its stack");
     }
 
+    let unwinder = Unwinder::install().unwrap();
+    if !unwinder.verify_handler() {
+        eprintln!("skipping: SIGSEGV handler was replaced (sanitizer?)");
+        return;
+    }
+
     let output = Command::new(std::env::current_exe().unwrap())
         .args([CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, "1")
