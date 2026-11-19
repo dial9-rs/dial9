@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.5.4"
+version = "0.5.9"
 dependencies = [
  "dial9-core",
  "dial9-trace-format",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-core"
-version = "0.5.4"
+version = "0.5.8"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -276,6 +276,7 @@ dependencies = [
  "libc",
  "metrique",
  "metrique-timesource",
+ "rustix",
  "tokio",
  "tracing",
  "ulid",
@@ -283,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.5.4"
+version = "0.5.8"
 dependencies = [
  "blazesym",
  "bon",
@@ -300,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format"
-version = "0.5.2"
+version = "0.5.5"
 dependencies = [
  "ahash",
  "dial9-trace-format-derive",
@@ -309,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format-derive"
-version = "0.5.2"
+version = "0.5.5"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -926,9 +927,9 @@ checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",
