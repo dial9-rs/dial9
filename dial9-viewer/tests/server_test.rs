@@ -217,6 +217,7 @@ async fn config_returns_defaults() {
         .unwrap();
     check!(resp["default_bucket"] == "my-bucket");
     check!(resp["default_prefix"] == "my-prefix");
+    check!(resp.get("browser_home_path").is_none());
     // T15: the bucket-picker filter is config-driven; "dial9" is the default.
     check!(resp["bucket_filter"] == "dial9");
 }

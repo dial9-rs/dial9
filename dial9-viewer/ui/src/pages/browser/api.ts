@@ -52,6 +52,8 @@ export interface ApiConfig {
   /** Bucket-picker filter substring; may be absent on servers predating
    * the field - the client falls back to "dial9". */
   bucket_filter?: string | undefined;
+  /** Optional same-origin destination for the trace-browser Home link. */
+  browser_home_path?: string | undefined;
 }
 
 /** Whether selected traces must open directly by key instead of by scope. */

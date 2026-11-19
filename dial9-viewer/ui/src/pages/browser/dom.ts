@@ -16,6 +16,7 @@ const bySelector = <T extends HTMLElement>(sel: string): T =>
 
 export interface BrowserEls {
   // Header
+  homeLink: HTMLAnchorElement;
   tzBtn: HTMLButtonElement;
   /** Labels that name the active timezone (#654). */
   rangeFromLabel: HTMLLabelElement;
@@ -101,6 +102,7 @@ export interface BrowserEls {
 
 export function queryEls(): BrowserEls {
   return {
+    homeLink: byIdOf("home-link", HTMLAnchorElement),
     tzBtn: byId("tz-btn"),
     rangeFromLabel: byId("range-from-label"),
     rangeToLabel: byId("range-to-label"),

@@ -29,6 +29,10 @@ pub struct ConfigResponse {
     /// load with a `bucket_filter=` query param on its own URL (T15; resolves
     /// the features/01 Finding-2 bucket-filter lockout structurally).
     pub bucket_filter: String,
+    /// Optional same-origin destination shown as a Home link in the trace
+    /// browser. Omitted when the embedder does not configure one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_home_path: Option<String>,
 }
 
 pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
@@ -51,5 +55,6 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         // reports false.
         supports_assume_role: state.supports_assume_role(),
         bucket_filter: state.bucket_filter.clone(),
+        browser_home_path: state.browser_home_path.clone(),
     })
 }
