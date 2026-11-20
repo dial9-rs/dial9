@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -1947,7 +1947,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-core"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-destinations-s3"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "assert2",
  "async-trait",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-metrique"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "criterion 0.7.0",
  "dial9-core",
@@ -2030,7 +2030,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "blazesym",
  "bon",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-sampling"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
@@ -2083,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2154,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-utils"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "axum 0.7.9",
  "axum 0.8.9",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "arrow",
