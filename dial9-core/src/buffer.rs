@@ -1093,7 +1093,7 @@ impl<M: BufferMode> SegmentWriter<M> {
 
         let current_index = self.current_index();
 
-        if self.has_real_events || (self.metadata_changed_since_seal && self.next_index > 1) {
+        if self.has_real_events || (self.metadata_changed_since_seal && self.next_index.get() > 1) {
             match self.fs.seal(handle, &self.active_path, current_index) {
                 Ok(seg_ref) => {
                     if M::IS_DISK {
