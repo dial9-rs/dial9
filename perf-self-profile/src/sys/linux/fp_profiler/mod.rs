@@ -122,13 +122,39 @@ mod supported {
     #[cfg(target_os = "android")]
     static DIRECT_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+    /// Whether our handler should carry `SA_ONSTACK` given the disposition it
+    /// replaces. A stack-overflow SIGSEGV can only be delivered on the
+    /// thread's sigaltstack (std registers one per thread); without
+    /// `SA_ONSTACK` the kernel kills the process before any handler runs.
+    /// But every fault we do not claim is chained to `old` on whatever stack
+    /// we were delivered on, so we only use the altstack when `old` would
+    /// have too, or when there is no handler to chain to. A handler installed
+    /// without `SA_ONSTACK` may need more stack than the altstack holds.
+    fn wants_onstack(old: &libc::sigaction) -> bool {
+        old.sa_sigaction == libc::SIG_DFL
+            || old.sa_sigaction == libc::SIG_IGN
+            || old.sa_flags & libc::SA_ONSTACK != 0
+    }
+
     unsafe fn install_sigaction_handler() -> Result<(), std::io::Error> {
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: a null `act` only queries the current action.
+        if unsafe { libc::sigaction(libc::SIGSEGV, ptr::null(), &mut current) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
         let mut new_action: libc::sigaction = unsafe { std::mem::zeroed() };
         new_action.sa_sigaction = sigsegv_handler as *const () as usize;
         // SA_NODEFER: safe_load may fault inside SIGPROF, without this the second
-        // SIGSEGV queues instead of fires. Invariant: neither this handler nor any
-        // chained handler may fault, or we recurse without bound.
+        // SIGSEGV queues instead of fires. Invariant: neither this handler nor a
+        // chained handler with SA_NODEFER may fault, or we recurse without
+        // bound (see `block_chained_mask`).
+        // SA_ONSTACK: see `wants_onstack`. Threads with no sigaltstack still
+        // get the current stack.
         new_action.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
+        if wants_onstack(&current) {
+            new_action.sa_flags |= libc::SA_ONSTACK;
+        }
         unsafe { libc::sigemptyset(&mut new_action.sa_mask) };
 
         let old_storage = Box::into_raw(Box::new(unsafe { std::mem::zeroed::<libc::sigaction>() }));
@@ -137,6 +163,19 @@ mod supported {
             let err = std::io::Error::last_os_error();
             unsafe { drop(Box::from_raw(old_storage)) };
             return Err(err);
+        }
+
+        // Another library may have replaced the handler between the query and
+        // the install. Decide again from the handler we actually displaced.
+        let onstack = wants_onstack(unsafe { &*old_storage });
+        if onstack != (new_action.sa_flags & libc::SA_ONSTACK != 0) {
+            new_action.sa_flags ^= libc::SA_ONSTACK;
+            if unsafe { libc::sigaction(libc::SIGSEGV, &new_action, ptr::null_mut()) } != 0 {
+                tracing::warn!(
+                    "failed to correct SA_ONSTACK on the SIGSEGV handler: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
         }
 
         OLD_HANDLER.store(old_storage, Ordering::SeqCst);
@@ -271,13 +310,16 @@ mod supported {
                 return;
             }
 
-            // Not ours. Chain to the previous handler.
+            // Chain to the previous handler. Returning from this
+            // handler restores the interrupted mask, so the chained mask needs
+            // no explicit undo.
             let old = OLD_HANDLER.load(Ordering::SeqCst);
             if !old.is_null() {
                 let old_ref = &*old;
                 if old_ref.sa_flags & libc::SA_SIGINFO != 0 {
                     let f: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
                         std::mem::transmute(old_ref.sa_sigaction);
+                    block_chained_mask(old_ref);
                     f(signo, info, ucontext);
                     return;
                 }
@@ -294,9 +336,40 @@ mod supported {
                     // SAFETY: SA_SIGINFO is not set, the old handler uses the 1-arg
                     // `void (*)(int)` signal-handler signature.
                     let f: extern "C" fn(libc::c_int) = std::mem::transmute(h);
+                    block_chained_mask(old_ref);
                     f(signo);
                 }
             }
+        }
+    }
+
+    /// Blocks the signals the kernel would have blocked had it delivered
+    /// SIGSEGV to `old` directly: its `sa_mask`, plus SIGSEGV itself unless
+    /// `old` set `SA_NODEFER`. A fault inside such a chained handler then hits
+    /// a blocked synchronous SIGSEGV, which the kernel turns into a default
+    /// kill instead of re-entering [`sigsegv_handler`]. A handler that
+    /// `siglongjmp`s out restores its own mask, as it would without us.
+    ///
+    /// SIGPROF is blocked too: a ctimer sample landing in the chained handler
+    /// could fault in `safe_load` while SIGSEGV is blocked, and be killed
+    /// instead of recovered. It stays pending and fires once the handler
+    /// returns. A chained handler that allocates under the memory profiler can
+    /// still hit that case, but allocating in a SIGSEGV handler is not
+    /// async-signal-safe anyway.
+    ///
+    /// # Safety
+    /// Must be called from signal context with a valid `sigaction`.
+    unsafe fn block_chained_mask(old: &libc::sigaction) {
+        // SAFETY: pthread_sigmask is async-signal-safe and the set is valid.
+        // It fails only on an invalid `how`, which is a constant here, and
+        // nothing async-signal-safe could report a failure anyway.
+        unsafe {
+            let mut mask = old.sa_mask;
+            if old.sa_flags & libc::SA_NODEFER == 0 {
+                libc::sigaddset(&mut mask, libc::SIGSEGV);
+            }
+            libc::sigaddset(&mut mask, libc::SIGPROF);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &mask, ptr::null_mut());
         }
     }
 
@@ -377,9 +450,28 @@ mod supported {
 
     #[cfg(test)]
     mod tests {
-        use super::HandlerInstallation;
+        use super::{HandlerInstallation, wants_onstack};
+        use rstest::rstest;
         use std::sync::{Arc, mpsc};
         use std::time::Duration;
+
+        extern "C" fn some_handler(_: libc::c_int) {}
+
+        #[rstest]
+        #[case::default_action(libc::SIG_DFL, 0, true)]
+        #[case::ignored(libc::SIG_IGN, 0, true)]
+        #[case::handler_on_altstack(some_handler as *const () as usize, libc::SA_ONSTACK, true)]
+        #[case::handler_on_thread_stack(some_handler as *const () as usize, 0, false)]
+        fn onstack_follows_replaced_disposition(
+            #[case] handler: usize,
+            #[case] flags: libc::c_int,
+            #[case] expected: bool,
+        ) {
+            let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+            old.sa_sigaction = handler;
+            old.sa_flags = flags;
+            assert_eq!(wants_onstack(&old), expected);
+        }
 
         #[test]
         fn concurrent_installer_waits_for_installation_to_finish() {
