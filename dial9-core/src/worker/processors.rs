@@ -46,7 +46,12 @@ impl SegmentProcessor for GzipCompressor {
                 for chunk in raw.chunks() {
                     encoder.write_all(chunk)?;
                 }
-                encoder.finish()
+                // The payload holds this buffer through the upload, so give
+                // back what the reservation over-estimated.
+                encoder.finish().map(|mut out| {
+                    out.shrink_to_fit();
+                    out
+                })
             })
             .await;
             match compressed {
