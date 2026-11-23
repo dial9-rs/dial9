@@ -31,6 +31,18 @@ fn now_epoch_secs() -> u64 {
         .as_secs()
 }
 
+/// Converts a sealed segment's buffer without keeping more than a quarter of
+/// growth slack, since the ring budget only counts `len`. Copies instead of
+/// calling `shrink_to_fit`, because allocators such as mimalloc keep a block
+/// that shrinks by less than half.
+fn exact_bytes(buf: Vec<u8>) -> Bytes {
+    if buf.capacity() - buf.len() > buf.len() / 4 {
+        Bytes::copy_from_slice(&buf)
+    } else {
+        Bytes::from(buf) // zero-copy Vec → Bytes
+    }
+}
+
 /// Active in-memory write accumulator.
 pub(crate) struct MemActiveWriter {
     pub(super) buf: Vec<u8>,
@@ -142,7 +154,7 @@ impl MemFs {
                 "MemFs::seal: disk handle passed to mem backend",
             ));
         };
-        let bytes = Bytes::from(writer.buf); // zero-copy Vec → Bytes
+        let bytes = exact_bytes(writer.buf);
         let size = bytes.len() as u64;
         let (epoch_secs, _) = crate::sealed::creation_epoch_secs(&bytes, _active_path);
         let seal_secs = now_epoch_secs();
@@ -387,6 +399,28 @@ mod tests {
             taken.segments.into_iter().next().unwrap().load().unwrap();
         check!(loaded_ref.index() == 0);
         check!(payload.into_bytes().as_ref() == b"hello bytes");
+    }
+
+    #[test]
+    fn mem_fs_seal_drops_growth_slack() {
+        let mem = MemFs::with_capacity(1 << 20, 1 << 20).unwrap();
+        let handle = mem.create_segment(Path::new("dummy")).unwrap();
+        let ActiveHandle::Mem(mut w) = handle else {
+            panic!()
+        };
+        for _ in 0..3 {
+            w.buf.extend_from_slice(&[0u8; 1024]);
+        }
+        check!(w.buf.capacity() > w.buf.len());
+        mem.seal(ActiveHandle::Mem(w), Path::new("dummy"), 0)
+            .unwrap();
+
+        let taken = mem.take_files();
+        let (_, payload, _) = taken.segments.into_iter().next().unwrap().load().unwrap();
+        let Ok(bytes) = payload.into_bytes().try_into_mut() else {
+            panic!("sealed segment bytes should be uniquely owned")
+        };
+        check!(bytes.capacity() == bytes.len());
     }
 
     #[test]
