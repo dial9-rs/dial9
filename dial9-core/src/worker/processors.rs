@@ -37,7 +37,12 @@ impl SegmentProcessor for GzipCompressor {
             let compressed = tokio::task::spawn_blocking(move || {
                 use flate2::write::GzEncoder;
                 use std::io::Write;
-                let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                // Segments compress to a bit under half, so reserve that up
+                // front instead of growing by doubling.
+                let mut encoder = GzEncoder::new(
+                    Vec::with_capacity(raw.len() / 2),
+                    flate2::Compression::fast(),
+                );
                 for chunk in raw.chunks() {
                     encoder.write_all(chunk)?;
                 }
