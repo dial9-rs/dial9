@@ -65,6 +65,11 @@ decompress or parse a trace.
 }
 ```
 
+Fields typed `Map` are JavaScript `Map`s, not plain objects: `JSON.stringify`
+prints `{}` for them and `Object.keys` returns nothing. Read them with
+`.get(key)` or iterate them, and convert with `Object.fromEntries(map)` before
+printing or serializing.
+
 Without a `spanEventSink`, an annotated completed span remains a custom event
 and carries a normalized `singleEventSpan` projection. The primary viewer
 configures a sink, so legacy and single-event spans are instead stored in the
