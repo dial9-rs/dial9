@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.10](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.9...dial9-v0.5.10) - 2026-11-23
+
+### Added
+
+- *(viewer)* add optional browser home link ([#1150](https://github.com/dial9-rs/dial9/pull/1150))
+
+### Fixed
+
+- *(perf-self-profile)* name the perf mlock budget, shrink perf rings, report lost samples ([#1122](https://github.com/dial9-rs/dial9/pull/1122))
+- *(worker)* handle overflowing look-forward deadlines ([#1141](https://github.com/dial9-rs/dial9/pull/1141))
+- *(perf-self-profile)* run SIGSEGV handler on the sigaltstack and mask chained handlers ([#1151](https://github.com/dial9-rs/dial9/pull/1151))
+
+### Other
+
+- update README viewer screenshot ([#1139](https://github.com/dial9-rs/dial9/pull/1139))
+- *(core)* pre-size the gzip output buffer ([#1154](https://github.com/dial9-rs/dial9/pull/1154))
+- *(buffer)* Ensure arithmetic in buffer cannot panic ([#1037](https://github.com/dial9-rs/dial9/pull/1037))
+- *(perf)* accept short DWARF symbol names ([#1143](https://github.com/dial9-rs/dial9/pull/1143))
+- *(viewer)* note that ParsedTrace Map fields stringify to {} ([#1153](https://github.com/dial9-rs/dial9/pull/1153))
+- Add prefix-scoped S3 credential checks ([#1137](https://github.com/dial9-rs/dial9/pull/1137))
+- *(tokio-telemetry)* use cached tid in worker park/unpark events ([#1144](https://github.com/dial9-rs/dial9/pull/1144))
+
 ## [0.5.9](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.8...dial9-v0.5.9) - 2026-11-17
 
 ### Fixed
