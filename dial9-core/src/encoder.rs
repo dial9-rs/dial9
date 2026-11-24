@@ -352,7 +352,7 @@ crate::primitives::thread_local! {
 /// Drain the current thread's buffer into `collector`, even if not full.
 /// Used at shutdown and before flush cycles to avoid losing events.
 pub(crate) fn drain_to_collector(collector: &CentralCollector) {
-    BUFFER.with(|buf| {
+    let drained = BUFFER.try_with(|buf| {
         let mut buf = match buf.lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -366,6 +366,12 @@ pub(crate) fn drain_to_collector(collector: &CentralCollector) {
             collector.accept_flush(buf.flush());
         }
     });
+    if drained.is_err() {
+        // Destroyed during thread teardown; its `Drop` already flushed it.
+        crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+            tracing::debug!("dial9: thread-local buffer already destroyed; skipping drain");
+        });
+    }
 }
 
 pub(crate) fn record_encodable_event(
@@ -381,7 +387,10 @@ pub(crate) fn with_encoder(
     collector: &Arc<CentralCollector>,
     drain_epoch: &AtomicU64,
 ) -> Option<TlBufferHandle> {
-    BUFFER.with(|arc| {
+    // `try_with`: a TLS destructor that runs after `BUFFER`'s
+    // can still record. `with` would panic, and a panic
+    // escaping a TLS destructor aborts the process.
+    let result = BUFFER.try_with(|arc| {
         let mut buf = match arc.lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -406,7 +415,45 @@ pub(crate) fn with_encoder(
         } else {
             None
         }
+    });
+    match result {
+        Ok(handle) => handle,
+        Err(_) => {
+            crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                tracing::warn!(
+                    "dial9: event recorded during thread teardown after the thread-local buffer was destroyed; dropping it"
+                );
+            });
+            None
+        }
+    }
+}
+
+/// Runs `setup` then exits a fresh thread, with `on_teardown` running from a
+/// thread-local destructor after those of any dial9 thread-locals `setup`
+/// touched (destructors run in reverse registration order).
+#[cfg(all(test, not(shuttle)))]
+pub(crate) fn run_after_tls_teardown(
+    setup: impl FnOnce() + Send + 'static,
+    on_teardown: impl FnOnce() + Send + 'static,
+) {
+    struct OnDrop(Option<Box<dyn FnOnce()>>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            if let Some(f) = self.0.take() {
+                f();
+            }
+        }
+    }
+    std::thread_local! {
+        static LATE: std::cell::RefCell<OnDrop> = const { std::cell::RefCell::new(OnDrop(None)) };
+    }
+    std::thread::spawn(move || {
+        LATE.with(|late| late.borrow_mut().0 = Some(Box::new(on_teardown)));
+        setup();
     })
+    .join()
+    .expect("thread with late TLS destructor exits cleanly");
 }
 
 #[cfg(test)]
@@ -517,6 +564,30 @@ mod tests {
             .store(drain_epoch.load(Ordering::Relaxed));
         collector.accept_flush(buffer.flush());
         assert_eq!(buffer.flush_epoch.load(), 5);
+    }
+
+    /// A late TLS destructor recording after `BUFFER` is destroyed drops the
+    /// event instead of aborting the process.
+    #[cfg(not(shuttle))]
+    #[test]
+    fn record_after_buffer_destroyed_is_dropped() {
+        let collector = Arc::new(CentralCollector::new());
+        let drain_epoch = Arc::new(AtomicU64::new(0));
+        let (c1, e1) = (collector.clone(), drain_epoch.clone());
+        let (c2, e2) = (collector.clone(), drain_epoch.clone());
+        run_after_tls_teardown(
+            move || {
+                record_encodable_event(&sample_event(), &c1, &e1);
+            },
+            move || {
+                assert!(record_encodable_event(&sample_event(), &c2, &e2).is_none());
+                drain_to_collector(&c2);
+            },
+        );
+        // Only the setup event, flushed by `BUFFER`'s destructor.
+        let batch = collector.next().expect("setup event flushed on teardown");
+        assert_eq!(batch.event_count(), 1);
+        assert!(collector.next().is_none());
     }
 
     #[test]

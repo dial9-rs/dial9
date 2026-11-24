@@ -187,8 +187,7 @@ impl Dial9Handle {
     /// Use [`is_enabled`](Self::is_enabled) to branch on whether telemetry is
     /// live here.
     pub fn current() -> Self {
-        CURRENT_HANDLE
-            .with(|cell| cell.borrow().clone())
+        Self::try_current_thread()
             .or_else(global_handle)
             .unwrap_or_else(Self::disabled)
     }
@@ -199,7 +198,12 @@ impl Dial9Handle {
     /// Unlike [`current`](Self::current), never falls back to the
     /// process-global handle. To record an event, use [`current`](Self::current).
     pub fn try_current_thread() -> Option<Self> {
-        CURRENT_HANDLE.with(|cell| cell.borrow().clone())
+        // `try_with`: callable from a TLS destructor that runs after
+        // `CURRENT_HANDLE`'s, where `with` would panic and abort the process.
+        CURRENT_HANDLE
+            .try_with(|cell| cell.borrow().clone())
+            .ok()
+            .flatten()
     }
 
     /// Enable telemetry recording. No-op on a disabled handle.
@@ -429,4 +433,24 @@ pub(crate) fn clear_global_handle_for(shared: &Arc<SharedState>) {
 /// process-global one. Equivalent to [`Dial9Handle::current`].
 pub fn current_handle() -> Dial9Handle {
     Dial9Handle::current()
+}
+
+#[cfg(all(test, not(shuttle)))]
+mod tests {
+    use super::*;
+    use crate::encoder::run_after_tls_teardown;
+
+    /// A late TLS destructor resolving the handle after `CURRENT_HANDLE` is
+    /// destroyed sees no thread handle instead of aborting the process.
+    #[test]
+    fn current_after_tl_handle_destroyed_is_disabled() {
+        run_after_tls_teardown(
+            || set_tl_handle(Dial9Handle::disabled()),
+            || {
+                assert!(Dial9Handle::try_current_thread().is_none());
+                // Falls back past the destroyed thread handle.
+                drop(Dial9Handle::current());
+            },
+        );
+    }
 }
