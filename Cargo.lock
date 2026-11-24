@@ -2172,6 +2172,7 @@ dependencies = [
  "hyper-util",
  "pin-project-lite",
  "shuttle",
+ "smallvec",
  "tempfile",
  "tokio",
  "tower",
