@@ -68,6 +68,7 @@ use dial9_trace_format::TraceEvent;
 use dial9_trace_format::encoder::Schema;
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -133,6 +134,10 @@ fn build_callsite_schemas(meta: &'static tracing::Metadata<'static>) -> Callsite
         field_names,
     }
 }
+
+/// Values of one enter/exit event. Inline up to the base fields plus a few
+/// span fields, so encoding a typical span does not allocate.
+type EventValues = SmallVec<[FieldValue; 8]>;
 
 // ── Per-span storage ────────────────────────────────────────────────────────
 
@@ -346,7 +351,7 @@ where
             let span_name = data.meta.name();
 
             // Encode directly into the thread-local buffer (no clone needed)
-            let mut values = Vec::with_capacity(4 + schemas.field_names.len());
+            let mut values = EventValues::new();
             match task_id {
                 Some(task_id) => values.push(FieldValue::Varint(task_id)),
                 None => values.push(FieldValue::None),
@@ -390,7 +395,7 @@ where
             let schemas = &data.schemas;
             let span_name = data.meta.name();
 
-            let mut values = Vec::with_capacity(3 + schemas.field_names.len());
+            let mut values = EventValues::new();
             match task_id {
                 Some(task_id) => values.push(FieldValue::Varint(task_id)),
                 None => values.push(FieldValue::None),

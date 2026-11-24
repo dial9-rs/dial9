@@ -22,6 +22,7 @@ missing_debug_implementations = "warn"
 dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-trace-format = { workspace = true, optional = true }
 pin-project-lite = { version = "0.2", optional = true }
+smallvec = { version = "1", optional = true }
 tokio = { version = "1.51.0", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
@@ -46,6 +47,7 @@ shuttle = { version = "0.9.1", optional = true }
 ## Tracing-subscriber layer that emits span events into dial9 traces.
 tracing-layer = [
     "dep:dial9-trace-format",
+    "dep:smallvec",
     "dep:tracing-subscriber",
     "tokio/rt",
 ]
