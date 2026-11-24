@@ -61,6 +61,7 @@ function isBaseEnterField(k: string): boolean {
     k === "worker_id" ||
     k === TOKIO_TASK_ID_FIELD ||
     k === "parent_span_id" ||
+    k === "contextual_parent_span_id" ||
     k === "span_name" ||
     k === "span_instance_id" ||
     k === "tid"

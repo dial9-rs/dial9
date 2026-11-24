@@ -1061,7 +1061,10 @@ fn classify_field(schema_name: &str, field_name: &str, ft: FieldType) -> FieldRe
             };
         }
         // Span identity namespace
-        if matches!(field_name, "span_id" | "parent_span_id") {
+        if matches!(
+            field_name,
+            "span_id" | "parent_span_id" | "contextual_parent_span_id"
+        ) {
             return FieldRepeatMeta {
                 semantics: FieldSemantics::Identity,
                 namespace: Some(NamespaceId::Span),
@@ -1239,6 +1242,7 @@ impl ExtractContext {
                 "worker_id"
                     | "span_id"
                     | "parent_span_id"
+                    | "contextual_parent_span_id"
                     | "span_name"
                     | "task_id"
                     | "dial9.tokio.task_id"
@@ -5369,7 +5373,8 @@ mod tests {
 
     #[test]
     fn span_preserves_only_allowed_fields() {
-        // C: Dynamic spans preserve only worker_id/span_id/parent_span_id/span_name
+        // C: Dynamic spans preserve only worker_id/span_id/parent_span_id/
+        // contextual_parent_span_id/span_name
         let mut enc = Encoder::new();
         let enter = enc
             .register_schema(
@@ -5379,6 +5384,7 @@ mod tests {
                     FieldDef::new("span_id", FieldType::Varint),
                     FieldDef::new("parent_span_id", FieldType::Varint),
                     FieldDef::new("customer_data", FieldType::String),
+                    FieldDef::new("contextual_parent_span_id", FieldType::Varint),
                 ],
             )
             .unwrap();
@@ -5390,6 +5396,7 @@ mod tests {
                 FieldValue::Varint(42),
                 FieldValue::Varint(0),
                 FieldValue::String("secret".into()),
+                FieldValue::Varint(0),
             ],
         )
         .unwrap();
@@ -5404,6 +5411,7 @@ mod tests {
         // Unknown field anonymized
         assert!(schema.fields[3].name.starts_with("field_"));
         assert!(!schema.fields[3].name.contains("customer"));
+        assert_eq!(schema.fields[4].name, "contextual_parent_span_id");
     }
 
     // ─── D - RECURSIVE POOL SEMANTICS tests ─────────────────────────────────

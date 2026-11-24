@@ -30,6 +30,7 @@ const BASE_SPAN_FIELDS: &[&str] = &[
     "span_instance_id",
     "tid",
     "parent_span_id",
+    "contextual_parent_span_id",
     "span_name",
 ];
 

@@ -9,7 +9,7 @@ use dial9_core::recording::Recorder;
 use dial9_tokio_telemetry::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
 use dial9_trace_format::types::FieldValueRef;
 use dial9_utils::tracing_layer::Dial9TracingLayer;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
@@ -41,6 +41,14 @@ fn attach_current_thread(
         .expect("build tokio runtime")
 }
 
+/// The identity and parent fields of one enter event.
+struct EnterParents {
+    span_name: String,
+    span_id: u64,
+    parent_span_id: Option<u64>,
+    contextual_parent_span_id: Option<u64>,
+}
+
 /// Helper: decode span events from a sealed trace file.
 struct SpanEvents {
     enter_count: u32,
@@ -53,6 +61,8 @@ struct SpanEvents {
     exit_fields: Vec<(String, String)>,
     /// Whether any enter event had a non-zero parent_span_id.
     saw_parent_span_id: bool,
+    /// Identity and parent fields of every enter event.
+    enter_parents: Vec<EnterParents>,
     /// Tokio task IDs seen on span enter and exit events.
     enter_task_ids: HashSet<u64>,
     exit_task_ids: HashSet<u64>,
@@ -81,6 +91,7 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
         enter_fields: Vec::new(),
         exit_fields: Vec::new(),
         saw_parent_span_id: false,
+        enter_parents: Vec::new(),
         enter_task_ids: HashSet::new(),
         exit_task_ids: HashSet::new(),
         enters_without_task_id: 0,
@@ -105,12 +116,29 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
             } else if ev.name.starts_with("SpanEnter:") {
                 result.enter_count += 1;
                 result.enter_schema_names.insert(ev.name.to_owned());
+                let mut parents = EnterParents {
+                    span_name: String::new(),
+                    span_id: 0,
+                    parent_span_id: None,
+                    contextual_parent_span_id: None,
+                };
                 for (field_def, field_val) in ev.schema.fields().iter().zip(ev.fields.iter()) {
                     if field_def.name() == "span_name"
                         && let FieldValueRef::PooledString(id) = field_val
                         && let Some(name) = ev.string_pool.get(*id)
                     {
                         result.enter_names.push(name.to_owned());
+                        parents.span_name = name.to_owned();
+                    }
+                    if let FieldValueRef::Varint(v) = field_val {
+                        match field_def.name() {
+                            "span_id" => parents.span_id = *v,
+                            "parent_span_id" => parents.parent_span_id = Some(*v),
+                            "contextual_parent_span_id" => {
+                                parents.contextual_parent_span_id = Some(*v)
+                            }
+                            _ => {}
+                        }
                     }
                     if field_def.name() == "span_id"
                         && let FieldValueRef::Varint(v) = field_val
@@ -137,6 +165,7 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
                         TOKIO_TASK_ID_FIELD,
                         "span_id",
                         "parent_span_id",
+                        "contextual_parent_span_id",
                         "span_name",
                     ]
                     .contains(&field_def.name())
@@ -148,6 +177,7 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
                             .push((field_def.name().to_owned(), v.to_owned()));
                     }
                 }
+                result.enter_parents.push(parents);
             } else if ev.name.starts_with("SpanExit:") {
                 result.exit_count += 1;
                 for (field_def, field_val) in ev.schema.fields().iter().zip(ev.fields.iter()) {
@@ -264,6 +294,23 @@ fn span_events_appear_in_trace() {
         .await
         .unwrap();
 
+        // A span created under one task's span and run on another task
+        tokio::spawn(async {
+            use tracing::Instrument;
+            let parent = tracing::info_span!("spawning_parent");
+            let child = parent.in_scope(|| tracing::info_span!("spawned_child"));
+            tokio::spawn(
+                async {
+                    tokio::task::yield_now().await;
+                }
+                .instrument(child),
+            )
+            .await
+            .unwrap();
+        })
+        .await
+        .unwrap();
+
         // Wait for flush cycle
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
@@ -273,6 +320,46 @@ fn span_events_appear_in_trace() {
 
     let sealed_path = dir.path().join("trace.0.bin");
     let events = decode_span_events(&sealed_path);
+
+    // The registry reuses span ids after a close, so an id maps to every name
+    // that ever held it.
+    let mut names_by_id: HashMap<u64, HashSet<&str>> = HashMap::new();
+    for enter in &events.enter_parents {
+        names_by_id
+            .entry(enter.span_id)
+            .or_default()
+            .insert(&enter.span_name);
+    }
+    let enters_named = |name: &str| {
+        let enters: Vec<_> = events
+            .enter_parents
+            .iter()
+            .filter(|enter| enter.span_name == name)
+            .collect();
+        assert!(!enters.is_empty(), "missing {name} span");
+        enters
+    };
+    for (child, parent) in [
+        ("inner_op", "handle_request"),
+        ("spawned_child", "spawning_parent"),
+    ] {
+        for enter in enters_named(child) {
+            assert_eq!(enter.parent_span_id, None, "{child}");
+            let id = enter
+                .contextual_parent_span_id
+                .unwrap_or_else(|| panic!("{child} has no contextual parent"));
+            assert!(names_by_id[&id].contains(parent), "{child}: {id}");
+        }
+    }
+    for enter in enters_named("explicit_child") {
+        assert_eq!(enter.contextual_parent_span_id, None);
+        let id = enter.parent_span_id.expect("explicit parent");
+        assert!(names_by_id[&id].contains("explicit_parent"));
+    }
+    for enter in enters_named("handle_request") {
+        assert_eq!(enter.parent_span_id, None);
+        assert_eq!(enter.contextual_parent_span_id, None);
+    }
 
     // Basic enter/exit pairing
     assert!(
@@ -355,7 +442,8 @@ fn span_events_appear_in_trace() {
 
     // Parent span ID: explicit parents (span!(parent:) and .instrument()) should
     // produce parent_span_id, but #[instrument] spans should not (contextual
-    // parenting is unreliable in multi-task runtimes).
+    // parenting is unreliable in multi-task runtimes); those are checked above
+    // through contextual_parent_span_id.
     assert!(
         events.saw_parent_span_id,
         "expected parent_span_id from explicit parent spans (explicit_child or instrument_parent)"
@@ -390,11 +478,12 @@ fn span_events_appear_in_trace() {
 
     // Callsite schema dedup: multiple calls to the same #[instrument] function
     // should share a single schema. We have handle_request, inner_op,
-    // late_fields, explicit_parent, explicit_child, instrument_parent = 6 callsites.
+    // late_fields, explicit_parent, explicit_child, instrument_parent,
+    // spawning_parent, spawned_child = 8 callsites.
     // Each gets one SpanEnter schema.
     assert!(
-        events.enter_schema_names.len() <= 6,
-        "expected at most 6 unique enter schemas (one per callsite), got {}: {:?}",
+        events.enter_schema_names.len() <= 8,
+        "expected at most 8 unique enter schemas (one per callsite), got {}: {:?}",
         events.enter_schema_names.len(),
         events.enter_schema_names
     );

@@ -113,6 +113,31 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
     expect(span.fields.task_id).toBe("application-task");
   });
 
+  it("keeps contextual_parent_span_id out of the user fields", () => {
+    const spanEvents = new ColumnarSpanEvents();
+    spanEvents.push(SPAN_KIND.Enter, 1000, {
+      "dial9.tokio.task_id": 42,
+      span_id: 2,
+      parent_span_id: null,
+      contextual_parent_span_id: 1,
+      span_name: "request",
+    });
+    spanEvents.push(SPAN_KIND.Exit, 5000, {
+      "dial9.tokio.task_id": 42,
+      span_id: 2,
+      span_name: "request",
+    });
+    spanEvents.push(SPAN_KIND.Close, 5100, { span_id: 2 });
+
+    const result = buildSpanDataColumnar(
+      spanEvents,
+      ColumnarWorkerSpans.fromWorkerSpans({} as never),
+    );
+    const span = result.columnarSpans!.at(0);
+    expect(span.fields).toEqual({});
+    expect(span.parentSpanId).toBeNull();
+  });
+
   it("keeps single-event lifecycle timing without inventing active segments", () => {
     const spanEvents = new ColumnarSpanEvents(1);
     spanEvents.push(
