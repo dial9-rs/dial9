@@ -1694,7 +1694,7 @@
     const spanMeta = new Map();
 
     const TOKIO_TASK_ID_FIELD = "dial9.tokio.task_id";
-    const BASE_ENTER_FIELDS = new Set(["worker_id", TOKIO_TASK_ID_FIELD, "span_id", "span_instance_id", "tid", "parent_span_id", "span_name"]);
+    const BASE_ENTER_FIELDS = new Set(["worker_id", TOKIO_TASK_ID_FIELD, "span_id", "span_instance_id", "tid", "parent_span_id", "contextual_parent_span_id", "span_name"]);
     const BASE_EXIT_FIELDS = new Set(["worker_id", TOKIO_TASK_ID_FIELD, "span_id", "span_instance_id", "tid", "span_name"]);
     let singleEventOrdinal = 0;
     const handoffGapsByTid = new Map();

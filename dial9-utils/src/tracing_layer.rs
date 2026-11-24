@@ -18,6 +18,12 @@
 //! Events carry the current Tokio task ID when available; outside a Tokio task,
 //! the task ID is explicitly absent.
 //!
+//! # Parents
+//!
+//! An enter event carries an explicit parent (`span!(parent: &x, ..)`) as
+//! `parent_span_id`, and a contextual one, as `#[instrument]` produces it, as
+//! `contextual_parent_span_id`. The viewer nests spans by `parent_span_id` only.
+//!
 //! # High-frequency spans
 //!
 //! Every span enter and exit produces a trace event. If you instrument tight
@@ -77,6 +83,7 @@ use tracing::span;
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 const TOKIO_TASK_ID_FIELD: &str = "dial9.tokio.task_id";
+const CONTEXTUAL_PARENT_SPAN_ID_FIELD: &str = "contextual_parent_span_id";
 
 /// Emitted once when a span closes, so the viewer can recycle its id. Mirrors
 /// the `SpanCloseEvent` the ad-hoc span wrappers emit (same schema, distinct
@@ -110,6 +117,7 @@ fn build_callsite_schemas(meta: &'static tracing::Metadata<'static>) -> Callsite
         FieldDef::new(TOKIO_TASK_ID_FIELD, FieldType::OptionalVarint),
         FieldDef::new("span_id", FieldType::Varint),
         FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+        FieldDef::new(CONTEXTUAL_PARENT_SPAN_ID_FIELD, FieldType::OptionalVarint),
         FieldDef::new("span_name", FieldType::PooledString),
     ];
     let mut exit_fields = vec![
@@ -141,11 +149,22 @@ type EventValues = SmallVec<[FieldValue; 8]>;
 
 // ── Per-span storage ────────────────────────────────────────────────────────
 
+/// How a span got its parent, resolved once when the span is created.
+enum Parent {
+    /// `span!(parent: None, ..)`, or no span was current.
+    Root,
+    /// `span!(parent: &x, ..)`. Written as `parent_span_id`.
+    Explicit(span::Id),
+    /// The span that was current at creation, as `#[instrument]` uses it.
+    /// Written as `contextual_parent_span_id`.
+    Contextual(span::Id),
+}
+
 /// Data stored in span extensions, captured at `on_new_span` and updated by `on_record`.
 struct SpanData {
     meta: &'static tracing::Metadata<'static>,
     schemas: Arc<CallsiteSchemas>,
-    parent_id: Option<span::Id>,
+    parent: Parent,
     /// Field values keyed by field name.
     field_values: Vec<(&'static str, String)>,
 }
@@ -298,16 +317,22 @@ where
             values: &mut field_values,
         });
 
+        let Some(span) = ctx.span(id) else { return };
+        let parent = match attrs.parent() {
+            Some(parent) => Parent::Explicit(parent.clone()),
+            None if attrs.is_contextual() => span
+                .parent()
+                .map_or(Parent::Root, |parent| Parent::Contextual(parent.id())),
+            None => Parent::Root,
+        };
+
         let data = SpanData {
             meta: attrs.metadata(),
             schemas: self.get_schemas(attrs.metadata()),
-            parent_id: attrs.parent().cloned(),
+            parent,
             field_values,
         };
-
-        if let Some(span) = ctx.span(id) {
-            span.extensions_mut().insert(data);
-        }
+        span.extensions_mut().insert(data);
     }
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
@@ -342,12 +367,16 @@ where
 
             let schemas = &data.schemas;
 
-            // We only use explicit parents (span!(parent: &x, ..)), not contextual
-            // parents (ctx.current_span()), because contextual parenting is
-            // unreliable across tasks on the same worker thread. See:
+            // `parent_span_id` carries only explicit parents (span!(parent: &x, ..)).
+            // Contextual parents go into their own field, because they are
+            // unreliable across tasks on the same worker thread when a span
+            // guard is held over an await. See:
             // https://chesedo.me/blog/rust-tracing-incorrect-parent-spans-async-futures-joinset/
-            // The viewer infers nesting from timestamp containment instead.
-            let parent_span_id = data.parent_id.as_ref().map(|id| id.into_u64());
+            let (parent_span_id, contextual_parent_span_id) = match &data.parent {
+                Parent::Root => (None, None),
+                Parent::Explicit(id) => (Some(id.into_u64()), None),
+                Parent::Contextual(id) => (None, Some(id.into_u64())),
+            };
             let span_name = data.meta.name();
 
             // Encode directly into the thread-local buffer (no clone needed)
@@ -357,9 +386,8 @@ where
                 None => values.push(FieldValue::None),
             }
             values.push(FieldValue::Varint(span_id));
-            match parent_span_id {
-                Some(pid) => values.push(FieldValue::Varint(pid)),
-                None => values.push(FieldValue::None),
+            for parent in [parent_span_id, contextual_parent_span_id] {
+                values.push(parent.map_or(FieldValue::None, FieldValue::Varint));
             }
             values.push(FieldValue::PooledString(enc.intern_string(span_name)));
             for &name in &schemas.field_names {

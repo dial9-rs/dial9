@@ -1661,6 +1661,7 @@ mod tests {
                 FieldDef::new("worker_id", FieldType::Varint),
                 FieldDef::new("span_id", FieldType::Varint),
                 FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("contextual_parent_span_id", FieldType::OptionalVarint),
                 FieldDef::new("span_name", FieldType::String),
                 FieldDef::new("request_id", FieldType::String),
                 FieldDef::new("status_code", FieldType::Varint),
@@ -1694,6 +1695,7 @@ mod tests {
                 FieldValue::Varint(0),
                 FieldValue::Varint(1),
                 FieldValue::None,
+                FieldValue::Varint(7),
                 FieldValue::String("handle".to_string()),
                 FieldValue::String("5d051ec2-999b-4a25-93b6-0f9cf83fa8b2".to_string()),
                 FieldValue::Varint(0),
@@ -1734,6 +1736,7 @@ mod tests {
         // Base identity/lifecycle fields are not surfaced as attributes.
         assert!(!attrs.contains_key("worker_id"));
         assert!(!attrs.contains_key("span_id"));
+        assert!(!attrs.contains_key("contextual_parent_span_id"));
         assert!(!attrs.contains_key("span_name"));
     }
 

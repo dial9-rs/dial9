@@ -1578,6 +1578,16 @@ describe("buildSpanData", () => {
     ).toBeFalsy();
   });
 
+  it("contextual_parent_span_id is a base field, not a user field", () => {
+    const customEvents = [
+      { name: "SpanEnter:app::a:f:1", timestamp: 1000, fields: { "dial9.tokio.task_id": 5, span_id: 2, parent_span_id: null, contextual_parent_span_id: 1, span_name: "a" } },
+      { name: "SpanExit:app::a:f:1", timestamp: 1100, fields: { "dial9.tokio.task_id": 5, span_id: 2, span_name: "a" } },
+    ];
+    const { allSpans } = buildSpanData(customEvents);
+    expect(allSpans[0].fields).toEqual({});
+    expect(allSpans[0].parentSpanId).toBeNull();
+  });
+
   it("unmatched spans (enter without exit) detected correctly", () => {
     const customEvents = [
       { name: "SpanEnter:app::a:f:1", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "a" } },
