@@ -218,6 +218,9 @@ impl MemoryProfiler {
                     });
                 }
             }
+            // Frameless leaves do not affect allocation stacks: `capture` runs
+            // inside the allocator hook, so every frame above it has made a
+            // call and carries a frame record under `non-leaf`.
             Ok(_) => {}
             // Inconclusive (thread spawn failed, or the self-test panicked) --
             // not evidence of missing frame pointers, so this doesn't affect

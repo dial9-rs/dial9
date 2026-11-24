@@ -32,13 +32,18 @@ pub unsafe fn android_ucontext_set_result_reg(ucontext: *mut c_void, value: u64)
     unsafe { (*ucontext.cast::<struct_ucontext>()).uc_mcontext.regs[0] = value };
 }
 
-/// Read `(pc, fp, sp)` from an Android aarch64 ucontext. `fp` is `x29` (the
-/// AAPCS64 frame pointer register).
+/// Read the walk's starting registers from an Android aarch64 ucontext. `fp` is
+/// `x29`, `lr` is `x30`.
 #[inline]
-pub unsafe fn android_ucontext_pc_fp_sp(ucontext: *mut c_void) -> (u64, u64, u64) {
+pub(crate) unsafe fn android_ucontext_regs(ucontext: *mut c_void) -> super::unwind::Regs {
     unsafe {
         let mc = &(*ucontext.cast::<struct_ucontext>()).uc_mcontext;
-        (mc.pc, mc.regs[29], mc.sp)
+        super::unwind::Regs {
+            pc: mc.pc as usize,
+            fp: mc.regs[29] as usize,
+            sp: mc.sp as usize,
+            lr: mc.regs[30] as usize,
+        }
     }
 }
 

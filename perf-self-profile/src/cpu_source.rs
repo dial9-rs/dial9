@@ -204,6 +204,7 @@ pub struct CpuProfilingConfig {
     include_kernel: bool,
     snapshot_kallsyms: bool,
     ring_buffer_bytes: Option<NonZeroUsize>,
+    recover_leaf_callers: bool,
 }
 
 impl Default for CpuProfilingConfig {
@@ -215,6 +216,7 @@ impl Default for CpuProfilingConfig {
             include_kernel: false,
             snapshot_kallsyms: false,
             ring_buffer_bytes: None,
+            recover_leaf_callers: false,
         }
     }
 }
@@ -299,6 +301,35 @@ impl CpuProfilingConfig {
         self.ring_buffer_bytes = Some(bytes);
         self
     }
+
+    /// Recover a frameless leaf function's immediate caller from the link
+    /// register. Default: `false`.
+    ///
+    /// On 64-bit Arm, Rust gives leaf functions no frame record by default, so
+    /// a frame-pointer stack walk skips each leaf's immediate caller. With this
+    /// on, that frame is put back, so `-C force-frame-pointers=yes` is not
+    /// needed to see it. Costs one 64-bit value per perf sample and a table of
+    /// function start addresses built once per process. Does nothing on other
+    /// architectures. See `docs/design/leaf-caller-recovery.md`.
+    pub fn recover_leaf_callers(mut self, yes: bool) -> Self {
+        self.recover_leaf_callers = yes;
+        self
+    }
+
+    /// The sampler settings this config starts. Ctimer cannot sample kernel
+    /// stacks or other event sources, so those are left at their defaults.
+    fn sampler_config(&self) -> SamplerConfig {
+        let base = SamplerConfig::default()
+            .sampling(SamplingMode::FrequencyHz(self.frequency_hz))
+            .recover_leaf_callers(self.recover_leaf_callers);
+        match self.backend {
+            CpuBackend::Ctimer => base.include_kernel(false),
+            CpuBackend::Auto | CpuBackend::Perf => base
+                .event_source(self.event_source)
+                .include_kernel(self.include_kernel)
+                .ring_buffer_size(self.ring_buffer_bytes.unwrap_or(DEFAULT_RING_BUFFER_BYTES)),
+        }
+    }
 }
 
 /// Configuration for per-thread sched event capture (context switches).
@@ -314,6 +345,7 @@ pub struct SchedEventConfig {
     sampling_interval: Option<u64>,
     include_kernel: bool,
     ring_buffer_bytes: Option<NonZeroUsize>,
+    recover_leaf_callers: bool,
 }
 
 impl SchedEventConfig {
@@ -335,6 +367,30 @@ impl SchedEventConfig {
     pub fn ring_buffer_size(mut self, bytes: NonZeroUsize) -> Self {
         self.ring_buffer_bytes = Some(bytes);
         self
+    }
+
+    /// Recover a frameless leaf function's immediate caller from the link
+    /// register. Default: `false`.
+    ///
+    /// On 64-bit Arm, Rust gives leaf functions no frame record by default, so
+    /// a frame-pointer stack walk skips each leaf's immediate caller. With this
+    /// on, that frame is put back, so `-C force-frame-pointers=yes` is not
+    /// needed to see it. Costs one 64-bit value per perf sample and a table of
+    /// function start addresses built once per process. Does nothing on other
+    /// architectures. See `docs/design/leaf-caller-recovery.md`.
+    pub fn recover_leaf_callers(mut self, yes: bool) -> Self {
+        self.recover_leaf_callers = yes;
+        self
+    }
+
+    /// The sampler settings this config starts.
+    fn sampler_config(&self) -> SamplerConfig {
+        SamplerConfig::default()
+            .event_source(EventSource::SwContextSwitches)
+            .sampling(SamplingMode::Period(self.sampling_interval.unwrap_or(1)))
+            .include_kernel(self.include_kernel)
+            .ring_buffer_size(self.ring_buffer_bytes.unwrap_or(DEFAULT_RING_BUFFER_BYTES))
+            .recover_leaf_callers(self.recover_leaf_callers)
     }
 }
 
@@ -429,29 +485,11 @@ impl CpuProfiler {
 
     /// Start the process-wide CPU profiler with the given config.
     pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
-        let ring_bytes = config
-            .ring_buffer_bytes
-            .unwrap_or(DEFAULT_RING_BUFFER_BYTES);
+        let sampler_config = config.sampler_config();
         let sampler = match config.backend {
-            CpuBackend::Auto => PerfSampler::start(
-                SamplerConfig::default()
-                    .event_source(config.event_source)
-                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(config.include_kernel)
-                    .ring_buffer_size(ring_bytes),
-            )?,
-            CpuBackend::Perf => PerfSampler::start_perf_only(
-                SamplerConfig::default()
-                    .event_source(config.event_source)
-                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(config.include_kernel)
-                    .ring_buffer_size(ring_bytes),
-            )?,
-            CpuBackend::Ctimer => PerfSampler::start_ctimer_only(
-                SamplerConfig::default()
-                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(false),
-            )?,
+            CpuBackend::Auto => PerfSampler::start(sampler_config)?,
+            CpuBackend::Perf => PerfSampler::start_perf_only(sampler_config)?,
+            CpuBackend::Ctimer => PerfSampler::start_ctimer_only(sampler_config)?,
         };
         // `Auto` resolves inside the sampler, which reports what it picked.
         let active_backend = sampler.active_backend();
@@ -608,6 +646,10 @@ impl Source for CpuProfiler {
             "cpu.profile.backend".to_string(),
             self.active_backend.as_str().to_string(),
         ));
+        out.push((
+            "cpu.profile.recover_leaf_callers".to_string(),
+            self.config.recover_leaf_callers.to_string(),
+        ));
         // "false": requested, but fell back to live /proc/kallsyms.
         if let Some(active) = self.kallsyms_snapshot {
             out.push((
@@ -672,17 +714,7 @@ impl std::fmt::Debug for SchedProfiler {
 impl SchedProfiler {
     /// Create a new sched profiler with the given config.
     pub fn new(config: SchedEventConfig) -> io::Result<Self> {
-        let sampler = PerfSampler::new_per_thread(
-            SamplerConfig::default()
-                .event_source(EventSource::SwContextSwitches)
-                .sampling(SamplingMode::Period(config.sampling_interval.unwrap_or(1)))
-                .include_kernel(config.include_kernel)
-                .ring_buffer_size(
-                    config
-                        .ring_buffer_bytes
-                        .unwrap_or(DEFAULT_RING_BUFFER_BYTES),
-                ),
-        )?;
+        let sampler = PerfSampler::new_per_thread(config.sampler_config())?;
         Ok(Self {
             sampler,
             config,
@@ -940,9 +972,104 @@ mod thread_name_tests {
 }
 
 #[cfg(test)]
+mod sampler_config_tests {
+    use super::*;
+    use rstest::rstest;
+
+    /// Every way of starting a profiler must pass the setting to the sampler.
+    /// Pure: needs no perf access, so it runs everywhere.
+    #[rstest]
+    fn cpu_config_passes_recover_leaf_callers_to_the_sampler(
+        #[values(
+            CpuProfilingConfig::default(),
+            CpuProfilingConfig::with_perf_backend(),
+            CpuProfilingConfig::with_ctimer_backend()
+        )]
+        config: CpuProfilingConfig,
+        #[values(true, false)] recover: bool,
+    ) {
+        let sampler = config.recover_leaf_callers(recover).sampler_config();
+        assert_eq!(sampler.recover_leaf_callers, recover);
+    }
+
+    #[rstest]
+    fn sched_config_passes_recover_leaf_callers_to_the_sampler(
+        #[values(true, false)] recover: bool,
+    ) {
+        let sampler = SchedEventConfig::default()
+            .recover_leaf_callers(recover)
+            .sampler_config();
+        assert_eq!(sampler.recover_leaf_callers, recover);
+    }
+
+    /// The configured perf ring size reaches the sampler; ctimer has no ring.
+    #[rstest]
+    #[case::auto(CpuProfilingConfig::default(), true)]
+    #[case::perf(CpuProfilingConfig::with_perf_backend(), true)]
+    #[case::ctimer(CpuProfilingConfig::with_ctimer_backend(), false)]
+    fn cpu_config_passes_the_ring_buffer_size(
+        #[case] config: CpuProfilingConfig,
+        #[case] passed: bool,
+    ) {
+        let size = NonZeroUsize::new(64 * 1024).unwrap();
+        let sampler = config.ring_buffer_size(size).sampler_config();
+        let want = if passed {
+            size
+        } else {
+            DEFAULT_RING_BUFFER_BYTES
+        };
+        assert_eq!(sampler.ring_buffer_bytes, want);
+    }
+
+    #[test]
+    fn sched_config_passes_the_ring_buffer_size() {
+        let size = NonZeroUsize::new(64 * 1024).unwrap();
+        let sampler = SchedEventConfig::default()
+            .ring_buffer_size(size)
+            .sampler_config();
+        assert_eq!(sampler.ring_buffer_bytes, size);
+    }
+
+    /// Ctimer cannot sample kernel stacks, whatever the config asks for.
+    #[test]
+    fn ctimer_never_asks_for_kernel_stacks() {
+        let sampler = CpuProfilingConfig::with_ctimer_backend()
+            .include_kernel(true)
+            .sampler_config();
+        assert!(!sampler.include_kernel);
+    }
+}
+
+#[cfg(test)]
 mod metadata_tests {
     use super::*;
     use dial9_core::source::Source;
+
+    /// Leaf-caller recovery is opt-in, and the trace records which way it was
+    /// set so a reader can tell a dropped frame from a disabled feature.
+    ///
+    /// Perf only, never the automatic choice: if perf cannot start, `Auto`
+    /// falls back to ctimer, and dropping a ctimer sampler disarms every CPU
+    /// timer in the process, starving tests that run alongside this one.
+    #[rstest::rstest]
+    #[case::default(CpuProfilingConfig::with_perf_backend(), "false")]
+    #[case::enabled(CpuProfilingConfig::with_perf_backend().recover_leaf_callers(true), "true")]
+    fn cpu_profiler_metadata_reports_recover_leaf_callers(
+        #[case] config: CpuProfilingConfig,
+        #[case] want: &str,
+    ) {
+        let Ok(mut profiler) = CpuProfiler::start(config) else {
+            eprintln!("skipping: CpuProfiler::start failed (likely no perf access)");
+            return;
+        };
+        let mut meta = Vec::new();
+        profiler.segment_metadata(&mut meta);
+        let got = meta
+            .iter()
+            .find(|(k, _)| k == "cpu.profile.recover_leaf_callers")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(got, Some(want));
+    }
 
     /// CpuProfiler::segment_metadata must report the active backend
     /// ("perf" or "ctimer"), never "auto", even when CpuBackend::Auto was

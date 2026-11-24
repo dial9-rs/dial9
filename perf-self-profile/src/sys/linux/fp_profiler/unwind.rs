@@ -17,6 +17,18 @@
 //! Either way: dereference fp to get the next fp, and fp+8 to get the return
 //! address. Both reads go through safe_access::load so a corrupted chain
 //! aborts the walk instead of crashing.
+//!
+//! # Frameless frames and the link register (aarch64)
+//!
+//! A function with no frame record leaves `x29` pointing at its *caller's*
+//! record, so `*(fp + 8)` is the return address into the caller's caller and
+//! the chain drops one frame. This applies to every leaf under
+//! `-C force-frame-pointers=non-leaf` (the aarch64 default) and to any
+//! function sampled before its prologue runs.
+//!
+//! The missing return address is live in `x30` (LR), so [`unwind_with_lr`]
+//! inserts it, using `func_starts` (aarch64 only) to decide when LR is the
+//! caller rather than a stale value.
 
 use super::{SAFE_LOAD_FAULT, load};
 use crate::unwinder::CaptureResult;
@@ -46,6 +58,10 @@ pub(crate) fn strip_pac(addr: usize) -> usize {
 pub(crate) fn strip_pac(addr: usize) -> usize {
     addr
 }
+
+/// How far above `sp` a frame pointer may point and still be read. A walk
+/// treats anything further away as the end of the chain.
+const MAX_STACK_SPAN: usize = 8 * 1024 * 1024;
 
 /// Walk the frame-pointer chain starting from the given (pc, fp, sp) triple,
 /// usually obtained from a signal handler's ucontext.
@@ -80,7 +96,7 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> Ca
     let mut n = 1;
 
     let stack_lo = sp;
-    let stack_hi = sp.saturating_add(8 * 1024 * 1024);
+    let stack_hi = sp.saturating_add(MAX_STACK_SPAN);
 
     loop {
         // Validate current fp before reading from it.
@@ -144,7 +160,67 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> Ca
     }
 }
 
-/// Unwind from inside a signal handler given the raw ucontext.
+/// Like [`unwind`], but recovers the immediate caller from `lr` when the
+/// sampled function has no frame record, per
+/// `func_starts::lr_is_missing_caller` (aarch64 only). See the module docs.
+///
+/// # Safety
+/// Same requirements as [`unwind`].
+pub unsafe fn unwind_with_lr(
+    pc: usize,
+    fp: usize,
+    sp: usize,
+    lr: usize,
+    out: &mut [u64],
+) -> CaptureResult {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let limit = out.len().min(MAX_FRAMES);
+        // Needs room for pc plus the recovered frame, a readable record, and an
+        // `fp` that cannot overflow the slot addition below.
+        if limit >= 2
+            && fp >= sp
+            && fp < sp.saturating_add(MAX_STACK_SPAN)
+            && fp & (core::mem::size_of::<usize>() - 1) == 0
+            && fp <= usize::MAX - core::mem::size_of::<usize>()
+        {
+            let slot = (fp + core::mem::size_of::<usize>()) as *const usize;
+            // SAFETY: guarded by `load`, which recovers from a faulting read.
+            let chain_ret = strip_pac(unsafe { load(slot) });
+            let lr = strip_pac(lr);
+            // Compare call sites, not return addresses: the perf path does the
+            // same, and a `bl` as a function's last instruction leaves a return
+            // address that resolves to the *next* function.
+            if chain_ret != SAFE_LOAD_FAULT
+                && crate::sys::func_starts::lr_is_missing_caller(
+                    pc as u64,
+                    crate::sys::linux::call_site_addr(lr as u64),
+                    Some(crate::sys::linux::call_site_addr(chain_ret as u64)),
+                    // Signal context: read the table, never build it.
+                    crate::sys::func_starts::get(),
+                )
+            {
+                out[0] = pc as u64;
+                // The nested walk writes `lr` at out[1], then continues from
+                // `fp` with `chain_ret` at out[2].
+                // SAFETY: same contract as this function.
+                let rest = unsafe { unwind(lr, fp, sp, &mut out[1..]) };
+                return CaptureResult {
+                    frames_written: 1 + rest.frames_written,
+                    truncated: rest.truncated,
+                };
+            }
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = lr;
+    // SAFETY: same contract as this function.
+    unsafe { unwind(pc, fp, sp, out) }
+}
+
+/// Unwind from inside a signal handler given the raw ucontext. With
+/// `recover_leaf_callers`, a frameless leaf's immediate caller is recovered
+/// from the link register; see [`unwind_with_lr`].
 ///
 /// See [`unwind`] for details on the return value.
 ///
@@ -153,34 +229,57 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> Ca
 pub(crate) unsafe fn unwind_from_ucontext(
     ucontext: *mut libc::c_void,
     out: &mut [u64],
+    recover_leaf_callers: bool,
 ) -> CaptureResult {
-    let (pc, fp, sp) = unsafe { read_pc_fp_sp(ucontext) };
-    unsafe { unwind(pc, fp, sp, out) }
+    let r = unsafe { read_regs(ucontext) };
+    if recover_leaf_callers {
+        unsafe { unwind_with_lr(r.pc, r.fp, r.sp, r.lr, out) }
+    } else {
+        unsafe { unwind(r.pc, r.fp, r.sp, out) }
+    }
 }
 
+/// The registers a frame-pointer walk starts from, read from a signal frame.
+#[derive(Clone, Copy)]
+pub(crate) struct Regs {
+    pub(crate) pc: usize,
+    pub(crate) fp: usize,
+    pub(crate) sp: usize,
+    /// Link register, used to recover a frameless leaf's immediate caller. 0 on
+    /// x86-64, which has none.
+    pub(crate) lr: usize,
+}
+
+/// x86-64 has no link register, so `lr` is always 0 and the recovery path is
+/// gated off. Not a gap: rustc's x86_64 target omits frame
+/// pointers entirely and `-fno-omit-frame-pointer` covers leaves there, so
+/// there is no default build with framed callers and frameless leaves. See
+/// `docs/design/leaf-caller-recovery.md`.
 #[cfg(target_arch = "x86_64")]
-unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
+unsafe fn read_regs(uc: *mut libc::c_void) -> Regs {
     let uc = uc as *mut libc::ucontext_t;
     unsafe {
         let g = &(*uc).uc_mcontext.gregs;
-        (
-            g[libc::REG_RIP as usize] as usize,
-            g[libc::REG_RBP as usize] as usize,
-            g[libc::REG_RSP as usize] as usize,
-        )
+        Regs {
+            pc: g[libc::REG_RIP as usize] as usize,
+            fp: g[libc::REG_RBP as usize] as usize,
+            sp: g[libc::REG_RSP as usize] as usize,
+            lr: 0,
+        }
     }
 }
 
 #[cfg(all(target_arch = "aarch64", not(target_os = "android")))]
-unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
+unsafe fn read_regs(uc: *mut libc::c_void) -> Regs {
     let uc = uc as *mut libc::ucontext_t;
     unsafe {
         let m = &(*uc).uc_mcontext;
-        (
-            m.pc as usize,
-            m.regs[29] as usize, // x29 is the frame pointer
-            m.sp as usize,
-        )
+        Regs {
+            pc: m.pc as usize,
+            fp: m.regs[29] as usize, // x29 is the frame pointer
+            sp: m.sp as usize,
+            lr: m.regs[30] as usize, // x30 is the link register
+        }
     }
 }
 
@@ -188,11 +287,10 @@ unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
 /// sigmask padding, so we use Bionic's documented layout. See
 /// [`super::bionic_arm64`] for details.
 #[cfg(all(target_arch = "aarch64", target_os = "android"))]
-unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
+unsafe fn read_regs(uc: *mut libc::c_void) -> Regs {
     // SAFETY: `uc` is the kernel-provided ucontext to a SA_SIGINFO handler;
     // `bionic_arm64::struct_ucontext` matches Bionic's layout for aarch64.
-    let (pc, fp, sp) = unsafe { super::bionic_arm64::android_ucontext_pc_fp_sp(uc) };
-    (pc as usize, fp as usize, sp as usize)
+    unsafe { super::bionic_arm64::android_ucontext_regs(uc) }
 }
 
 #[cfg(test)]
@@ -455,5 +553,178 @@ mod tests {
         assert_eq!(n, 1, "unwind must stop when ret_addr load faults");
         assert!(!truncated);
         assert_eq!(out[0], 0x40_0000);
+    }
+}
+
+/// `unwind_with_lr` on hand-built stacks. The function-start table is the real
+/// one for this test binary, so `pc` and `lr` point into real functions.
+#[cfg(all(test, target_arch = "aarch64"))]
+#[allow(unused_assignments)] // stack slots are read through raw pointers
+mod lr_tests {
+    use super::*;
+
+    #[inline(never)]
+    fn sampled_fn(x: u64) -> u64 {
+        let mut a = x;
+        for i in 0..16 {
+            a = a.rotate_left(3) ^ i;
+        }
+        std::hint::black_box(a)
+    }
+
+    #[inline(never)]
+    fn calling_fn(x: u64) -> u64 {
+        std::hint::black_box(sampled_fn(x)).wrapping_add(1)
+    }
+
+    /// Inside `sampled_fn`, and a return address inside `calling_fn`.
+    fn pc() -> usize {
+        sampled_fn as *const () as usize + 4
+    }
+    fn lr_in_caller() -> usize {
+        calling_fn as *const () as usize + 8
+    }
+
+    fn setup() {
+        unsafe { crate::sys::fp_profiler::install_handler().unwrap() };
+        crate::sys::func_starts::init();
+        let table = crate::sys::func_starts::get().expect("table built");
+        assert_ne!(
+            table.entry_of(pc() as u64),
+            table.entry_of(crate::sys::linux::call_site_addr(lr_in_caller() as u64)),
+            "fixture: pc and lr must resolve to different functions"
+        );
+    }
+
+    /// Two frame records on `stack`, ending at a self-referencing third.
+    fn two_frames(stack: &mut [usize; 8]) -> usize {
+        let sz = std::mem::size_of::<usize>();
+        let base = stack.as_mut_ptr() as usize;
+        stack[0] = base + 2 * sz;
+        stack[1] = 0x40_1000;
+        stack[2] = base + 4 * sz;
+        stack[3] = 0x40_2000;
+        stack[4] = base + 4 * sz;
+        base
+    }
+
+    fn walk(f: impl Fn(&mut [u64]) -> CaptureResult, len: usize) -> (usize, bool, Vec<u64>) {
+        let mut out = vec![0u64; len];
+        let r = f(&mut out);
+        out.truncate(r.frames_written);
+        (r.frames_written, r.truncated, out)
+    }
+
+    fn plain(pc: usize, fp: usize, sp: usize, len: usize) -> (usize, bool, Vec<u64>) {
+        walk(|out| unsafe { unwind(pc, fp, sp, out) }, len)
+    }
+
+    fn with_lr(pc: usize, fp: usize, sp: usize, lr: usize, len: usize) -> (usize, bool, Vec<u64>) {
+        walk(|out| unsafe { unwind_with_lr(pc, fp, sp, lr, out) }, len)
+    }
+
+    #[test]
+    fn inserts_the_link_register_frame_above_the_sample() {
+        setup();
+        let mut stack = [0usize; 8];
+        let fp = two_frames(&mut stack);
+        let (n, truncated, out) = with_lr(pc(), fp, fp, lr_in_caller(), MAX_FRAMES);
+        assert_eq!(
+            out,
+            [pc() as u64, lr_in_caller() as u64, 0x40_1000, 0x40_2000]
+        );
+        assert_eq!(n, 4);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn a_link_register_in_the_sampled_function_is_not_inserted() {
+        setup();
+        let mut stack = [0usize; 8];
+        let fp = two_frames(&mut stack);
+        let stale = sampled_fn as *const () as usize + 8;
+        assert_eq!(
+            with_lr(pc(), fp, fp, stale, MAX_FRAMES),
+            plain(pc(), fp, fp, MAX_FRAMES)
+        );
+    }
+
+    #[test]
+    fn a_link_register_the_chain_already_has_is_not_inserted() {
+        setup();
+        let mut stack = [0usize; 8];
+        let fp = two_frames(&mut stack);
+        stack[1] = lr_in_caller();
+        assert_eq!(
+            with_lr(pc(), fp, fp, lr_in_caller(), MAX_FRAMES),
+            plain(pc(), fp, fp, MAX_FRAMES)
+        );
+    }
+
+    /// A frame record that cannot be read falls back to the plain walk.
+    #[test]
+    fn an_unreadable_frame_record_falls_back() {
+        setup();
+        // SAFETY: an anonymous PROT_NONE page, unmapped below.
+        let page = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(page, libc::MAP_FAILED);
+        let fp = page as usize;
+        let got = with_lr(pc(), fp, fp, lr_in_caller(), MAX_FRAMES);
+        let want = plain(pc(), fp, fp, MAX_FRAMES);
+        // SAFETY: unmapping exactly the page mapped above.
+        unsafe { libc::munmap(page, 4096) };
+        assert_eq!(got, want);
+        assert_eq!(got.2, [pc() as u64]);
+    }
+
+    #[test]
+    fn an_implausible_frame_pointer_falls_back() {
+        setup();
+        let mut stack = [0usize; 8];
+        let base = two_frames(&mut stack);
+        for (fp, sp) in [
+            (base + 1, base),                    // misaligned
+            (base, base + 64),                   // below sp
+            (base, base.wrapping_sub(16 << 20)), // too far above sp
+        ] {
+            assert_eq!(
+                with_lr(pc(), fp, sp, lr_in_caller(), MAX_FRAMES),
+                plain(pc(), fp, sp, MAX_FRAMES),
+                "fp={fp:#x} sp={sp:#x}"
+            );
+        }
+    }
+
+    /// No room for a second frame: nothing is inserted.
+    #[test]
+    fn a_one_slot_buffer_is_left_to_the_plain_walk() {
+        setup();
+        let mut stack = [0usize; 8];
+        let fp = two_frames(&mut stack);
+        assert_eq!(
+            with_lr(pc(), fp, fp, lr_in_caller(), 1),
+            plain(pc(), fp, fp, 1)
+        );
+    }
+
+    /// The inserted frame counts against the buffer, and truncation is reported.
+    #[test]
+    fn truncation_is_reported_after_the_inserted_frame() {
+        setup();
+        let mut stack = [0usize; 8];
+        let fp = two_frames(&mut stack);
+        let (n, truncated, out) = with_lr(pc(), fp, fp, lr_in_caller(), 2);
+        assert_eq!(out, [pc() as u64, lr_in_caller() as u64]);
+        assert_eq!(n, 2);
+        assert!(truncated);
     }
 }
