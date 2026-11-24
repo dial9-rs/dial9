@@ -908,6 +908,26 @@ mod worker_pipeline_tests {
         check!(std::fs::read(&gz_path).unwrap() == b"payload");
     }
 
+    #[tokio::test]
+    async fn gzip_releases_unused_output_reservation() {
+        let segment = sealed::SegmentRef::Disk(sealed::SealedSegment {
+            path: "trace.0.bin".into(),
+            index: 0,
+        });
+        let data = SegmentData::new(
+            segment,
+            Payload::from(vec![0u8; 64 * 1024]),
+            HashMap::new(),
+            None,
+        );
+
+        let mut out = GzipCompressor.process(data).await.unwrap();
+        let Ok(bytes) = out.take_payload().into_bytes().try_into_mut() else {
+            panic!("compressed payload should be uniquely owned")
+        };
+        check!(bytes.capacity() == bytes.len());
+    }
+
     /// WriteBackProcessor writes to the original path when no
     /// `write_back_extension` metadata is set.
     #[tokio::test]
